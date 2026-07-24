@@ -1,0 +1,131 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  user
+  admin
+}
+
+enum DocumentStatus {
+  unstart
+  running
+  done
+  fail
+}
+
+enum MessageRole {
+  user
+  assistant
+  tool
+  system
+}
+
+model User {
+  id           String    @id @default(uuid()) @db.Uuid
+  username     String    @unique
+  passwordHash String    @map("password_hash")
+  role         Role      @default(user)
+  disabledAt   DateTime? @map("disabled_at")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  sessions       Session[]
+  knowledgeBases KnowledgeBase[]
+  documents      Document[]
+  conversations  Conversation[]
+
+  @@map("users")
+}
+
+model Session {
+  id         String    @id @default(uuid()) @db.Uuid
+  userId     String    @map("user_id") @db.Uuid
+  tokenHash  String    @unique @map("token_hash")
+  csrfSecret String    @map("csrf_secret")
+  expiresAt  DateTime  @map("expires_at")
+  revokedAt  DateTime? @map("revoked_at")
+  ip         String?
+  userAgent  String?   @map("user_agent")
+  createdAt  DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model KnowledgeBase {
+  id               String   @id @default(uuid()) @db.Uuid
+  ownerUserId      String   @map("owner_user_id") @db.Uuid
+  ragflowDatasetId String   @unique @map("ragflow_dataset_id")
+  name             String
+  description      String   @default("")
+  chunkMethod      String   @default("naive") @map("chunk_method")
+  parserConfig     Json     @default("{}") @map("parser_config")
+  createdAt        DateTime @default(now()) @map("created_at")
+  updatedAt        DateTime @updatedAt @map("updated_at")
+
+  owner     User       @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  documents Document[]
+
+  @@unique([ownerUserId, name])
+  @@index([ownerUserId])
+  @@map("knowledge_bases")
+}
+
+model Document {
+  id                 String         @id @default(uuid()) @db.Uuid
+  knowledgeBaseId    String         @map("knowledge_base_id") @db.Uuid
+  ownerUserId        String         @map("owner_user_id") @db.Uuid
+  ragflowDocumentId  String         @map("ragflow_document_id")
+  name               String
+  sizeBytes          BigInt         @default(0) @map("size_bytes")
+  status             DocumentStatus @default(unstart)
+  progress           Float          @default(0)
+  progressMsg        String?        @map("progress_msg")
+  chunkCount         Int            @default(0) @map("chunk_count")
+  errorMessage       String?        @map("error_message")
+  createdAt          DateTime       @default(now()) @map("created_at")
+  updatedAt          DateTime       @updatedAt @map("updated_at")
+
+  knowledgeBase KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  owner         User          @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+
+  @@index([knowledgeBaseId])
+  @@index([ownerUserId])
+  @@map("documents")
+}
+
+model Conversation {
+  id          String   @id @default(uuid()) @db.Uuid
+  ownerUserId String   @map("owner_user_id") @db.Uuid
+  title       String   @default("New chat")
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  owner    User      @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  messages Message[]
+
+  @@index([ownerUserId])
+  @@map("conversations")
+}
+
+model Message {
+  id             String      @id @default(uuid()) @db.Uuid
+  conversationId String      @map("conversation_id") @db.Uuid
+  role           MessageRole
+  content        String
+  metadata       Json        @default("{}")
+  createdAt      DateTime    @default(now()) @map("created_at")
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId])
+  @@map("messages")
+}

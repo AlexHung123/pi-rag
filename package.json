@@ -1,0 +1,20 @@
+{
+  "name": "pi-rag",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run start:dev -w @pi-rag/api",
+    "dev:web": "npm run dev -w @pi-rag/web",
+    "build": "npm run build -w @pi-rag/api && npm run build -w @pi-rag/web",
+    "db:generate": "npm run prisma:generate -w @pi-rag/api",
+    "db:migrate": "npm run prisma:migrate -w @pi-rag/api",
+    "db:push": "npm run prisma:push -w @pi-rag/api"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
