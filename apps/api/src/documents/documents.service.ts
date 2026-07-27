@@ -120,6 +120,22 @@ export class DocumentsService {
     return this.serialize(updated);
   }
 
+  async stopParse(userId: string, knowledgeBaseId: string, docId: string) {
+    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
+    const doc = await this.getOwned(userId, knowledgeBaseId, docId);
+    await this.ragflow.stopParseDocuments(kb.ragflowDatasetId, [doc.ragflowDocumentId]);
+    const updated = await this.prisma.document.update({
+      where: { id: doc.id },
+      data: {
+        status: 'unstart',
+        progress: 0,
+        progressMsg: 'Parse stopped',
+        errorMessage: null,
+      },
+    });
+    return this.serialize(updated);
+  }
+
   async refreshStatus(userId: string, knowledgeBaseId: string, docId: string) {
     const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
     const doc = await this.getOwned(userId, knowledgeBaseId, docId);

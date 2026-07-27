@@ -11,6 +11,7 @@ type MockDoc = RagflowDocument & {
   buffer?: Buffer;
   chunks: RagflowChunk[];
   parseStartedAt?: number;
+  parseTimer?: ReturnType<typeof setTimeout>;
 };
 
 /**
@@ -71,12 +72,17 @@ export class RagflowMockStore {
     for (const docId of documentIds) {
       const doc = map.get(docId);
       if (!doc) continue;
+      if (doc.parseTimer) {
+        clearTimeout(doc.parseTimer);
+        doc.parseTimer = undefined;
+      }
       doc.run = 'RUNNING';
       doc.progress = 0.1;
       doc.progress_msg = 'Mock parsing...';
       doc.parseStartedAt = Date.now();
       // Simulate async completion after first status poll window
-      setTimeout(() => {
+      doc.parseTimer = setTimeout(() => {
+        doc.parseTimer = undefined;
         const text = (doc.buffer || Buffer.from('')).toString('utf8');
         const pieces = splitText(text || `Content of ${doc.name}`);
         doc.chunks = pieces.map((content, i) => ({
@@ -93,6 +99,25 @@ export class RagflowMockStore {
         doc.progress_msg = 'Mock parse complete';
         doc.status = '1';
       }, 800);
+    }
+  }
+
+  /** Stop parsing for specified documents (cancel in-flight mock parse). */
+  stopParseDocuments(datasetId: string, documentIds: string[]) {
+    const map = this.docsByDataset.get(datasetId);
+    if (!map) throw new Error(`dataset not found: ${datasetId}`);
+    for (const docId of documentIds) {
+      const doc = map.get(docId);
+      if (!doc) continue;
+      if (doc.parseTimer) {
+        clearTimeout(doc.parseTimer);
+        doc.parseTimer = undefined;
+      }
+      doc.run = 'UNSTART';
+      doc.progress = 0;
+      doc.progress_msg = 'Parse stopped';
+      doc.parseStartedAt = undefined;
+      // Keep any chunks already produced; in-flight mock never had partial chunks.
     }
   }
 

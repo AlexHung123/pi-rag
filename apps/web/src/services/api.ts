@@ -196,6 +196,11 @@ export const docApi = {
       `/api/knowledge-bases/${kbId}/documents/${docId}/parse`,
       { method: 'POST' },
     ),
+  stopParse: (kbId: string, docId: string) =>
+    apiFetch<DocumentItem>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/stop-parse`,
+      { method: 'POST' },
+    ),
   preview: (kbId: string, docId: string) =>
     apiFetch<{
       document: DocumentItem;

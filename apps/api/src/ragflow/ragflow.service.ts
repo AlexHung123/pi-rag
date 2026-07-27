@@ -128,6 +128,21 @@ export class RagflowService {
     });
   }
 
+  /**
+   * Stop parsing specified documents.
+   * RAGFlow: DELETE /api/v1/datasets/{dataset_id}/chunks
+   * Body: { document_ids: string[] }
+   */
+  async stopParseDocuments(datasetId: string, documentIds: string[]): Promise<void> {
+    if (this.useMock()) {
+      this.mock.stopParseDocuments(datasetId, documentIds);
+      return;
+    }
+    await this.request('DELETE', `/api/v1/datasets/${datasetId}/chunks`, {
+      body: { document_ids: documentIds },
+    });
+  }
+
   async getDocument(
     datasetId: string,
     documentId: string,

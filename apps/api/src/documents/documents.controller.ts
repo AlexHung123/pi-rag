@@ -67,6 +67,16 @@ export class DocumentsController {
     return this.documents.parse(user.userId, kbId, docId);
   }
 
+  /** Stop parsing a document (RAGFlow DELETE .../chunks with document_ids). */
+  @Post(':docId/stop-parse')
+  async stopParse(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+  ) {
+    return this.documents.stopParse(user.userId, kbId, docId);
+  }
+
   @Get(':docId/chunks')
   async chunks(
     @CurrentUser() user: AuthPrincipal,
