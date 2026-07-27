@@ -61,6 +61,7 @@ export class ChatController {
         id,
         body.content,
         body.knowledgeBaseIds,
+        body.mode === 'fast' ? 'fast' : 'agent',
       )) {
         res.write(`event: ${frame.event}\n`);
         res.write(`data: ${JSON.stringify(frame.data)}\n\n`);

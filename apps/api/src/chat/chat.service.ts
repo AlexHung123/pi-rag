@@ -4,12 +4,16 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AgentService } from '../agent/agent.service';
 import type { CitationSource } from '../agent/agent.tools';
 import { notFound } from '../common/errors';
+import { FastRagService } from '../rag/fast-rag.service';
+
+export type ChatMode = 'agent' | 'fast';
 
 @Injectable()
 export class ChatService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly agent: AgentService,
+    private readonly fastRag: FastRagService,
   ) {}
 
   async list(userId: string) {
@@ -88,17 +92,23 @@ export class ChatService {
     conversationId: string,
     content: string,
     knowledgeBaseIds?: string[],
+    mode: ChatMode = 'agent',
   ) {
     const c = await this.getOwned(userId, conversationId);
     const selectedIds = (knowledgeBaseIds || []).filter(Boolean);
+    const chatMode: ChatMode = mode === 'fast' ? 'fast' : 'agent';
+
+    const userMeta: Record<string, unknown> = {};
+    if (selectedIds.length) userMeta.knowledgeBaseIds = selectedIds;
+    if (chatMode !== 'agent') userMeta.mode = chatMode;
 
     const userMsg = await this.prisma.message.create({
       data: {
         conversationId: c.id,
         role: 'user',
         content,
-        metadata: selectedIds.length
-          ? ({ knowledgeBaseIds: selectedIds } as Prisma.InputJsonValue)
+        metadata: Object.keys(userMeta).length
+          ? (userMeta as Prisma.InputJsonValue)
           : undefined,
       },
     });
@@ -140,28 +150,50 @@ export class ChatService {
     let full = '';
     let sources: CitationSource[] = [];
     try {
-      for await (const ev of this.agent.run(
-        userId,
-        conversationId,
-        history,
-        content,
-        { knowledgeBaseIds: selectedIds },
-      )) {
-        if (ev.type === 'text_delta') {
-          full += ev.delta;
-          yield { event: 'text_delta', data: { delta: ev.delta } };
-        } else if (ev.type === 'tool_start') {
-          yield { event: 'tool_start', data: { name: ev.name } };
-        } else if (ev.type === 'tool_end') {
-          yield { event: 'tool_end', data: { name: ev.name, ok: ev.ok } };
-        } else if (ev.type === 'sources') {
-          sources = ev.sources;
-          yield { event: 'sources', data: { sources: ev.sources } };
-        } else if (ev.type === 'error') {
-          yield { event: 'error', data: { message: ev.message } };
-        } else if (ev.type === 'done') {
-          full = ev.fullText || full;
-          if (ev.sources?.length) sources = ev.sources;
+      if (chatMode === 'fast') {
+        for await (const ev of this.fastRag.run(
+          userId,
+          history,
+          content,
+          selectedIds,
+        )) {
+          if (ev.type === 'text_delta') {
+            full += ev.delta;
+            yield { event: 'text_delta', data: { delta: ev.delta } };
+          } else if (ev.type === 'sources') {
+            sources = ev.sources;
+            yield { event: 'sources', data: { sources: ev.sources } };
+          } else if (ev.type === 'error') {
+            yield { event: 'error', data: { message: ev.message } };
+          } else if (ev.type === 'done') {
+            full = ev.fullText || full;
+            if (ev.sources?.length) sources = ev.sources;
+          }
+        }
+      } else {
+        for await (const ev of this.agent.run(
+          userId,
+          conversationId,
+          history,
+          content,
+          { knowledgeBaseIds: selectedIds },
+        )) {
+          if (ev.type === 'text_delta') {
+            full += ev.delta;
+            yield { event: 'text_delta', data: { delta: ev.delta } };
+          } else if (ev.type === 'tool_start') {
+            yield { event: 'tool_start', data: { name: ev.name } };
+          } else if (ev.type === 'tool_end') {
+            yield { event: 'tool_end', data: { name: ev.name, ok: ev.ok } };
+          } else if (ev.type === 'sources') {
+            sources = ev.sources;
+            yield { event: 'sources', data: { sources: ev.sources } };
+          } else if (ev.type === 'error') {
+            yield { event: 'error', data: { message: ev.message } };
+          } else if (ev.type === 'done') {
+            full = ev.fullText || full;
+            if (ev.sources?.length) sources = ev.sources;
+          }
         }
       }
     } catch (err) {
@@ -173,6 +205,7 @@ export class ChatService {
     const metadata: Record<string, unknown> = {};
     if (sources.length) metadata.sources = sources;
     if (selectedIds.length) metadata.knowledgeBaseIds = selectedIds;
+    if (chatMode !== 'agent') metadata.mode = chatMode;
 
     const assistant = await this.prisma.message.create({
       data: {

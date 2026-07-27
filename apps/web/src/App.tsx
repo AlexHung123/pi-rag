@@ -48,6 +48,15 @@ export default function App() {
   const [error, setError] = useState('');
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
+  const [chatMode, setChatMode] = useState<'agent' | 'fast'>(() => {
+    if (typeof window === 'undefined') return 'agent';
+    try {
+      const v = window.localStorage.getItem('pi-rag.chatMode');
+      return v === 'fast' ? 'fast' : 'agent';
+    } catch {
+      return 'agent';
+    }
+  });
   const [kbPickerOpen, setKbPickerOpen] = useState(false);
   const [locateSource, setLocateSource] = useState<CitationSource | null>(null);
   const [adminDataset, setAdminDataset] = useState<{
@@ -254,6 +263,15 @@ export default function App() {
   const selectAllKbs = () =>
     setSelectedKbIds(knowledgeBases.map((k) => k.id));
 
+  const setChatModePersist = (mode: 'agent' | 'fast') => {
+    setChatMode(mode);
+    try {
+      window.localStorage.setItem('pi-rag.chatMode', mode);
+    } catch {
+      /* ignore */
+    }
+  };
+
   const send = async () => {
     const content = input.trim();
     if (!content || sending) return;
@@ -288,8 +306,15 @@ export default function App() {
       finalMessageId = tempAssistant.id;
       setMessages((prev) => [...prev, tempUser, tempAssistant]);
 
-      const streamOpts =
-        selectedKbIds.length > 0 ? { knowledgeBaseIds: selectedKbIds } : undefined;
+      const streamOpts: {
+        knowledgeBaseIds?: string[];
+        mode?: 'agent' | 'fast';
+      } = {
+        mode: chatMode,
+      };
+      if (selectedKbIds.length > 0) {
+        streamOpts.knowledgeBaseIds = selectedKbIds;
+      }
 
       const runStream = async (id: string) => {
         let sawConversationMissing = false;
@@ -547,6 +572,32 @@ export default function App() {
 
           <div className="input-area">
             <div className="input-stack">
+              <div className="chat-mode-bar" role="group" aria-label="Chat mode">
+                <button
+                  type="button"
+                  className={`chat-mode-btn ${chatMode === 'agent' ? 'active' : ''}`}
+                  onClick={() => setChatModePersist('agent')}
+                  disabled={sending}
+                  title="Agent: tools for semantic, keyword, and document browse"
+                >
+                  智能体
+                </button>
+                <button
+                  type="button"
+                  className={`chat-mode-btn ${chatMode === 'fast' ? 'active' : ''}`}
+                  onClick={() => setChatModePersist('fast')}
+                  disabled={sending}
+                  title="Fast: retrieve once and answer (no tool loop)"
+                >
+                  快速问答
+                </button>
+                {chatMode === 'fast' && selectedKbIds.length === 0 && (
+                  <span className="chat-mode-hint">
+                    快速问答建议先选择知识库
+                  </span>
+                )}
+              </div>
+
               <div className="kb-select-bar" ref={kbPickerRef}>
                 <button
                   type="button"
@@ -657,9 +708,13 @@ export default function App() {
                 <textarea
                   value={input}
                   placeholder={
-                    selectedKbIds.length
-                      ? 'Ask a question about the selected knowledge bases…'
-                      : 'Ask about your knowledge base, or select knowledge bases above…'
+                    chatMode === 'fast'
+                      ? selectedKbIds.length
+                        ? '快速问答：基于所选知识库直接检索回答…'
+                        : '快速问答：未选知识库时为普通对话…'
+                      : selectedKbIds.length
+                        ? 'Ask a question about the selected knowledge bases…'
+                        : 'Ask about your knowledge base, or select knowledge bases above…'
                   }
                   onChange={(e) => setInput(e.target.value)}
                   onKeyDown={(e) => {

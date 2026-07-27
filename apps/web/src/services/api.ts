@@ -543,11 +543,18 @@ export const chatApi = {
   streamMessage: async function* (
     conversationId: string,
     content: string,
-    opts?: { knowledgeBaseIds?: string[] },
+    opts?: { knowledgeBaseIds?: string[]; mode?: 'agent' | 'fast' },
   ): AsyncGenerator<{ event: string; data: Record<string, unknown> }> {
-    const body: { content: string; knowledgeBaseIds?: string[] } = { content };
+    const body: {
+      content: string;
+      knowledgeBaseIds?: string[];
+      mode?: 'agent' | 'fast';
+    } = { content };
     if (opts?.knowledgeBaseIds?.length) {
       body.knowledgeBaseIds = opts.knowledgeBaseIds;
+    }
+    if (opts?.mode === 'fast' || opts?.mode === 'agent') {
+      body.mode = opts.mode;
     }
     const res = await fetch(`/api/conversations/${conversationId}/messages`, {
       method: 'POST',

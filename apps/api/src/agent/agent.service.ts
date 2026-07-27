@@ -17,6 +17,14 @@ import { importEsm } from './import-esm';
 import { createLlmDebugHooks } from './llm-debug';
 import { isLlmConfigured, loadPiModelBundle } from './pi-model';
 import { rewriteQueryForRetrieval } from '../rag/query-rewrite';
+import { mergeCitationSources } from '../rag/evidence';
+
+/** Tools that may attach details.sources for the citation UI. */
+const RETRIEVAL_TOOL_NAMES = new Set([
+  'retrieve_chunks',
+  'keyword_search',
+  'list_document_chunks',
+]);
 
 export type AgentStreamEvent =
   | { type: 'text_delta'; delta: string }
@@ -131,8 +139,9 @@ export class AgentService {
         },
         (nextSources) => {
           if (nextSources.length) {
-            sources = nextSources;
-            push({ type: 'sources', sources: nextSources });
+            // Merge across multiple retrieval tools in one turn; re-index [n].
+            sources = mergeCitationSources(sources, nextSources);
+            push({ type: 'sources', sources });
           }
         },
       );
@@ -224,15 +233,13 @@ export class AgentService {
         push({ type: 'tool_start', name: String(event.toolName || 'tool') });
         break;
       case 'tool_execution_end': {
+        const toolName = String(event.toolName || 'tool');
         push({
           type: 'tool_end',
-          name: String(event.toolName || 'tool'),
+          name: toolName,
           ok: !event.isError,
         });
-        if (
-          !event.isError &&
-          String(event.toolName || '') === 'retrieve_chunks'
-        ) {
+        if (!event.isError && RETRIEVAL_TOOL_NAMES.has(toolName)) {
           const extracted = extractSourcesFromToolResult(event.result);
           if (extracted.length) onSources(extracted);
         }
@@ -406,25 +413,34 @@ function extractSourcesFromToolResult(result: unknown): CitationSource[] {
   return [];
 }
 
-/** Scan agent message history for the latest retrieve_chunks tool result. */
+/**
+ * Scan agent message history for retrieval tool results (this turn).
+ * Merges sources from retrieve_chunks / keyword_search / list_document_chunks.
+ */
 function extractSourcesFromAgentMessages(
   messages: Array<{ role: string; content?: unknown; details?: unknown; toolName?: string }>,
 ): CitationSource[] {
+  // Walk from the end; stop when we leave the latest assistant turn's tools.
+  const batches: CitationSource[][] = [];
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (!m) continue;
     const role = String(m.role || '');
-    const toolName = String(m.toolName || '');
+    if (role === 'assistant' && batches.length) break;
+    if (role === 'user' && batches.length) break;
     if (role === 'toolResult' || role === 'tool') {
-      if (toolName && toolName !== 'retrieve_chunks') continue;
+      const toolName = String(m.toolName || '');
+      if (toolName && !RETRIEVAL_TOOL_NAMES.has(toolName)) continue;
+      // If toolName missing, still try to parse details.sources
       const fromDetails = extractSourcesFromToolResult({
         details: m.details,
         content: m.content,
       });
-      if (fromDetails.length) return fromDetails;
+      if (fromDetails.length) batches.push(fromDetails);
     }
   }
-  return [];
+  if (!batches.length) return [];
+  return mergeCitationSources(...batches);
 }
 
 function messageToText(message: unknown): string {

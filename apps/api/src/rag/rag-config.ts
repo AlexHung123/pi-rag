@@ -46,6 +46,29 @@ export type RagRetrievalConfig = {
   multiQueryMax: number;
   /** LLM query rewrite before agent prompt (multi-turn). */
   queryRewriteEnabled: boolean;
+  /**
+   * Keyword path: low vector weight → prefer term/ES similarity
+   * (RAGFlow: score = w * vector + (1-w) * term).
+   */
+  keywordVectorWeight: number;
+  /** Slightly lower threshold for literal / keyword hits. */
+  keywordSimilarityThreshold: number;
+  /**
+   * Pass RAGFlow `keyword: true` so retrieval uses ElasticSearch keyword matching
+   * in addition to hybrid ranking.
+   */
+  keywordEnableEs: boolean;
+  /** Total char budget for list_document_chunks evidence. */
+  listDocCharBudget: number;
+  /** Hard cap on pageSize for list_document_chunks. */
+  listDocPageSizeMax: number;
+  /**
+   * P1d: attach previous/next chunk from listChunks order for top hits.
+   * Uses document list order (stable); fail-open if chunk not found.
+   */
+  adjacentExpandEnabled: boolean;
+  /** Max primary hits to expand with neighbors. */
+  adjacentExpandMaxHits: number;
 };
 
 export function getRagRetrievalConfig(): RagRetrievalConfig {
@@ -71,5 +94,27 @@ export function getRagRetrievalConfig(): RagRetrievalConfig {
     multiQueryEnabled: envBool('RAG_MULTI_QUERY', true),
     multiQueryMax: Math.min(5, Math.max(1, envInt('RAG_MULTI_QUERY_MAX', 3))),
     queryRewriteEnabled: envBool('RAG_QUERY_REWRITE', true),
+    keywordVectorWeight: Math.min(
+      1,
+      Math.max(0, envFloat('RAG_KEYWORD_VECTOR_WEIGHT', 0.1)),
+    ),
+    keywordSimilarityThreshold: Math.min(
+      1,
+      Math.max(0, envFloat('RAG_KEYWORD_SIMILARITY_THRESHOLD', 0.1)),
+    ),
+    keywordEnableEs: envBool('RAG_KEYWORD_ENABLE_ES', true),
+    listDocCharBudget: Math.min(
+      20_000,
+      Math.max(1000, envInt('RAG_LIST_DOC_CHAR_BUDGET', 7000)),
+    ),
+    listDocPageSizeMax: Math.min(
+      50,
+      Math.max(1, envInt('RAG_LIST_DOC_PAGE_SIZE_MAX', 20)),
+    ),
+    adjacentExpandEnabled: envBool('RAG_ADJACENT_EXPAND', true),
+    adjacentExpandMaxHits: Math.min(
+      10,
+      Math.max(1, envInt('RAG_ADJACENT_EXPAND_MAX_HITS', 3)),
+    ),
   };
 }
