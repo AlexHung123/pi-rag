@@ -1,4 +1,10 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from 'react';
 import { useAuth } from './contexts/AuthContext';
 import Login from './components/Login';
 import Markdown from './components/Markdown';
@@ -6,6 +12,10 @@ import KnowledgePanel from './components/KnowledgePanel';
 import AppSidebar, { type WorkspaceView } from './components/AppSidebar';
 import SourceReferences from './components/SourceReferences';
 import DocumentLocateDrawer from './components/DocumentLocateDrawer';
+import AdminDatasetsPanel from './components/admin/AdminDatasetsPanel';
+import AdminDocumentsPanel from './components/admin/AdminDocumentsPanel';
+import AdminTasksPanel from './components/admin/AdminTasksPanel';
+import AdminUsersPanel from './components/admin/AdminUsersPanel';
 import {
   chatApi,
   kbApi,
@@ -39,6 +49,10 @@ export default function App() {
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
   const [kbPickerOpen, setKbPickerOpen] = useState(false);
   const [locateSource, setLocateSource] = useState<CitationSource | null>(null);
+  const [adminDataset, setAdminDataset] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const kbPickerRef = useRef<HTMLDivElement>(null);
   /** Monotonic id so slower / out-of-order list responses cannot wipe newer state. */
@@ -58,7 +72,7 @@ export default function App() {
       setActiveId((current) => {
         if (current && !items.some((c) => c.id === current)) {
           // Defer message clear to avoid setState-during-setState.
-          queuePromise.resolve().then(() => {
+          Promise.resolve().then(() => {
             setMessages((msgs) => (msgs.length ? [] : msgs));
           });
           return null;
@@ -75,15 +89,36 @@ export default function App() {
     return res.items;
   }, []);
 
+  // App stays mounted across logout/login, so session UI must be wiped when identity
+  // changes — otherwise the previous account's conversation list flashes briefly.
+  const userId = user?.id ?? null;
+  useLayoutEffect(() => {
+    listRequestIdRef.current += 1;
+    setConversations([]);
+    setActiveId(null);
+    setMessages([]);
+    setInput('');
+    setError('');
+    setToolHint('');
+    setKnowledgeBases([]);
+    setSelectedKbIds([]);
+    setKbPickerOpen(false);
+    setLocateSource(null);
+    setAdminDataset(null);
+    setWorkspace('chat');
+    setSending(false);
+    sendingRef.current = false;
+  }, [userId]);
+
   useEffect(() => {
-    if (!user) return;
+    if (!userId) return;
     refreshConversations().catch((e) =>
       setError(e instanceof Error ? e.message : String(e)),
     );
     refreshKnowledgeBases().catch(() => {
       /* non-blocking for chat */
     });
-  }, [user, refreshConversations, refreshKnowledgeBases]);
+  }, [userId, refreshConversations, refreshKnowledgeBases]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -174,6 +209,16 @@ export default function App() {
   };
 
   const changeWorkspace = (next: WorkspaceView) => {
+    // Non-admins cannot open admin workspaces
+    if (
+      user?.role !== 'admin' &&
+      (next === 'admin-datasets' ||
+        next === 'admin-documents' ||
+        next === 'admin-tasks' ||
+        next === 'admin-users')
+    ) {
+      return;
+    }
     setWorkspace(next);
     if (next === 'chat' && !sidebarOpen) {
       setSidebarOpen(true);
@@ -182,6 +227,20 @@ export default function App() {
       void refreshKnowledgeBases();
     }
   };
+
+  // If role is lost or user is not admin, leave admin workspaces
+  useEffect(() => {
+    if (
+      user &&
+      user.role !== 'admin' &&
+      (workspace === 'admin-datasets' ||
+        workspace === 'admin-documents' ||
+        workspace === 'admin-tasks' ||
+        workspace === 'admin-users')
+    ) {
+      setWorkspace('chat');
+    }
+  }, [user, workspace]);
 
   const toggleKb = (id: string) => {
     setSelectedKbIds((prev) =>
@@ -375,6 +434,7 @@ export default function App() {
           void deleteChat(id);
         }}
         username={user.username}
+        isAdmin={user.role === 'admin'}
         onLogout={logout}
       />
 
@@ -388,6 +448,30 @@ export default function App() {
       {workspace === 'knowledge' ? (
         <div className="app-workspace knowledge-workspace">
           <KnowledgePanel onBackToChat={() => changeWorkspace('chat')} />
+        </div>
+      ) : workspace === 'admin-datasets' && user.role === 'admin' ? (
+        <div className="app-workspace admin-workspace">
+          <AdminDatasetsPanel
+            onOpenDocuments={(ds) => {
+              setAdminDataset(ds);
+              setWorkspace('admin-documents');
+            }}
+          />
+        </div>
+      ) : workspace === 'admin-documents' && user.role === 'admin' ? (
+        <div className="app-workspace admin-workspace">
+          <AdminDocumentsPanel
+            dataset={adminDataset}
+            onBack={() => changeWorkspace('admin-datasets')}
+          />
+        </div>
+      ) : workspace === 'admin-tasks' && user.role === 'admin' ? (
+        <div className="app-workspace admin-workspace">
+          <AdminTasksPanel />
+        </div>
+      ) : workspace === 'admin-users' && user.role === 'admin' ? (
+        <div className="app-workspace admin-workspace">
+          <AdminUsersPanel />
         </div>
       ) : (
         <main

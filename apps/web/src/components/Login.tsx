@@ -2,8 +2,7 @@ import React, { useState } from 'react';
 import { useAuth } from '../contexts/AuthContext';
 
 export default function Login() {
-  const { login, register, allowRegister, error, clearError } = useAuth();
-  const [mode, setMode] = useState<'login' | 'register'>('login');
+  const { login, error, clearError } = useAuth();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
@@ -15,8 +14,7 @@ export default function Login() {
     clearError();
     setBusy(true);
     try {
-      if (mode === 'login') await login(username, password);
-      else await register(username, password);
+      await login(username, password);
     } catch (err) {
       setLocalError(err instanceof Error ? err.message : 'Failed');
     } finally {
@@ -28,7 +26,9 @@ export default function Login() {
     <div className="login-page">
       <form className="login-card" onSubmit={onSubmit}>
         <h1>CSB Knowledge Portal</h1>
-        <p className="subtitle">Private knowledge bases · upload, chunk, and ask with isolation per user</p>
+        <p className="subtitle">
+          Private knowledge bases · upload, chunk, and ask with isolation per user
+        </p>
 
         {(localError || error) && (
           <p className="error-text">{localError || error}</p>
@@ -52,7 +52,7 @@ export default function Login() {
             type="password"
             value={password}
             onChange={(e) => setPassword(e.target.value)}
-            autoComplete={mode === 'login' ? 'current-password' : 'new-password'}
+            autoComplete="current-password"
             required
             minLength={6}
           />
@@ -60,39 +60,9 @@ export default function Login() {
 
         <div className="login-actions">
           <button className="btn" type="submit" disabled={busy}>
-            {busy ? 'Please wait…' : mode === 'login' ? 'Sign in' : 'Create account'}
+            {busy ? 'Please wait…' : 'Sign in'}
           </button>
         </div>
-
-        {allowRegister && (
-          <p style={{ marginTop: 16, color: 'var(--text-secondary)', fontSize: '0.9rem' }}>
-            {mode === 'login' ? (
-              <>
-                No account?{' '}
-                <button
-                  type="button"
-                  className="btn-ghost"
-                  onClick={() => setMode('register')}
-                  style={{ padding: 0 }}
-                >
-                  Register
-                </button>
-              </>
-            ) : (
-              <>
-                Already registered?{' '}
-                <button
-                  type="button"
-                  className="btn-ghost"
-                  onClick={() => setMode('login')}
-                  style={{ padding: 0 }}
-                >
-                  Sign in
-                </button>
-              </>
-            )}
-          </p>
-        )}
       </form>
     </div>
   );

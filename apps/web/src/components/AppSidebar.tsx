@@ -2,6 +2,9 @@ import React, { useMemo, useState } from 'react';
 import {
   BookOpen,
   Database,
+  FileStack,
+  FolderOpen,
+  ListTodo,
   LogOut,
   MessageSquare,
   MoreHorizontal,
@@ -10,10 +13,17 @@ import {
   Plus,
   Search,
   Trash2,
+  Users,
 } from 'lucide-react';
 import type { Conversation } from '../services/api';
 
-export type WorkspaceView = 'chat' | 'knowledge';
+export type WorkspaceView =
+  | 'chat'
+  | 'knowledge'
+  | 'admin-datasets'
+  | 'admin-documents'
+  | 'admin-tasks'
+  | 'admin-users';
 
 const formatDateTime = (value: string) =>
   new Date(value).toLocaleString('en-US', {
@@ -34,6 +44,7 @@ type AppSidebarProps = {
   onCreateConversation: () => void;
   onDeleteConversation: (id: string) => void;
   username: string;
+  isAdmin?: boolean;
   onLogout: () => void | Promise<void>;
 };
 
@@ -48,6 +59,7 @@ export default function AppSidebar({
   onCreateConversation,
   onDeleteConversation,
   username,
+  isAdmin = false,
   onLogout,
 }: AppSidebarProps) {
   const [filter, setFilter] = useState('');
@@ -66,6 +78,30 @@ export default function AppSidebar({
   }> = [
     { id: 'chat', label: 'Chat', icon: <MessageSquare size={20} /> },
     { id: 'knowledge', label: 'Knowledge', icon: <BookOpen size={20} /> },
+    ...(isAdmin
+      ? ([
+          {
+            id: 'admin-datasets',
+            label: 'Datasets',
+            icon: <FolderOpen size={20} />,
+          },
+          {
+            id: 'admin-documents',
+            label: 'Documents',
+            icon: <FileStack size={20} />,
+          },
+          {
+            id: 'admin-tasks',
+            label: 'Tasks',
+            icon: <ListTodo size={20} />,
+          },
+          {
+            id: 'admin-users',
+            label: 'Users',
+            icon: <Users size={20} />,
+          },
+        ] as const)
+      : []),
   ];
 
   return (

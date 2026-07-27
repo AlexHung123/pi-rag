@@ -67,6 +67,64 @@ export async function apiFetch<T>(
 
 export type User = { id: string; username: string; role: string };
 
+export type AdminDataset = {
+  id: string;
+  name: string;
+  description: string;
+  chunkMethod: string;
+  documentCount: number;
+  chunkCount: number;
+  ownerUserId: string;
+  ownerUsername: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AdminDocument = {
+  id: string;
+  knowledgeBaseId: string;
+  knowledgeBaseName?: string;
+  ownerUserId: string;
+  ownerUsername?: string;
+  name: string;
+  sizeBytes: number;
+  status: 'unstart' | 'running' | 'done' | 'fail';
+  progress: number;
+  progressMsg?: string | null;
+  chunkCount: number;
+  errorMessage?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AdminTaskStats = {
+  total: number;
+  running: number;
+  unstart: number;
+  done: number;
+  fail: number;
+  cancel: number;
+};
+
+export type AdminUser = {
+  id: string;
+  username: string;
+  role: string;
+  disabled: boolean;
+  datasetCount: number;
+  documentCount: number;
+  conversationCount: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Paged<T> = {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+};
+
 export type KnowledgeBase = {
   id: string;
   name: string;
@@ -251,6 +309,132 @@ export const docApi = {
     apiFetch<{ ok: boolean }>(
       `/api/knowledge-bases/${kbId}/documents/${docId}`,
       { method: 'DELETE' },
+    ),
+};
+
+function qs(params: Record<string, string | number | undefined | null>) {
+  const sp = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null || v === '') continue;
+    sp.set(k, String(v));
+  }
+  const s = sp.toString();
+  return s ? `?${s}` : '';
+}
+
+export const adminApi = {
+  listDatasets: (params?: {
+    page?: number;
+    pageSize?: number;
+    name?: string;
+    owner?: string;
+    chunkMethod?: string;
+  }) =>
+    apiFetch<Paged<AdminDataset>>(
+      `/api/admin/datasets${qs(params || {})}`,
+    ),
+  batchDeleteDatasets: (ids: string[]) =>
+    apiFetch<{ ok: boolean; deleted: number }>(
+      '/api/admin/datasets/batch-delete',
+      { method: 'POST', body: JSON.stringify({ ids }) },
+    ),
+  listDocuments: (
+    kbId: string,
+    params?: {
+      page?: number;
+      pageSize?: number;
+      keywords?: string;
+      status?: string;
+    },
+  ) =>
+    apiFetch<Paged<AdminDocument>>(
+      `/api/admin/datasets/${kbId}/documents${qs(params || {})}`,
+    ),
+  uploadDocument: async (kbId: string, file: File) => {
+    const form = new FormData();
+    form.append('file', file);
+    return apiFetch<AdminDocument>(
+      `/api/admin/datasets/${kbId}/documents/upload`,
+      { method: 'POST', body: form },
+    );
+  },
+  parseDocuments: (kbId: string, documentIds: string[]) =>
+    apiFetch<{ ok: boolean; count: number }>(
+      `/api/admin/datasets/${kbId}/documents/parse`,
+      { method: 'POST', body: JSON.stringify({ documentIds }) },
+    ),
+  stopParseDocuments: (kbId: string, documentIds: string[]) =>
+    apiFetch<{ ok: boolean; count: number }>(
+      `/api/admin/datasets/${kbId}/documents/stop-parse`,
+      { method: 'POST', body: JSON.stringify({ documentIds }) },
+    ),
+  batchDeleteDocuments: (kbId: string, ids: string[]) =>
+    apiFetch<{ ok: boolean; deleted: number }>(
+      `/api/admin/datasets/${kbId}/documents/batch-delete`,
+      { method: 'POST', body: JSON.stringify({ ids }) },
+    ),
+  listTasks: (params?: {
+    page?: number;
+    pageSize?: number;
+    docName?: string;
+    datasetName?: string;
+    owner?: string;
+    status?: string;
+  }) => apiFetch<Paged<AdminDocument>>(`/api/admin/tasks${qs(params || {})}`),
+  taskStats: () => apiFetch<AdminTaskStats>('/api/admin/tasks/stats'),
+  batchParseTasks: (
+    tasks: Array<{ knowledgeBaseId: string; documentIds: string[] }>,
+  ) =>
+    apiFetch<{ ok: boolean; count: number }>(
+      '/api/admin/tasks/batch-parse',
+      { method: 'POST', body: JSON.stringify({ tasks }) },
+    ),
+  batchStopTasks: (
+    tasks: Array<{ knowledgeBaseId: string; documentIds: string[] }>,
+  ) =>
+    apiFetch<{ ok: boolean; count: number }>(
+      '/api/admin/tasks/batch-stop',
+      { method: 'POST', body: JSON.stringify({ tasks }) },
+    ),
+  retryFailedTasks: () =>
+    apiFetch<{ ok: boolean; retried: number }>(
+      '/api/admin/tasks/retry-failed',
+      { method: 'POST', body: JSON.stringify({}) },
+    ),
+  listUsers: (params?: {
+    page?: number;
+    pageSize?: number;
+    keyword?: string;
+    status?: string;
+  }) => apiFetch<Paged<AdminUser>>(`/api/admin/users${qs(params || {})}`),
+  createUser: (body: {
+    username: string;
+    password: string;
+    role?: string;
+  }) =>
+    apiFetch<AdminUser>('/api/admin/users', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  setUserStatus: (id: string, disabled: boolean) =>
+    apiFetch<{ id: string; username: string; role: string; disabled: boolean }>(
+      `/api/admin/users/${id}/status`,
+      { method: 'PATCH', body: JSON.stringify({ disabled }) },
+    ),
+  setUserRole: (id: string, role: string) =>
+    apiFetch<{ id: string; username: string; role: string; disabled: boolean }>(
+      `/api/admin/users/${id}/role`,
+      { method: 'PATCH', body: JSON.stringify({ role }) },
+    ),
+  setUserPassword: (id: string, password: string) =>
+    apiFetch<{ ok: boolean }>(`/api/admin/users/${id}/password`, {
+      method: 'PATCH',
+      body: JSON.stringify({ password }),
+    }),
+  batchDeleteUsers: (ids: string[]) =>
+    apiFetch<{ ok: boolean; deleted: number }>(
+      '/api/admin/users/batch-delete',
+      { method: 'POST', body: JSON.stringify({ ids }) },
     ),
 };
 
