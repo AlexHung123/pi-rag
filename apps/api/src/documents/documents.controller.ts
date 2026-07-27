@@ -102,7 +102,7 @@ export class DocumentsController {
     return this.documents.preview(user.userId, kbId, docId);
   }
 
-  /** Proxy original file from RAGFlow for inline preview (PDF/text/image). */
+  /** Proxy original file from RAGFlow for inline preview (PDF/text/image/Office). */
   @Get(':docId/file')
   async file(
     @CurrentUser() user: AuthPrincipal,

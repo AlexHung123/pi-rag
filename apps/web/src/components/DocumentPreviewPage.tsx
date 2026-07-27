@@ -1,10 +1,15 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react';
 import {
   docApi,
   type ChunkItem,
   type DocumentItem,
 } from '../services/api';
+import { fileKind } from '../utils/fileKind';
 import PdfHighlightViewer, { positionsToBoxes } from './PdfHighlightViewer';
+
+const ExcelPreview = lazy(() => import('./office/ExcelPreview'));
+const PptPreview = lazy(() => import('./office/PptPreview'));
+const DocxPreview = lazy(() => import('./office/DocxPreview'));
 
 function formatBytes(n: number) {
   if (n < 1024) return `${n} B`;
@@ -19,17 +24,6 @@ function formatTime(iso: string) {
   } catch {
     return iso;
   }
-}
-
-function fileKind(name: string): 'pdf' | 'image' | 'text' | 'html' | 'other' {
-  const ext = name.split('.').pop()?.toLowerCase() || '';
-  if (ext === 'pdf') return 'pdf';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image';
-  if (['html', 'htm'].includes(ext)) return 'html';
-  if (['txt', 'md', 'markdown', 'csv', 'json', 'log', 'xml', 'yml', 'yaml'].includes(ext)) {
-    return 'text';
-  }
-  return 'other';
 }
 
 function looksLikeHtml(s: string) {
@@ -241,6 +235,21 @@ export default function DocumentPreviewPage({
               <div className="doc-preview-image-wrap">
                 <img src={fileUrl} alt={document.name} />
               </div>
+            )}
+            {!fileLoading && !fileError && kind === 'excel' && fileUrl && (
+              <Suspense fallback={<p className="empty-hint">Loading spreadsheet viewer…</p>}>
+                <ExcelPreview url={fileUrl} />
+              </Suspense>
+            )}
+            {!fileLoading && !fileError && kind === 'ppt' && fileUrl && (
+              <Suspense fallback={<p className="empty-hint">Loading presentation viewer…</p>}>
+                <PptPreview url={fileUrl} />
+              </Suspense>
+            )}
+            {!fileLoading && !fileError && kind === 'docx' && fileUrl && (
+              <Suspense fallback={<p className="empty-hint">Loading Word viewer…</p>}>
+                <DocxPreview url={fileUrl} />
+              </Suspense>
             )}
             {!fileLoading && !fileError && fileHtml !== null && (
               <div

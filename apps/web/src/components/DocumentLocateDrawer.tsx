@@ -1,22 +1,16 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { Suspense, lazy, useEffect, useMemo, useState } from 'react';
 import {
   docApi,
   type CitationSource,
   type ChunkItem,
   type DocumentItem,
 } from '../services/api';
+import { fileKind } from '../utils/fileKind';
 import PdfHighlightViewer, { positionsToBoxes } from './PdfHighlightViewer';
 
-function fileKind(name: string): 'pdf' | 'image' | 'text' | 'html' | 'other' {
-  const ext = name.split('.').pop()?.toLowerCase() || '';
-  if (ext === 'pdf') return 'pdf';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image';
-  if (['html', 'htm'].includes(ext)) return 'html';
-  if (['txt', 'md', 'markdown', 'csv', 'json', 'log', 'xml', 'yml', 'yaml'].includes(ext)) {
-    return 'text';
-  }
-  return 'other';
-}
+const ExcelPreview = lazy(() => import('./office/ExcelPreview'));
+const PptPreview = lazy(() => import('./office/PptPreview'));
+const DocxPreview = lazy(() => import('./office/DocxPreview'));
 
 function escapeHtml(s: string) {
   return s
@@ -248,6 +242,21 @@ export default function DocumentLocateDrawer({
                 <div className="doc-preview-image-wrap">
                   <img src={fileUrl} alt={title} />
                 </div>
+              )}
+              {!loading && !error && kind === 'excel' && fileUrl && (
+                <Suspense fallback={<p className="empty-hint">Loading spreadsheet viewer…</p>}>
+                  <ExcelPreview url={fileUrl} />
+                </Suspense>
+              )}
+              {!loading && !error && kind === 'ppt' && fileUrl && (
+                <Suspense fallback={<p className="empty-hint">Loading presentation viewer…</p>}>
+                  <PptPreview url={fileUrl} />
+                </Suspense>
+              )}
+              {!loading && !error && kind === 'docx' && fileUrl && (
+                <Suspense fallback={<p className="empty-hint">Loading Word viewer…</p>}>
+                  <DocxPreview url={fileUrl} />
+                </Suspense>
               )}
               {!loading && !error && fileHtml !== null && (
                 <div

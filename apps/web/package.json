@@ -9,7 +9,10 @@
     "preview": "vite preview --host 0.0.0.0 --port 5173"
   },
   "dependencies": {
+    "@extend-ai/react-docx": "^0.6.7",
+    "@js-preview/excel": "^1.7.14",
     "lucide-react": "^0.468.0",
+    "pptx-preview": "^1.0.7",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-markdown": "^10.1.0",
