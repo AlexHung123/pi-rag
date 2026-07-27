@@ -9,11 +9,19 @@ export type PooledAgent = {
   waitForIdle: () => Promise<void>;
   abort: () => void;
   state: {
+    model?: { id?: string; baseUrl?: string; provider?: string };
     messages: Array<{ role: string; content?: unknown; errorMessage?: string }>;
     errorMessage?: string;
     isStreaming: boolean;
   };
   sessionId?: string;
+  /** pi-agent-core: inspect/replace OpenAI chat.completions body before send */
+  onPayload?: (payload: unknown, model?: unknown) => unknown;
+  /** pi-agent-core: HTTP status after response headers */
+  onResponse?: (
+    response: { status: number; headers: Record<string, string> },
+    model?: unknown,
+  ) => void;
 };
 
 export type AgentPoolEvent = {

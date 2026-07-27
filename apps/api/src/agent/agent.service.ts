@@ -14,6 +14,7 @@ import {
   type CitationSource,
 } from './agent.tools';
 import { importEsm } from './import-esm';
+import { createLlmDebugHooks } from './llm-debug';
 import { isLlmConfigured, loadPiModelBundle } from './pi-model';
 
 export type AgentStreamEvent =
@@ -125,10 +126,24 @@ export class AgentService {
       );
     });
 
+    // Capture exact chat/completions payload for gateway 500 debugging
+    const llmDebug = createLlmDebugHooks({
+      conversationId,
+      baseUrl: String(
+        session.agent.state.model?.baseUrl || process.env.OPENAI_BASE_URL || '',
+      ),
+      modelId: String(
+        session.agent.state.model?.id || process.env.OPENAI_MODEL || '',
+      ),
+    });
+    // pi-agent-core reads these from the Agent instance each loop turn
+    session.agent.onPayload = llmDebug.onPayload;
+    session.agent.onResponse = llmDebug.onResponse;
+
     const promptPromise = session.agent
       .prompt(promptText)
       .catch((err: unknown) => {
-        const message = err instanceof Error ? err.message : String(err);
+        const message = llmDebug.recordError(err);
         this.logger.warn(`agent.prompt failed: ${message}`);
         push({ type: 'error', message });
       })
@@ -162,8 +177,11 @@ export class AgentService {
           '';
       }
       if (session.agent.state.errorMessage && !fullText) {
-        yield { type: 'error', message: session.agent.state.errorMessage };
-        fullText = session.agent.state.errorMessage;
+        const message = llmDebug.recordError(
+          new Error(session.agent.state.errorMessage),
+        );
+        yield { type: 'error', message };
+        fullText = message;
       }
 
       // Fallback: recover citation sources from tool results in agent history
