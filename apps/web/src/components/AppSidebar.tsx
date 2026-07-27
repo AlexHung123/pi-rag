@@ -1,5 +1,6 @@
 import React, { useMemo, useState } from 'react';
 import {
+  Activity,
   BookOpen,
   Database,
   FileStack,
@@ -23,7 +24,8 @@ export type WorkspaceView =
   | 'admin-datasets'
   | 'admin-documents'
   | 'admin-tasks'
-  | 'admin-users';
+  | 'admin-users'
+  | 'admin-agent-sessions';
 
 const formatDateTime = (value: string) =>
   new Date(value).toLocaleString('en-US', {
@@ -99,6 +101,11 @@ export default function AppSidebar({
             id: 'admin-users',
             label: 'Users',
             icon: <Users size={20} />,
+          },
+          {
+            id: 'admin-agent-sessions',
+            label: 'Agents',
+            icon: <Activity size={20} />,
           },
         ] as const)
       : []),

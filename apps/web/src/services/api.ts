@@ -118,6 +118,29 @@ export type AdminUser = {
   updatedAt: string;
 };
 
+export type AdminAgentSession = {
+  conversationId: string;
+  conversationTitle: string;
+  userId: string;
+  ownerUsername: string;
+  busy: boolean;
+  isStreaming: boolean;
+  messageCount: number;
+  dbMessageCount: number | null;
+  modelId: string | null;
+  modelProvider: string | null;
+  lastUsedAt: string;
+  conversationUpdatedAt: string | null;
+};
+
+export type AdminAgentSessionStats = {
+  size: number;
+  maxSessions: number;
+  busy: number;
+  idle: number;
+  ttlMs: number;
+};
+
 export type Paged<T> = {
   items: T[];
   total: number;
@@ -435,6 +458,22 @@ export const adminApi = {
     apiFetch<{ ok: boolean; deleted: number }>(
       '/api/admin/users/batch-delete',
       { method: 'POST', body: JSON.stringify({ ids }) },
+    ),
+  listAgentSessions: (params?: {
+    page?: number;
+    pageSize?: number;
+    keyword?: string;
+    status?: string;
+  }) =>
+    apiFetch<
+      Paged<AdminAgentSession> & { stats: AdminAgentSessionStats }
+    >(`/api/admin/agent-sessions${qs(params || {})}`),
+  agentSessionStats: () =>
+    apiFetch<AdminAgentSessionStats>('/api/admin/agent-sessions/stats'),
+  disposeAgentSessions: (conversationIds: string[]) =>
+    apiFetch<{ ok: boolean; disposed: number }>(
+      '/api/admin/agent-sessions/batch-dispose',
+      { method: 'POST', body: JSON.stringify({ conversationIds }) },
     ),
 };
 

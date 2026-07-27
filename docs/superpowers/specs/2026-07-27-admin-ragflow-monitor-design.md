@@ -18,7 +18,7 @@ These views must not be visible or callable by non-admin users.
 
 ## Goals
 
-- Four admin-only workspace tabs: **Datasets**, **Documents**, **Tasks**, **Users**
+- Five admin-only workspace tabs: **Datasets**, **Documents**, **Tasks**, **Users**, **Agents** (live agent session pool)
 - Full management parity with ragflow-admin where it maps cleanly onto pi-rag data
 - Data from **pi-rag Postgres + existing RagflowService** (no RAGFlow MySQL dependency)
 - Enforce `role === 'admin'` on both UI and `/api/admin/*` APIs
@@ -63,6 +63,7 @@ Admin-only items on the existing left rail (below Knowledge):
 | `admin-documents` | Documents | file list          |
 | `admin-tasks`     | Tasks     | list / queue       |
 | `admin-users`     | Users     | users              |
+| `admin-agent-sessions` | Agents | activity / pulse   |
 
 `WorkspaceView` extends to include these four ids. Switching away from chat keeps conversation sidebar behavior unchanged (conversation panel only for `chat`).
 
@@ -196,6 +197,20 @@ Auto-refresh while any task is `running`.
 - Reset password: set new password hash
 - Delete / batch delete: cascade sessions and owned data via Prisma relations; also delete RAGFlow datasets for owned KBs when practical
 
+### 5. Agents (active agent sessions)
+
+Live view of the in-process `AgentSessionPool` (not Postgres). Empty after API restart.
+
+**Summary cards:** Active size, Busy, Idle, Capacity (`size/maxSessions`)
+
+**Toolbar:** Search (title / owner / id / model), filter Busy|Idle, Dispose selected, Refresh
+
+**Columns:** Conversation (+ short id), Owner, Status (Busy/Streaming/Idle), Model, Agent msgs, DB msgs, Last used, Dispose
+
+**Actions:** Dispose one or batch — aborts busy agents and removes pool entries (next chat rebuilds from DB).
+
+Auto-refresh ~3s while any session is busy/streaming.
+
 ## Backend API
 
 Base path: `/api/admin`  
@@ -238,6 +253,14 @@ Guards: `AuthGuard` + `AdminGuard`
 | PATCH | `/users/:id/role` | `{ role: 'user' \| 'admin' }` |
 | PATCH | `/users/:id/password` | `{ password: string }` |
 | POST | `/users/batch-delete` | `{ ids: string[] }` |
+
+### Agent sessions
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/agent-sessions` | Query: `page`, `pageSize`, `keyword`, `status` (`busy`\|`idle`) → `{ items, total, stats }` |
+| GET | `/agent-sessions/stats` | `{ size, maxSessions, busy, idle, ttlMs }` |
+| POST | `/agent-sessions/batch-dispose` | `{ conversationIds: string[] }` |
 
 Response field naming: camelCase JSON consistent with existing portal APIs.
 

@@ -229,4 +229,31 @@ export class AdminController {
   ) {
     return this.admin.batchDeleteUsers(actor.userId, body.ids || []);
   }
+
+  // ── Agent sessions (live pool) ──────────────────────────────────────────
+
+  @Get('agent-sessions')
+  listAgentSessions(
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('keyword') keyword?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.admin.listAgentSessions({
+      page: page ? Number(page) : undefined,
+      pageSize: pageSize ? Number(pageSize) : undefined,
+      keyword,
+      status,
+    });
+  }
+
+  @Get('agent-sessions/stats')
+  agentSessionStats() {
+    return this.admin.agentSessionStats();
+  }
+
+  @Post('agent-sessions/batch-dispose')
+  disposeAgentSessions(@Body() body: { conversationIds?: string[] }) {
+    return this.admin.disposeAgentSessions(body.conversationIds || []);
+  }
 }

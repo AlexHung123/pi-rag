@@ -3,6 +3,7 @@ import { DocumentStatus, Role } from '@prisma/client';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { RagflowService } from '../ragflow/ragflow.service';
+import { AgentSessionPool } from '../agent/agent-session.pool';
 import { badRequest, notFound } from '../common/errors';
 
 const BCRYPT_ROUNDS = 10;
@@ -18,6 +19,7 @@ export class AdminService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly ragflow: RagflowService,
+    private readonly agentPool: AgentSessionPool,
   ) {}
 
   // ── Datasets (knowledge bases) ──────────────────────────────────────────
@@ -698,5 +700,110 @@ export class AdminService {
       deleted += 1;
     }
     return { ok: true, deleted };
+  }
+
+  // ── Agent sessions (in-memory pool) ─────────────────────────────────────
+
+  agentSessionStats() {
+    return this.agentPool.stats();
+  }
+
+  async listAgentSessions(query: {
+    page?: number;
+    pageSize?: number;
+    keyword?: string;
+    status?: string;
+  }) {
+    const { page, pageSize, skip } = pageParams(query.page, query.pageSize);
+    const poolStats = this.agentPool.stats();
+    let rows = this.agentPool.list();
+
+    const status = query.status?.trim().toLowerCase();
+    if (status === 'busy') {
+      rows = rows.filter((s) => s.busy);
+    } else if (status === 'idle') {
+      rows = rows.filter((s) => !s.busy);
+    }
+
+    const keyword = query.keyword?.trim().toLowerCase();
+    const conversationIds = rows.map((r) => r.conversationId);
+    const userIds = [...new Set(rows.map((r) => r.userId))];
+
+    const [conversations, users] = await Promise.all([
+      conversationIds.length
+        ? this.prisma.conversation.findMany({
+            where: { id: { in: conversationIds } },
+            select: {
+              id: true,
+              title: true,
+              updatedAt: true,
+              _count: { select: { messages: true } },
+            },
+          })
+        : Promise.resolve([]),
+      userIds.length
+        ? this.prisma.user.findMany({
+            where: { id: { in: userIds } },
+            select: { id: true, username: true },
+          })
+        : Promise.resolve([]),
+    ]);
+
+    const convMap = new Map(conversations.map((c) => [c.id, c]));
+    const userMap = new Map(users.map((u) => [u.id, u.username]));
+
+    let items = rows.map((s) => {
+      const conv = convMap.get(s.conversationId);
+      return {
+        conversationId: s.conversationId,
+        conversationTitle: conv?.title || '—',
+        userId: s.userId,
+        ownerUsername: userMap.get(s.userId) || '—',
+        busy: s.busy,
+        isStreaming: s.isStreaming,
+        messageCount: s.messageCount,
+        dbMessageCount: conv?._count.messages ?? null,
+        modelId: s.modelId,
+        modelProvider: s.modelProvider,
+        lastUsedAt: new Date(s.lastUsedAt).toISOString(),
+        conversationUpdatedAt: conv?.updatedAt?.toISOString() ?? null,
+      };
+    });
+
+    if (keyword) {
+      items = items.filter(
+        (s) =>
+          s.conversationId.toLowerCase().includes(keyword) ||
+          s.conversationTitle.toLowerCase().includes(keyword) ||
+          s.ownerUsername.toLowerCase().includes(keyword) ||
+          s.userId.toLowerCase().includes(keyword) ||
+          (s.modelId || '').toLowerCase().includes(keyword),
+      );
+    }
+
+    items.sort((a, b) => {
+      if (a.busy !== b.busy) return a.busy ? -1 : 1;
+      return (
+        new Date(b.lastUsedAt).getTime() - new Date(a.lastUsedAt).getTime()
+      );
+    });
+
+    const total = items.length;
+    const paged = items.slice(skip, skip + pageSize);
+
+    return {
+      items: paged,
+      total,
+      page,
+      pageSize,
+      stats: poolStats,
+    };
+  }
+
+  disposeAgentSessions(conversationIds: string[]) {
+    const ids = [...new Set(conversationIds.map((id) => id?.trim()).filter(Boolean))];
+    if (!ids.length) throw badRequest('conversationIds is required');
+    const disposed = this.agentPool.disposeMany(ids);
+    return { ok: true, disposed };
   }
 }

@@ -16,6 +16,7 @@ import AdminDatasetsPanel from './components/admin/AdminDatasetsPanel';
 import AdminDocumentsPanel from './components/admin/AdminDocumentsPanel';
 import AdminTasksPanel from './components/admin/AdminTasksPanel';
 import AdminUsersPanel from './components/admin/AdminUsersPanel';
+import AdminAgentSessionsPanel from './components/admin/AdminAgentSessionsPanel';
 import {
   chatApi,
   kbApi,
@@ -472,6 +473,10 @@ export default function App() {
       ) : workspace === 'admin-users' && user.role === 'admin' ? (
         <div className="app-workspace admin-workspace">
           <AdminUsersPanel />
+        </div>
+      ) : workspace === 'admin-agent-sessions' && user.role === 'admin' ? (
+        <div className="app-workspace admin-workspace">
+          <AdminAgentSessionsPanel />
         </div>
       ) : (
         <main

@@ -3123,6 +3123,10 @@ button.admin-badge {
   gap: 10px;
 }
 
+.admin-stats-row-4 {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
 .admin-stat-card {
   background: var(--surface-primary);
   border: 1px solid var(--border-color);

@@ -78,6 +78,62 @@ export class AgentSessionPool implements OnModuleDestroy {
     return this.sessions.size;
   }
 
+  getMaxSessions(): number {
+    return this.maxSessions;
+  }
+
+  getTtlMs(): number {
+    return this.ttlMs;
+  }
+
+  /** Snapshot of live pool sessions for admin monitoring (no agent references). */
+  list(): Array<{
+    conversationId: string;
+    userId: string;
+    busy: boolean;
+    lastUsedAt: number;
+    isStreaming: boolean;
+    messageCount: number;
+    modelId: string | null;
+    modelProvider: string | null;
+  }> {
+    this.evictExpired();
+    return [...this.sessions.values()].map((s) => ({
+      conversationId: s.conversationId,
+      userId: s.userId,
+      busy: s.busy,
+      lastUsedAt: s.lastUsedAt,
+      isStreaming: Boolean(s.agent.state.isStreaming),
+      messageCount: Array.isArray(s.agent.state.messages)
+        ? s.agent.state.messages.length
+        : 0,
+      modelId: s.agent.state.model?.id ?? null,
+      modelProvider: s.agent.state.model?.provider ?? null,
+    }));
+  }
+
+  stats(): {
+    size: number;
+    maxSessions: number;
+    busy: number;
+    idle: number;
+    ttlMs: number;
+  } {
+    this.evictExpired();
+    let busy = 0;
+    for (const s of this.sessions.values()) {
+      if (s.busy) busy += 1;
+    }
+    const size = this.sessions.size;
+    return {
+      size,
+      maxSessions: this.maxSessions,
+      busy,
+      idle: size - busy,
+      ttlMs: this.ttlMs,
+    };
+  }
+
   dispose(conversationId: string): void {
     const s = this.sessions.get(conversationId);
     if (!s) return;
@@ -88,6 +144,16 @@ export class AgentSessionPool implements OnModuleDestroy {
     }
     this.sessions.delete(conversationId);
     this.logger.debug(`Disposed agent session ${conversationId}`);
+  }
+
+  disposeMany(conversationIds: string[]): number {
+    let disposed = 0;
+    for (const id of conversationIds) {
+      if (!this.sessions.has(id)) continue;
+      this.dispose(id);
+      disposed += 1;
+    }
+    return disposed;
   }
 
   /**
