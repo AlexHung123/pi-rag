@@ -190,6 +190,9 @@ export class DocumentsService {
         content: c.content || c.content_with_weight || '',
         available: c.available ?? true,
         importantKeywords: c.important_keywords || [],
+        // RAGFlow: [pageNumber, x1, x2, y1, y2] for PDF highlight
+        positions: Array.isArray(c.positions) ? c.positions : [],
+        imageId: c.image_id || undefined,
       })),
       total: result.total,
       page: opts.page || 1,
@@ -201,7 +204,7 @@ export class DocumentsService {
     userId: string,
     knowledgeBaseId: string,
     docId: string,
-    pageSize = 10,
+    pageSize = 30,
   ) {
     const document = await this.refreshStatus(userId, knowledgeBaseId, docId);
     const chunkPage = await this.chunks(userId, knowledgeBaseId, docId, {
@@ -212,6 +215,20 @@ export class DocumentsService {
       document,
       chunks: chunkPage.chunks,
       totalChunks: chunkPage.total,
+    };
+  }
+
+  async downloadFile(userId: string, knowledgeBaseId: string, docId: string) {
+    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
+    const doc = await this.getOwned(userId, knowledgeBaseId, docId);
+    const file = await this.ragflow.downloadDocument(
+      kb.ragflowDatasetId,
+      doc.ragflowDocumentId,
+    );
+    return {
+      buffer: file.buffer,
+      contentType: file.contentType,
+      filename: file.filename || doc.name,
     };
   }
 

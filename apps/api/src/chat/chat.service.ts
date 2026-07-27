@@ -1,6 +1,8 @@
 import { Injectable } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentService } from '../agent/agent.service';
+import type { CitationSource } from '../agent/agent.tools';
 import { notFound } from '../common/errors';
 
 @Injectable()
@@ -14,10 +16,12 @@ export class ChatService {
     const items = await this.prisma.conversation.findMany({
       where: { ownerUserId: userId },
       orderBy: { updatedAt: 'desc' },
+      include: { _count: { select: { messages: true } } },
     });
     return items.map((c) => ({
       id: c.id,
       title: c.title,
+      messageCount: c._count.messages,
       createdAt: c.createdAt.toISOString(),
       updatedAt: c.updatedAt.toISOString(),
     }));
@@ -33,6 +37,7 @@ export class ChatService {
     return {
       id: c.id,
       title: c.title,
+      messageCount: 0,
       createdAt: c.createdAt.toISOString(),
       updatedAt: c.updatedAt.toISOString(),
       messages: [] as Array<{
@@ -58,6 +63,7 @@ export class ChatService {
     return {
       id: c.id,
       title: c.title,
+      messageCount: c.messages.length,
       createdAt: c.createdAt.toISOString(),
       updatedAt: c.updatedAt.toISOString(),
       messages: c.messages.map((m) => ({
@@ -72,17 +78,28 @@ export class ChatService {
 
   async remove(userId: string, id: string) {
     await this.getOwned(userId, id);
+    this.agent.disposeConversation(id);
     await this.prisma.conversation.delete({ where: { id } });
     return { ok: true };
   }
 
-  async *streamMessage(userId: string, conversationId: string, content: string) {
+  async *streamMessage(
+    userId: string,
+    conversationId: string,
+    content: string,
+    knowledgeBaseIds?: string[],
+  ) {
     const c = await this.getOwned(userId, conversationId);
+    const selectedIds = (knowledgeBaseIds || []).filter(Boolean);
+
     const userMsg = await this.prisma.message.create({
       data: {
         conversationId: c.id,
         role: 'user',
         content,
+        metadata: selectedIds.length
+          ? ({ knowledgeBaseIds: selectedIds } as Prisma.InputJsonValue)
+          : undefined,
       },
     });
 
@@ -108,17 +125,28 @@ export class ChatService {
       },
     };
 
+    const historyLimit = Number(process.env.AGENT_HISTORY_LIMIT || 20);
+    const limit =
+      Number.isFinite(historyLimit) && historyLimit > 0 ? historyLimit : 20;
+
     const history = c.messages
       .filter((m) => m.role === 'user' || m.role === 'assistant')
-      .slice(-12)
+      .slice(-limit)
       .map((m) => ({
         role: m.role as 'user' | 'assistant',
         content: m.content,
       }));
 
     let full = '';
+    let sources: CitationSource[] = [];
     try {
-      for await (const ev of this.agent.run(userId, history, content)) {
+      for await (const ev of this.agent.run(
+        userId,
+        conversationId,
+        history,
+        content,
+        { knowledgeBaseIds: selectedIds },
+      )) {
         if (ev.type === 'text_delta') {
           full += ev.delta;
           yield { event: 'text_delta', data: { delta: ev.delta } };
@@ -126,10 +154,14 @@ export class ChatService {
           yield { event: 'tool_start', data: { name: ev.name } };
         } else if (ev.type === 'tool_end') {
           yield { event: 'tool_end', data: { name: ev.name, ok: ev.ok } };
+        } else if (ev.type === 'sources') {
+          sources = ev.sources;
+          yield { event: 'sources', data: { sources: ev.sources } };
         } else if (ev.type === 'error') {
           yield { event: 'error', data: { message: ev.message } };
         } else if (ev.type === 'done') {
           full = ev.fullText || full;
+          if (ev.sources?.length) sources = ev.sources;
         }
       }
     } catch (err) {
@@ -138,11 +170,16 @@ export class ChatService {
       full = full || `Error: ${message}`;
     }
 
+    const metadata: Record<string, unknown> = {};
+    if (sources.length) metadata.sources = sources;
+    if (selectedIds.length) metadata.knowledgeBaseIds = selectedIds;
+
     const assistant = await this.prisma.message.create({
       data: {
         conversationId: c.id,
         role: 'assistant',
         content: full || '(empty)',
+        metadata: metadata as Prisma.InputJsonValue,
       },
     });
     await this.prisma.conversation.update({
@@ -156,6 +193,7 @@ export class ChatService {
         id: assistant.id,
         role: 'assistant',
         content: assistant.content,
+        sources,
         createdAt: assistant.createdAt.toISOString(),
       },
     };

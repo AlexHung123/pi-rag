@@ -17,6 +17,12 @@ export type RagflowDocument = {
   status?: string;
 };
 
+/**
+ * RAGFlow chunk source box: [pageNumber, x1, x2, y1, y2]
+ * Coordinates are in PDF page space (pdf.js viewport scale=1).
+ */
+export type RagflowChunkPosition = [number, number, number, number, number] | number[];
+
 export type RagflowChunk = {
   id: string;
   content?: string;
@@ -24,6 +30,9 @@ export type RagflowChunk = {
   document_id?: string;
   available?: boolean;
   important_keywords?: string[];
+  /** Source locations for PDF highlight (RAGFlow list-chunks / retrieval). */
+  positions?: RagflowChunkPosition[];
+  image_id?: string;
 };
 
 export type CreateDatasetInput = {
@@ -40,4 +49,6 @@ export type RetrieveHit = {
   documentName?: string;
   score?: number;
   datasetId?: string;
+  /** PDF highlight boxes when returned by retrieval. */
+  positions?: RagflowChunkPosition[];
 };

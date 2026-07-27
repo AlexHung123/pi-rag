@@ -1,16 +1,32 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { KnowledgeService } from '../knowledge/knowledge.service';
-import { DocumentsService } from '../documents/documents.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { PrismaService } from '../prisma/prisma.service';
-import { createUserTools, DOMAIN_SYSTEM_PROMPT } from './agent.tools';
+import {
+  AgentSessionPool,
+  type AgentPoolEvent,
+  type PooledAgent,
+} from './agent-session.pool';
+import {
+  buildSelectedKbPromptPrefix,
+  createUserTools,
+  DOMAIN_SYSTEM_PROMPT,
+  type CitationSource,
+} from './agent.tools';
+import { importEsm } from './import-esm';
+import { isLlmConfigured, loadPiModelBundle } from './pi-model';
 
 export type AgentStreamEvent =
   | { type: 'text_delta'; delta: string }
   | { type: 'tool_start'; name: string }
   | { type: 'tool_end'; name: string; ok: boolean }
-  | { type: 'done'; fullText: string }
+  | { type: 'sources'; sources: CitationSource[] }
+  | { type: 'done'; fullText: string; sources: CitationSource[] }
   | { type: 'error'; message: string };
+
+export type AgentRunOptions = {
+  knowledgeBaseIds?: string[];
+};
 
 @Injectable()
 export class AgentService {
@@ -18,282 +34,393 @@ export class AgentService {
 
   constructor(
     private readonly knowledge: KnowledgeService,
-    private readonly documents: DocumentsService,
     private readonly ragflow: RagflowService,
     private readonly prisma: PrismaService,
+    private readonly pool: AgentSessionPool,
   ) {}
 
+  /** Drop a live agent when its conversation is deleted. */
+  disposeConversation(conversationId: string): void {
+    this.pool.dispose(conversationId);
+  }
+
   /**
-   * Stream an assistant reply. Uses OpenAI-compatible chat when configured;
-   * otherwise a deterministic tool-assisted fallback that still enforces ownership.
+   * Stream an assistant reply via a pooled pi-agent-core Agent.
+   * One agent instance per conversation while the pool slot lives.
    */
   async *run(
     userId: string,
+    conversationId: string,
     history: Array<{ role: 'user' | 'assistant'; content: string }>,
     userMessage: string,
+    options: AgentRunOptions = {},
   ): AsyncGenerator<AgentStreamEvent> {
+    if (!isLlmConfigured()) {
+      const msg =
+        'LLM is not configured. Set OPENAI_BASE_URL and/or OPENAI_API_KEY on the API.';
+      yield { type: 'error', message: msg };
+      yield { type: 'text_delta', delta: msg };
+      yield { type: 'done', fullText: msg, sources: [] };
+      return;
+    }
+
+    let session;
+    try {
+      session = await this.pool.acquire(
+        userId,
+        conversationId,
+        history,
+        (args) => this.createAgent(args),
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.error(`Failed to acquire agent session: ${message}`);
+      yield { type: 'error', message };
+      yield { type: 'text_delta', delta: message };
+      yield { type: 'done', fullText: message, sources: [] };
+      return;
+    }
+
+    const selectedKbIds = (options.knowledgeBaseIds || []).filter(Boolean);
+    let promptText = userMessage;
+    if (selectedKbIds.length) {
+      const owned = await this.knowledge.list(userId);
+      const selected = owned
+        .filter((k) => selectedKbIds.includes(k.id))
+        .map((k) => ({ id: k.id, name: k.name }));
+      if (selected.length) {
+        promptText = `${buildSelectedKbPromptPrefix(selected)}${userMessage}`;
+      }
+    }
+
+    const queue: AgentStreamEvent[] = [];
+    let notify: (() => void) | null = null;
+    let finished = false;
+    /** Authoritative assistant text for this run (deltas or last message_end). */
+    let fullText = '';
+    let sources: CitationSource[] = [];
+
+    const push = (ev: AgentStreamEvent) => {
+      queue.push(ev);
+      notify?.();
+    };
+
+    const unsubscribe = session.agent.subscribe((event: AgentPoolEvent) => {
+      this.mapEvent(
+        event,
+        push,
+        (delta) => {
+          fullText += delta;
+        },
+        (finalText) => {
+          // message_end is the complete assistant text for that turn
+          fullText = finalText;
+        },
+        (nextSources) => {
+          if (nextSources.length) {
+            sources = nextSources;
+            push({ type: 'sources', sources: nextSources });
+          }
+        },
+      );
+    });
+
+    const promptPromise = session.agent
+      .prompt(promptText)
+      .catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(`agent.prompt failed: ${message}`);
+        push({ type: 'error', message });
+      })
+      .finally(() => {
+        finished = true;
+        notify?.();
+      });
+
+    try {
+      while (!finished || queue.length > 0) {
+        if (queue.length === 0) {
+          await new Promise<void>((resolve) => {
+            notify = resolve;
+            if (finished || queue.length > 0) {
+              notify = null;
+              resolve();
+            }
+          });
+          notify = null;
+          continue;
+        }
+        yield queue.shift()!;
+      }
+
+      await promptPromise;
+
+      if (!fullText) {
+        fullText =
+          extractAssistantText(session.agent) ||
+          session.agent.state.errorMessage ||
+          '';
+      }
+      if (session.agent.state.errorMessage && !fullText) {
+        yield { type: 'error', message: session.agent.state.errorMessage };
+        fullText = session.agent.state.errorMessage;
+      }
+
+      // Fallback: recover citation sources from tool results in agent history
+      if (!sources.length) {
+        const recovered = extractSourcesFromAgentMessages(session.agent.state.messages);
+        if (recovered.length) {
+          sources = recovered;
+          yield { type: 'sources', sources };
+        }
+      }
+
+      yield { type: 'done', fullText, sources };
+    } finally {
+      unsubscribe();
+      this.pool.release(conversationId);
+    }
+  }
+
+  private mapEvent(
+    event: AgentPoolEvent,
+    push: (ev: AgentStreamEvent) => void,
+    onTextDelta: (delta: string) => void,
+    onAssistantComplete: (text: string) => void,
+    onSources: (sources: CitationSource[]) => void,
+  ): void {
+    switch (event.type) {
+      case 'tool_execution_start':
+        push({ type: 'tool_start', name: String(event.toolName || 'tool') });
+        break;
+      case 'tool_execution_end': {
+        push({
+          type: 'tool_end',
+          name: String(event.toolName || 'tool'),
+          ok: !event.isError,
+        });
+        if (
+          !event.isError &&
+          String(event.toolName || '') === 'retrieve_chunks'
+        ) {
+          const extracted = extractSourcesFromToolResult(event.result);
+          if (extracted.length) onSources(extracted);
+        }
+        break;
+      }
+      case 'message_update': {
+        const ame = event.assistantMessageEvent;
+        if (ame?.type === 'text_delta' && typeof ame.delta === 'string') {
+          onTextDelta(ame.delta);
+          push({ type: 'text_delta', delta: ame.delta });
+        }
+        break;
+      }
+      case 'message_end': {
+        const text = messageToText(event.message);
+        if (text) onAssistantComplete(text);
+        break;
+      }
+      default:
+        break;
+    }
+  }
+
+  private async createAgent(args: {
+    conversationId: string;
+    userId: string;
+    history: Array<{ role: 'user' | 'assistant'; content: string }>;
+  }): Promise<PooledAgent> {
+    const { Agent } = await importEsm<{
+      Agent: new (options?: unknown) => PooledAgent;
+    }>('@earendil-works/pi-agent-core');
+    const bundle = await loadPiModelBundle();
+    const historyLimit = Number(process.env.AGENT_HISTORY_LIMIT || 20);
+    const limit = Number.isFinite(historyLimit) && historyLimit > 0 ? historyLimit : 20;
+    const slice = args.history.slice(-limit);
+
     const tools = createUserTools({
-      userId,
+      userId: args.userId,
       knowledge: this.knowledge,
-      documents: this.documents,
       ragflow: this.ragflow,
       prisma: this.prisma,
     });
 
-    const apiKey = process.env.OPENAI_API_KEY || '';
-    if (apiKey) {
-      try {
-        yield* this.runWithOpenAI(tools, history, userMessage, apiKey);
-        return;
-      } catch (err) {
-        this.logger.warn(
-          `OpenAI agent path failed, falling back: ${err instanceof Error ? err.message : err}`,
-        );
+    const messages = slice.map((m) => {
+      if (m.role === 'user') {
+        return {
+          role: 'user' as const,
+          content: m.content,
+          timestamp: Date.now(),
+        };
       }
-    }
+      return {
+        role: 'assistant' as const,
+        content: [{ type: 'text' as const, text: m.content }],
+        api: 'openai-completions' as const,
+        provider: 'local-openai',
+        model: bundle.model.id,
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+          cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+        },
+        stopReason: 'stop' as const,
+        timestamp: Date.now(),
+      };
+    });
 
-    yield* this.runFallback(tools, userMessage);
+    const agent = new Agent({
+      initialState: {
+        systemPrompt: DOMAIN_SYSTEM_PROMPT,
+        model: bundle.model as never,
+        thinkingLevel: 'off',
+        tools: tools as never,
+        messages: messages as never,
+      },
+      streamFn: bundle.streamSimple as never,
+      getApiKey: () => bundle.getApiKey(),
+      sessionId: args.conversationId,
+      toolExecution: 'sequential',
+    });
+
+    return agent as unknown as PooledAgent;
+  }
+}
+
+function mapHitsToSources(hits: unknown[]): CitationSource[] {
+  return hits.map((h, i) => {
+    const hit = (h && typeof h === 'object' ? h : {}) as Record<string, unknown>;
+    const score = typeof hit.score === 'number' ? hit.score : undefined;
+    return {
+      id: String(hit.id || `hit-${i + 1}`),
+      content: String(hit.content || ''),
+      documentName:
+        typeof hit.documentName === 'string' ? hit.documentName : undefined,
+      documentId:
+        typeof hit.documentId === 'string' ? hit.documentId : undefined,
+      appDocumentId:
+        typeof hit.appDocumentId === 'string' ? hit.appDocumentId : undefined,
+      knowledgeBaseId:
+        typeof hit.knowledgeBaseId === 'string'
+          ? hit.knowledgeBaseId
+          : undefined,
+      knowledgeBaseName:
+        typeof hit.knowledgeBaseName === 'string'
+          ? hit.knowledgeBaseName
+          : undefined,
+      score,
+      index: typeof hit.index === 'number' ? hit.index : i + 1,
+      evidenceLabel:
+        typeof hit.evidenceLabel === 'string'
+          ? hit.evidenceLabel
+          : typeof score === 'number' && score >= 0.75
+            ? 'Strong evidence'
+            : typeof score === 'number' && score >= 0.5
+              ? 'Moderate evidence'
+              : 'Evidence',
+      positions: Array.isArray(hit.positions)
+        ? (hit.positions as number[][])
+        : undefined,
+    } satisfies CitationSource;
+  });
+}
+
+function extractSourcesFromToolResult(result: unknown): CitationSource[] {
+  if (!result || typeof result !== 'object') return [];
+  const r = result as {
+    details?: unknown;
+    content?: unknown;
+  };
+
+  // Prefer structured details from retrieve_chunks
+  if (r.details && typeof r.details === 'object') {
+    const d = r.details as { sources?: unknown; hits?: unknown };
+    if (Array.isArray(d.sources) && d.sources.length) {
+      return d.sources as CitationSource[];
+    }
+    if (Array.isArray(d.hits) && d.hits.length) {
+      return mapHitsToSources(d.hits);
+    }
   }
 
-  private async *runWithOpenAI(
-    tools: ReturnType<typeof createUserTools>,
-    history: Array<{ role: 'user' | 'assistant'; content: string }>,
-    userMessage: string,
-    apiKey: string,
-  ): AsyncGenerator<AgentStreamEvent> {
-    const baseUrl = (process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1').replace(
-      /\/$/,
-      '',
-    );
-    const model = process.env.OPENAI_MODEL || 'gpt-4o-mini';
-
-    const toolDefs = tools.map((t) => ({
-      type: 'function' as const,
-      function: {
-        name: t.name,
-        description: t.description,
-        parameters: t.parameters as unknown as Record<string, unknown>,
-      },
-    }));
-
-    type Msg =
-      | { role: 'system' | 'user' | 'assistant'; content: string }
-      | {
-          role: 'assistant';
-          content: string | null;
-          tool_calls: Array<{
-            id: string;
-            type: 'function';
-            function: { name: string; arguments: string };
-          }>;
+  // Fallback: parse JSON text content from the tool result
+  if (Array.isArray(r.content)) {
+    for (const block of r.content) {
+      if (!block || typeof block !== 'object') continue;
+      const text = String((block as { text?: string }).text || '');
+      if (!text.trim()) continue;
+      try {
+        const parsed = JSON.parse(text) as unknown;
+        if (Array.isArray(parsed) && parsed.length) {
+          return mapHitsToSources(parsed);
         }
-      | { role: 'tool'; tool_call_id: string; content: string };
-
-    const messages: Msg[] = [
-      { role: 'system', content: DOMAIN_SYSTEM_PROMPT },
-      ...history.map((m) => ({ role: m.role, content: m.content })),
-      { role: 'user', content: userMessage },
-    ];
-
-    let full = '';
-    for (let turn = 0; turn < 6; turn++) {
-      const res = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${apiKey}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          model,
-          messages,
-          tools: toolDefs,
-          tool_choice: 'auto',
-          stream: false,
-        }),
-      });
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(`LLM HTTP ${res.status}: ${text.slice(0, 300)}`);
-      }
-      const json = (await res.json()) as {
-        choices?: Array<{
-          message?: {
-            content?: string | null;
-            tool_calls?: Array<{
-              id: string;
-              function: { name: string; arguments: string };
-            }>;
-          };
-        }>;
-      };
-      const msg = json.choices?.[0]?.message;
-      if (!msg) throw new Error('empty LLM response');
-
-      if (msg.tool_calls?.length) {
-        messages.push({
-          role: 'assistant',
-          content: msg.content || null,
-          tool_calls: msg.tool_calls.map((tc) => ({
-            id: tc.id,
-            type: 'function',
-            function: tc.function,
-          })),
-        });
-        for (const tc of msg.tool_calls) {
-          const tool = tools.find((t) => t.name === tc.function.name);
-          yield { type: 'tool_start', name: tc.function.name };
-          try {
-            const args = tc.function.arguments
-              ? (JSON.parse(tc.function.arguments) as Record<string, unknown>)
-              : {};
-            if (!tool) throw new Error(`unknown tool ${tc.function.name}`);
-            const result = await tool.execute(tc.id, args, undefined, undefined);
-            const text = result.content
-              .map((c) => ('text' in c ? c.text : ''))
-              .join('\n');
-            messages.push({ role: 'tool', tool_call_id: tc.id, content: text });
-            yield { type: 'tool_end', name: tc.function.name, ok: true };
-          } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            messages.push({
-              role: 'tool',
-              tool_call_id: tc.id,
-              content: `Error: ${message}`,
-            });
-            yield { type: 'tool_end', name: tc.function.name, ok: false };
+        if (parsed && typeof parsed === 'object') {
+          const obj = parsed as { hits?: unknown; sources?: unknown };
+          if (Array.isArray(obj.sources) && obj.sources.length) {
+            return obj.sources as CitationSource[];
+          }
+          if (Array.isArray(obj.hits) && obj.hits.length) {
+            return mapHitsToSources(obj.hits);
           }
         }
-        continue;
+      } catch {
+        /* not JSON */
       }
-
-      const content = msg.content || '';
-      full = content;
-      // stream in chunks for UX
-      const step = 24;
-      for (let i = 0; i < content.length; i += step) {
-        yield { type: 'text_delta', delta: content.slice(i, i + step) };
-      }
-      yield { type: 'done', fullText: full };
-      return;
     }
-
-    full = 'I reached the tool-call limit. Please try a simpler request.';
-    yield { type: 'text_delta', delta: full };
-    yield { type: 'done', fullText: full };
   }
 
-  private async *runFallback(
-    tools: ReturnType<typeof createUserTools>,
-    userMessage: string,
-  ): AsyncGenerator<AgentStreamEvent> {
-    const lower = userMessage.toLowerCase();
-    let full = '';
+  return [];
+}
 
-    const emit = async function* (this: void, text: string) {
-      full = text;
-      const step = 32;
-      for (let i = 0; i < text.length; i += step) {
-        yield { type: 'text_delta' as const, delta: text.slice(i, i + step) };
-      }
-      yield { type: 'done' as const, fullText: text };
-    };
-
-    // Create KB intent
-    const createMatch = userMessage.match(
-      /(?:create|新建|建立|创建).{0,12}(?:knowledge base|kb|知识库|知識庫)\s*[「"']?(.+?)[」"']?\s*$/i,
-    );
-    if (
-      createMatch ||
-      lower.includes('create knowledge base') ||
-      lower.includes('新建知识库') ||
-      lower.includes('创建知識庫')
-    ) {
-      const name =
-        createMatch?.[1]?.trim() ||
-        userMessage.replace(/.*(?:named|叫|：|:)\s*/i, '').trim() ||
-        `KB ${new Date().toISOString().slice(0, 10)}`;
-      const tool = tools.find((t) => t.name === 'create_knowledge_base')!;
-      yield { type: 'tool_start', name: tool.name };
-      try {
-        const result = await tool.execute(
-          'local',
-          { name: name.slice(0, 80) },
-          undefined,
-          undefined,
-        );
-        yield { type: 'tool_end', name: tool.name, ok: true };
-        const text = `Created knowledge base.\n\n${result.content.map((c) => ('text' in c ? c.text : '')).join('')}`;
-        yield* emit(text);
-      } catch (err) {
-        yield { type: 'tool_end', name: tool.name, ok: false };
-        yield* emit(`Failed to create knowledge base: ${err instanceof Error ? err.message : err}`);
-      }
-      return;
+/** Scan agent message history for the latest retrieve_chunks tool result. */
+function extractSourcesFromAgentMessages(
+  messages: Array<{ role: string; content?: unknown; details?: unknown; toolName?: string }>,
+): CitationSource[] {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!m) continue;
+    const role = String(m.role || '');
+    const toolName = String(m.toolName || '');
+    if (role === 'toolResult' || role === 'tool') {
+      if (toolName && toolName !== 'retrieve_chunks') continue;
+      const fromDetails = extractSourcesFromToolResult({
+        details: m.details,
+        content: m.content,
+      });
+      if (fromDetails.length) return fromDetails;
     }
-
-    if (
-      lower.includes('list') &&
-      (lower.includes('knowledge') || lower.includes('kb') || lower.includes('知识库') || lower.includes('知識庫'))
-    ) {
-      const tool = tools.find((t) => t.name === 'list_my_knowledge_bases')!;
-      yield { type: 'tool_start', name: tool.name };
-      const result = await tool.execute('local', {}, undefined, undefined);
-      yield { type: 'tool_end', name: tool.name, ok: true };
-      yield* emit(`Your knowledge bases:\n\n${result.content.map((c) => ('text' in c ? c.text : '')).join('')}`);
-      return;
-    }
-
-    // Default: retrieve then answer from chunks
-    const retrieve = tools.find((t) => t.name === 'retrieve_chunks')!;
-    yield { type: 'tool_start', name: retrieve.name };
-    const result = await retrieve.execute(
-      'local',
-      { question: userMessage, topK: 5 },
-      undefined,
-      undefined,
-    );
-    yield { type: 'tool_end', name: retrieve.name, ok: true };
-    const raw = result.content.map((c) => ('text' in c ? c.text : '')).join('');
-    let hits: Array<{ content: string; documentName?: string; score?: number }> = [];
-    try {
-      hits = JSON.parse(raw) as typeof hits;
-    } catch {
-      hits = [];
-    }
-
-    if (!hits.length) {
-      yield* emit(
-        [
-          'I could not find relevant chunks in your knowledge bases.',
-          '',
-          'Tips:',
-          '1. Create a knowledge base (sidebar → Knowledge)',
-          '2. Upload a document',
-          '3. Click **Parse** to cut chunks',
-          '4. Ask again',
-          '',
-          'Set `OPENAI_API_KEY` on the API for full LLM + tool calling via the chat agent.',
-        ].join('\n'),
-      );
-      return;
-    }
-
-    const context = hits
-      .map(
-        (h, i) =>
-          `[${i + 1}] ${h.documentName || 'document'} (score=${h.score ?? '?'}):\n${h.content}`,
-      )
-      .join('\n\n');
-
-    yield* emit(
-      [
-        'Based on your knowledge base (retrieval fallback, no LLM key configured):',
-        '',
-        context,
-        '',
-        '---',
-        'Configure `OPENAI_API_KEY` (and optional `OPENAI_BASE_URL` / `OPENAI_MODEL`) for synthesized expert answers.',
-      ].join('\n'),
-    );
   }
+  return [];
+}
+
+function messageToText(message: unknown): string {
+  if (!message || typeof message !== 'object') return '';
+  const m = message as { role?: string; content?: unknown };
+  if (m.role !== 'assistant') return '';
+  const content = m.content;
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((block) => {
+      if (block && typeof block === 'object' && (block as { type?: string }).type === 'text') {
+        return String((block as { text?: string }).text || '');
+      }
+      return '';
+    })
+    .join('');
+}
+
+function extractAssistantText(agent: PooledAgent): string {
+  const msgs = agent.state.messages || [];
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const m = msgs[i];
+    if (m?.role === 'assistant') {
+      return messageToText(m);
+    }
+  }
+  return '';
 }

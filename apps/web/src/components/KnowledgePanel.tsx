@@ -1,11 +1,22 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   docApi,
   kbApi,
-  type ChunkItem,
   type DocumentItem,
   type KnowledgeBase,
 } from '../services/api';
+import DocumentPreviewPage from './DocumentPreviewPage';
+
+const AVATAR_COLORS = [
+  '#ea580c',
+  '#2563eb',
+  '#db2777',
+  '#059669',
+  '#7c3aed',
+  '#d97706',
+  '#0891b2',
+  '#4f46e5',
+];
 
 function formatBytes(n: number) {
   if (n < 1024) return `${n} B`;
@@ -13,31 +24,94 @@ function formatBytes(n: number) {
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatDateTime(iso: string) {
+  try {
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  } catch {
+    return iso;
+  }
+}
+
+function formatDateShort(iso: string) {
+  try {
+    const d = new Date(iso);
+    const pad = (n: number) => String(n).padStart(2, '0');
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}`;
+  } catch {
+    return iso;
+  }
+}
+
+function avatarColor(name: string) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) hash = (hash * 31 + name.charCodeAt(i)) >>> 0;
+  return AVATAR_COLORS[hash % AVATAR_COLORS.length];
+}
+
+function initial(name: string) {
+  return (name.trim().charAt(0) || 'D').toUpperCase();
+}
+
+/** Maps to RAGFlow parser_config.layout_recognize */
+const PDF_PARSER_OPTIONS = [
+  {
+    value: 'DeepDOC',
+    label: 'DeepDOC',
+    hint: 'Built-in RAGFlow PDF layout parser (default).',
+  },
+  {
+    value: 'mineru-from-env@MinerU',
+    label: 'MinerU (from env)',
+    hint: 'Uses MinerU configured on the RAGFlow host (MINERU_APISERVER, etc.).',
+  },
+  {
+    value: 'Plain Text',
+    label: 'Plain Text',
+    hint: 'Text extraction only — no layout analysis.',
+  },
+  {
+    value: 'Docling',
+    label: 'Docling',
+    hint: 'Docling PDF parser (must be available on the RAGFlow host).',
+  },
+] as const;
+
+type PdfParserValue = (typeof PDF_PARSER_OPTIONS)[number]['value'];
+
+const DEFAULT_PDF_PARSER: PdfParserValue = 'DeepDOC';
+
+/** RAGFlow parser_config.chunk_token_num range for naive chunking */
+const CHUNK_TOKEN_MIN = 1;
+const CHUNK_TOKEN_MAX = 2048;
+const DEFAULT_CHUNK_TOKEN_NUM = 512;
+
 export default function KnowledgePanel({
-  open,
-  onClose,
+  onBackToChat,
 }: {
-  open: boolean;
-  onClose: () => void;
+  onBackToChat: () => void;
 }) {
   const [kbs, setKbs] = useState<KnowledgeBase[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [docs, setDocs] = useState<DocumentItem[]>([]);
   const [newName, setNewName] = useState('');
+  const [pdfParser, setPdfParser] = useState<PdfParserValue>(DEFAULT_PDF_PARSER);
+  const [chunkTokenNum, setChunkTokenNum] = useState(DEFAULT_CHUNK_TOKEN_NUM);
+  const [createOpen, setCreateOpen] = useState(false);
+  const [search, setSearch] = useState('');
+  const [docSearch, setDocSearch] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
-  const [preview, setPreview] = useState<{
-    doc: DocumentItem;
-    chunks: ChunkItem[];
-    total: number;
-  } | null>(null);
+  const [previewDoc, setPreviewDoc] = useState<DocumentItem | null>(null);
+  const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set());
   const fileRef = useRef<HTMLInputElement>(null);
 
   const loadKbs = useCallback(async () => {
     const res = await kbApi.list();
     setKbs(res.items);
-    if (!selectedId && res.items[0]) setSelectedId(res.items[0].id);
-  }, [selectedId]);
+    return res.items;
+  }, []);
 
   const loadDocs = useCallback(async (kbId: string) => {
     const res = await docApi.list(kbId);
@@ -45,35 +119,89 @@ export default function KnowledgePanel({
   }, []);
 
   useEffect(() => {
-    if (!open) return;
     loadKbs().catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [open, loadKbs]);
+  }, [loadKbs]);
 
   useEffect(() => {
-    if (!open || !selectedId) return;
+    if (!selectedId) {
+      setDocs([]);
+      setSelectedDocIds(new Set());
+      return;
+    }
     loadDocs(selectedId).catch((e) => setError(e instanceof Error ? e.message : String(e)));
-  }, [open, selectedId, loadDocs]);
+  }, [selectedId, loadDocs]);
 
-  // Poll while any doc is running
   useEffect(() => {
-    if (!open || !selectedId) return;
+    if (!selectedId) return;
     const hasRunning = docs.some((d) => d.status === 'running');
     if (!hasRunning) return;
     const t = setInterval(() => {
       loadDocs(selectedId).catch(() => undefined);
     }, 2000);
     return () => clearInterval(t);
-  }, [open, selectedId, docs, loadDocs]);
+  }, [selectedId, docs, loadDocs]);
 
-  if (!open) return null;
+  const selectedKb = useMemo(
+    () => kbs.find((k) => k.id === selectedId) ?? null,
+    [kbs, selectedId],
+  );
+
+  const filteredKbs = useMemo(() => {
+    const q = search.trim().toLowerCase();
+    if (!q) return kbs;
+    return kbs.filter((k) => k.name.toLowerCase().includes(q));
+  }, [kbs, search]);
+
+  const filteredDocs = useMemo(() => {
+    const q = docSearch.trim().toLowerCase();
+    if (!q) return docs;
+    return docs.filter((d) => d.name.toLowerCase().includes(q));
+  }, [docs, docSearch]);
+
+  const openCreateModal = () => {
+    setError('');
+    setNewName('');
+    setPdfParser(DEFAULT_PDF_PARSER);
+    setChunkTokenNum(DEFAULT_CHUNK_TOKEN_NUM);
+    setCreateOpen(true);
+  };
+
+  const closeCreateModal = () => {
+    if (busy) return;
+    setCreateOpen(false);
+    setError('');
+  };
 
   const createKb = async () => {
-    if (!newName.trim()) return;
+    const name = newName.trim();
+    if (!name) {
+      setError('Please enter a knowledge base name.');
+      return;
+    }
+    if (
+      !Number.isFinite(chunkTokenNum) ||
+      chunkTokenNum < CHUNK_TOKEN_MIN ||
+      chunkTokenNum > CHUNK_TOKEN_MAX
+    ) {
+      setError(
+        `Chunk size must be between ${CHUNK_TOKEN_MIN} and ${CHUNK_TOKEN_MAX} tokens.`,
+      );
+      return;
+    }
     setBusy(true);
     setError('');
     try {
-      const kb = await kbApi.create({ name: newName.trim() });
+      const kb = await kbApi.create({
+        name,
+        parserConfig: {
+          layout_recognize: pdfParser,
+          chunk_token_num: Math.round(chunkTokenNum),
+        },
+      });
       setNewName('');
+      setPdfParser(DEFAULT_PDF_PARSER);
+      setChunkTokenNum(DEFAULT_CHUNK_TOKEN_NUM);
+      setCreateOpen(false);
       await loadKbs();
       setSelectedId(kb.id);
     } catch (e) {
@@ -82,6 +210,11 @@ export default function KnowledgePanel({
       setBusy(false);
     }
   };
+
+  const selectedPdfParser = useMemo(
+    () => PDF_PARSER_OPTIONS.find((o) => o.value === pdfParser) ?? PDF_PARSER_OPTIONS[0],
+    [pdfParser],
+  );
 
   const onUpload = async (files: FileList | null) => {
     if (!selectedId || !files?.length) return;
@@ -92,6 +225,7 @@ export default function KnowledgePanel({
         await docApi.upload(selectedId, file);
       }
       await loadDocs(selectedId);
+      await loadKbs();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
@@ -114,101 +248,358 @@ export default function KnowledgePanel({
     }
   };
 
-  const onPreview = async (docId: string) => {
-    if (!selectedId) return;
-    setBusy(true);
-    setError('');
-    try {
-      const res = await docApi.preview(selectedId, docId);
-      setPreview({ doc: res.document, chunks: res.chunks, total: res.totalChunks });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
   const onDeleteDoc = async (docId: string) => {
     if (!selectedId) return;
     if (!confirm('Delete this document?')) return;
     await docApi.remove(selectedId, docId);
+    setSelectedDocIds((prev) => {
+      const next = new Set(prev);
+      next.delete(docId);
+      return next;
+    });
     await loadDocs(selectedId);
+    await loadKbs();
   };
 
   const onDeleteKb = async (id: string) => {
     if (!confirm('Delete this knowledge base and its documents?')) return;
     await kbApi.remove(id);
-    setSelectedId(null);
+    if (selectedId === id) setSelectedId(null);
     await loadKbs();
     setDocs([]);
   };
 
-  return (
-    <aside className="kb-panel">
-      <div className="kb-panel-header">
-        <h3>Knowledge</h3>
-        <button className="btn btn-ghost" type="button" onClick={onClose}>
-          Close
-        </button>
-      </div>
-      <div className="kb-panel-body">
-        {error && <p className="error-text">{error}</p>}
+  const toggleDoc = (id: string) => {
+    setSelectedDocIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
 
-        <div className="kb-create-row">
-          <input
-            placeholder="New knowledge base name"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && createKb()}
-          />
-          <button className="btn" type="button" disabled={busy} onClick={createKb}>
-            Create
-          </button>
+  const toggleAllDocs = () => {
+    if (selectedDocIds.size === filteredDocs.length) {
+      setSelectedDocIds(new Set());
+    } else {
+      setSelectedDocIds(new Set(filteredDocs.map((d) => d.id)));
+    }
+  };
+
+  /* ── Dataset list (full page) ── */
+  if (!selectedId) {
+    return (
+      <div className="kb-page">
+        <header className="kb-topbar">
+          <div className="kb-topbar-left">
+            <div className="kb-brand-mark" aria-hidden>
+              <span />
+            </div>
+            <nav className="kb-top-nav" aria-label="Main">
+              <button type="button" className="kb-top-nav-item" onClick={onBackToChat}>
+                Chat
+              </button>
+              <button type="button" className="kb-top-nav-item active">
+                Dataset
+              </button>
+            </nav>
+          </div>
+        </header>
+
+        <div className="kb-page-body">
+          <div className="kb-page-toolbar">
+            <h1 className="kb-page-title">
+              <span className="kb-page-title-icon" aria-hidden>
+                ⬡
+              </span>
+              Dataset
+            </h1>
+            <div className="kb-page-toolbar-actions">
+              <input
+                className="kb-search-input"
+                type="search"
+                placeholder="Search"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+              <button
+                className="btn"
+                type="button"
+                onClick={openCreateModal}
+              >
+                + Create dataset
+              </button>
+            </div>
+          </div>
+
+          {error && <p className="error-text">{error}</p>}
+
+          {filteredKbs.length === 0 ? (
+            <div className="kb-empty-state">
+              <p className="empty-hint">
+                {kbs.length === 0
+                  ? 'No datasets yet. Create one to upload documents.'
+                  : 'No datasets match your search.'}
+              </p>
+              {kbs.length === 0 && (
+                <button
+                  className="btn"
+                  type="button"
+                  onClick={openCreateModal}
+                >
+                  + Create dataset
+                </button>
+              )}
+            </div>
+          ) : (
+            <div className="kb-dataset-grid">
+              {filteredKbs.map((kb) => (
+                <button
+                  key={kb.id}
+                  type="button"
+                  className="kb-dataset-card"
+                  onClick={() => setSelectedId(kb.id)}
+                >
+                  <div className="kb-dataset-card-main">
+                    <div
+                      className="kb-dataset-avatar"
+                      style={{ background: avatarColor(kb.name) }}
+                    >
+                      {initial(kb.name)}
+                    </div>
+                    <div className="kb-dataset-card-info">
+                      <div className="kb-dataset-card-name" title={kb.name}>
+                        {kb.name}
+                      </div>
+                      <div className="kb-dataset-card-meta">
+                        {kb.documentCount ?? 0}{' '}
+                        {(kb.documentCount ?? 0) === 1 ? 'file' : 'files'}
+                      </div>
+                      <div className="kb-dataset-card-meta">
+                        {formatDateTime(kb.createdAt)}
+                      </div>
+                    </div>
+                  </div>
+                  <span
+                    className="kb-dataset-card-delete"
+                    role="button"
+                    tabIndex={0}
+                    title="Delete dataset"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void onDeleteKb(kb.id);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        void onDeleteKb(kb.id);
+                      }
+                    }}
+                  >
+                    ×
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
-        <div className="sidebar-section-title">My knowledge bases</div>
-        {kbs.length === 0 && <p className="empty-hint">No knowledge bases yet.</p>}
-        {kbs.map((kb) => (
+        {createOpen && (
+          <div className="kb-modal-backdrop" role="presentation" onClick={closeCreateModal}>
+            <div
+              className="kb-modal"
+              role="dialog"
+              aria-labelledby="create-dataset-title"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h2 id="create-dataset-title">Create dataset</h2>
+              {error && <p className="error-text">{error}</p>}
+              <div className="field">
+                <label htmlFor="kb-new-name">Name</label>
+                <input
+                  id="kb-new-name"
+                  autoFocus
+                  placeholder="e.g. Training Guide"
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      e.preventDefault();
+                      void createKb();
+                    }
+                  }}
+                  disabled={busy}
+                />
+              </div>
+              <div className="field">
+                <label htmlFor="kb-pdf-parser">PDF parser</label>
+                <select
+                  id="kb-pdf-parser"
+                  value={pdfParser}
+                  onChange={(e) => setPdfParser(e.target.value as PdfParserValue)}
+                  disabled={busy}
+                >
+                  {PDF_PARSER_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="field-hint">{selectedPdfParser.hint}</p>
+              </div>
+              <div className="field">
+                <label htmlFor="kb-chunk-size">Chunk size (tokens)</label>
+                <input
+                  id="kb-chunk-size"
+                  type="number"
+                  min={CHUNK_TOKEN_MIN}
+                  max={CHUNK_TOKEN_MAX}
+                  step={1}
+                  value={chunkTokenNum}
+                  onChange={(e) => {
+                    const n = Number(e.target.value);
+                    setChunkTokenNum(Number.isFinite(n) ? n : DEFAULT_CHUNK_TOKEN_NUM);
+                  }}
+                  disabled={busy}
+                />
+                <p className="field-hint">
+                  Target tokens per chunk when documents are parsed. Default{' '}
+                  {DEFAULT_CHUNK_TOKEN_NUM}; range {CHUNK_TOKEN_MIN}–{CHUNK_TOKEN_MAX}.
+                </p>
+              </div>
+              <div className="kb-modal-actions">
+                <button
+                  className="btn btn-secondary"
+                  type="button"
+                  disabled={busy}
+                  onClick={closeCreateModal}
+                >
+                  Cancel
+                </button>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void createKb()}
+                >
+                  {busy ? 'Creating…' : 'Create'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  /* ── Document preview (full page) ── */
+  if (previewDoc && selectedId) {
+    return (
+      <DocumentPreviewPage
+        kbId={selectedId}
+        document={previewDoc}
+        onBack={() => setPreviewDoc(null)}
+      />
+    );
+  }
+
+  /* ── Dataset detail: files table (full page) ── */
+  return (
+    <div className="kb-page">
+      <header className="kb-topbar">
+        <div className="kb-topbar-left">
+          <div className="kb-brand-mark" aria-hidden>
+            <span />
+          </div>
+          <nav className="kb-top-nav" aria-label="Main">
+            <button type="button" className="kb-top-nav-item" onClick={onBackToChat}>
+              Chat
+            </button>
+            <button
+              type="button"
+              className="kb-top-nav-item active"
+              onClick={() => setSelectedId(null)}
+            >
+              Dataset
+            </button>
+          </nav>
+        </div>
+      </header>
+
+      <div className="kb-detail-layout">
+        <aside className="kb-detail-rail">
           <button
-            key={kb.id}
             type="button"
-            className={`kb-item ${selectedId === kb.id ? 'active' : ''}`}
-            onClick={() => setSelectedId(kb.id)}
+            className="kb-detail-kb-card"
+            onClick={() => setSelectedId(null)}
+            title="Back to datasets"
           >
-            <span>
-              {kb.name}
-              {typeof kb.documentCount === 'number' ? ` · ${kb.documentCount}` : ''}
-            </span>
+            <div
+              className="kb-dataset-avatar kb-dataset-avatar-lg"
+              style={{ background: avatarColor(selectedKb?.name || '') }}
+            >
+              {initial(selectedKb?.name || '')}
+            </div>
+            <div className="kb-detail-kb-info">
+              <div className="kb-detail-kb-name" title={selectedKb?.name}>
+                {selectedKb?.name || 'Dataset'}
+              </div>
+              <div className="kb-detail-kb-meta">
+                {selectedKb?.documentCount ?? docs.length}{' '}
+                {(selectedKb?.documentCount ?? docs.length) === 1 ? 'file' : 'files'}
+              </div>
+              <div className="kb-detail-kb-meta">
+                Created {selectedKb ? formatDateShort(selectedKb.createdAt) : '—'}
+              </div>
+            </div>
+          </button>
+
+          <nav className="kb-detail-nav">
+            <button type="button" className="kb-detail-nav-item active">
+              <span className="kb-detail-nav-icon" aria-hidden>
+                📁
+              </span>
+              Files
+            </button>
+          </nav>
+
+          <div className="kb-detail-rail-footer">
             <button
               type="button"
               className="btn btn-ghost"
-              style={{ padding: '2px 6px' }}
-              onClick={(e) => {
-                e.stopPropagation();
-                onDeleteKb(kb.id);
-              }}
+              onClick={() => setSelectedId(null)}
             >
-              ×
+              ← All datasets
             </button>
-          </button>
-        ))}
+          </div>
+        </aside>
 
-        {selectedId && (
-          <>
-            <div className="sidebar-section-title" style={{ marginTop: 16 }}>
-              Documents
+        <section className="kb-files-panel">
+          <div className="kb-files-header">
+            <div>
+              <h2 className="kb-files-title">Files</h2>
+              <p className="kb-files-subtitle">
+                Please wait for your files to finish parsing before starting an AI-powered
+                chat.
+              </p>
             </div>
-            <div
-              className="upload-zone"
-              onClick={() => fileRef.current?.click()}
-              onDragOver={(e) => e.preventDefault()}
-              onDrop={(e) => {
-                e.preventDefault();
-                onUpload(e.dataTransfer.files);
-              }}
-            >
-              Drop files or click to upload
-              <div style={{ fontSize: '0.8rem', marginTop: 4 }}>PDF, TXT, MD, …</div>
+            <div className="kb-files-header-actions">
+              <input
+                className="kb-search-input"
+                type="search"
+                placeholder="Search"
+                value={docSearch}
+                onChange={(e) => setDocSearch(e.target.value)}
+              />
+              <button
+                className="btn"
+                type="button"
+                disabled={busy}
+                onClick={() => fileRef.current?.click()}
+              >
+                + Add file
+              </button>
               <input
                 ref={fileRef}
                 type="file"
@@ -217,88 +608,129 @@ export default function KnowledgePanel({
                 onChange={(e) => onUpload(e.target.files)}
               />
             </div>
+          </div>
 
-            <div className="doc-list">
-              {docs.length === 0 && <p className="empty-hint">No documents yet.</p>}
-              {docs.map((doc) => (
-                <div key={doc.id} className="doc-card">
-                  <h4>{doc.name}</h4>
-                  <div className="doc-meta">
-                    <span className={`badge ${doc.status}`}>{doc.status}</span>
-                    {' · '}
-                    {formatBytes(doc.sizeBytes)}
-                    {' · '}
-                    {doc.chunkCount} chunks
-                    {doc.status === 'running' &&
-                      ` · ${Math.round((doc.progress || 0) * 100)}%`}
-                  </div>
-                  <div className="doc-actions">
-                    <button
-                      className="btn btn-secondary"
-                      type="button"
-                      disabled={busy || doc.status === 'running'}
-                      onClick={() => onParse(doc.id)}
-                    >
-                      Parse / Cut chunks
-                    </button>
-                    <button
-                      className="btn btn-secondary"
-                      type="button"
-                      disabled={busy}
-                      onClick={() => onPreview(doc.id)}
-                    >
-                      Preview
-                    </button>
-                    <button
-                      className="btn btn-danger"
-                      type="button"
-                      disabled={busy}
-                      onClick={() => onDeleteDoc(doc.id)}
-                    >
-                      Delete
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
+          {error && <p className="error-text">{error}</p>}
+
+          <div
+            className="kb-drop-hint"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              e.preventDefault();
+              onUpload(e.dataTransfer.files);
+            }}
+          >
+            Drop files here or use + Add file · PDF, TXT, MD, …
+          </div>
+
+          <div className="kb-files-table-wrap">
+            <table className="kb-files-table">
+              <thead>
+                <tr>
+                  <th className="kb-col-check">
+                    <input
+                      type="checkbox"
+                      checked={
+                        filteredDocs.length > 0 &&
+                        selectedDocIds.size === filteredDocs.length
+                      }
+                      onChange={toggleAllDocs}
+                      aria-label="Select all"
+                    />
+                  </th>
+                  <th>Name</th>
+                  <th>Upload date</th>
+                  <th>Enable</th>
+                  <th>Chunks</th>
+                  <th>Metadata</th>
+                  <th>Parse</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredDocs.length === 0 ? (
+                  <tr>
+                    <td colSpan={8} className="kb-files-empty">
+                      No files yet. Add a file to get started.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredDocs.map((doc) => (
+                    <tr key={doc.id}>
+                      <td className="kb-col-check">
+                        <input
+                          type="checkbox"
+                          checked={selectedDocIds.has(doc.id)}
+                          onChange={() => toggleDoc(doc.id)}
+                          aria-label={`Select ${doc.name}`}
+                        />
+                      </td>
+                      <td>
+                        <div className="kb-file-name" title={doc.name}>
+                          {doc.name}
+                        </div>
+                        <div className="kb-file-sub">{formatBytes(doc.sizeBytes)}</div>
+                      </td>
+                      <td className="kb-cell-muted">{formatDateTime(doc.createdAt)}</td>
+                      <td>
+                        <label className="kb-switch" title="Available for retrieval when parsed">
+                          <input
+                            type="checkbox"
+                            checked={doc.status === 'done'}
+                            readOnly
+                            disabled
+                          />
+                          <span className="kb-switch-slider" />
+                        </label>
+                      </td>
+                      <td className="kb-cell-muted">{doc.chunkCount}</td>
+                      <td className="kb-cell-muted">—</td>
+                      <td>
+                        <div className="kb-parse-cell">
+                          <span className={`badge ${doc.status}`}>
+                            {doc.status === 'running'
+                              ? `${Math.round((doc.progress || 0) * 100)}%`
+                              : doc.status}
+                          </span>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            type="button"
+                            disabled={busy || doc.status === 'running'}
+                            onClick={() => void onParse(doc.id)}
+                          >
+                            {doc.status === 'done' ? 'Re-parse' : 'Parse'}
+                          </button>
+                        </div>
+                      </td>
+                      <td>
+                        <div className="kb-action-cell">
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            type="button"
+                            disabled={busy}
+                            onClick={() => setPreviewDoc(doc)}
+                          >
+                            Preview
+                          </button>
+                          <button
+                            className="btn btn-danger btn-sm"
+                            type="button"
+                            disabled={busy}
+                            onClick={() => void onDeleteDoc(doc.id)}
+                          >
+                            Delete
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
       </div>
 
-      {preview && (
-        <div className="preview-modal-backdrop" onClick={() => setPreview(null)}>
-          <div className="preview-modal" onClick={(e) => e.stopPropagation()}>
-            <header>
-              <h3>
-                Preview · {preview.doc.name} ({preview.total} chunks)
-              </h3>
-              <button className="btn btn-ghost" type="button" onClick={() => setPreview(null)}>
-                Close
-              </button>
-            </header>
-            <div className="body">
-              <p className="doc-meta">
-                status={preview.doc.status} · progress=
-                {Math.round((preview.doc.progress || 0) * 100)}% ·{' '}
-                {preview.doc.progressMsg || ''}
-              </p>
-              {preview.chunks.length === 0 && (
-                <p className="empty-hint">
-                  No chunks yet. Click <strong>Parse / Cut chunks</strong> first.
-                </p>
-              )}
-              {preview.chunks.map((c, i) => (
-                <div key={c.id || i} className="chunk-item">
-                  <div style={{ color: 'var(--text-tertiary)', marginBottom: 6, fontSize: '0.75rem' }}>
-                    #{i + 1} · {c.id}
-                  </div>
-                  {c.content}
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-    </aside>
+    </div>
   );
 }

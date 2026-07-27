@@ -1,11 +1,11 @@
 import { Module } from '@nestjs/common';
 import { AgentService } from './agent.service';
+import { AgentSessionPool } from './agent-session.pool';
 import { KnowledgeModule } from '../knowledge/knowledge.module';
-import { DocumentsModule } from '../documents/documents.module';
 
 @Module({
-  imports: [KnowledgeModule, DocumentsModule],
-  providers: [AgentService],
-  exports: [AgentService],
+  imports: [KnowledgeModule],
+  providers: [AgentSessionPool, AgentService],
+  exports: [AgentService, AgentSessionPool],
 })
 export class AgentModule {}

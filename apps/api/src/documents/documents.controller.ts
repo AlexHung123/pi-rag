@@ -5,6 +5,7 @@ import {
   Param,
   Post,
   Query,
+  StreamableFile,
   UploadedFile,
   UseGuards,
   UseInterceptors,
@@ -89,6 +90,22 @@ export class DocumentsController {
     @Param('docId') docId: string,
   ) {
     return this.documents.preview(user.userId, kbId, docId);
+  }
+
+  /** Proxy original file from RAGFlow for inline preview (PDF/text/image). */
+  @Get(':docId/file')
+  async file(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+  ): Promise<StreamableFile> {
+    const file = await this.documents.downloadFile(user.userId, kbId, docId);
+    const safeName = file.filename.replace(/[\\/"]/g, '_');
+    return new StreamableFile(file.buffer, {
+      type: file.contentType,
+      disposition: `inline; filename="${safeName}"`,
+      length: file.buffer.length,
+    });
   }
 
   @Delete(':docId')

@@ -84,6 +84,8 @@ export class RagflowMockStore {
           content,
           document_id: docId,
           available: true,
+          // Demo boxes: page 1, staggered vertical bands (PDF space units)
+          positions: [[1, 40, 520, 80 + i * 90, 140 + i * 90]],
         }));
         doc.chunk_count = doc.chunks.length;
         doc.progress = 1;
@@ -103,6 +105,18 @@ export class RagflowMockStore {
       doc.progress = Math.min(0.95, 0.1 + elapsed / 1000);
     }
     return doc;
+  }
+
+  downloadDocument(
+    datasetId: string,
+    documentId: string,
+  ): { buffer: Buffer; filename: string } | null {
+    const doc = this.docsByDataset.get(datasetId)?.get(documentId);
+    if (!doc) return null;
+    return {
+      buffer: doc.buffer || Buffer.from(`Mock content for ${doc.name}`, 'utf8'),
+      filename: doc.name || 'document.bin',
+    };
   }
 
   deleteDocument(datasetId: string, documentId: string) {

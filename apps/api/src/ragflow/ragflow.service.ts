@@ -155,6 +155,65 @@ export class RagflowService {
     });
   }
 
+  /**
+   * Download original document bytes from RAGFlow.
+   * API: GET /api/v1/datasets/{dataset_id}/documents/{document_id}
+   * Success returns raw file body; failure returns JSON { code, message }.
+   */
+  async downloadDocument(
+    datasetId: string,
+    documentId: string,
+  ): Promise<{ buffer: Buffer; contentType: string; filename: string }> {
+    if (this.useMock()) {
+      const file = this.mock.downloadDocument(datasetId, documentId);
+      if (!file) throw badRequest('document file not found');
+      return {
+        buffer: file.buffer,
+        contentType: guessContentType(file.filename),
+        filename: file.filename,
+      };
+    }
+
+    const url = `${this.baseUrl()}/api/v1/datasets/${datasetId}/documents/${documentId}`;
+    const res = await fetch(url, {
+      method: 'GET',
+      headers: this.headers(false),
+    });
+    const contentType = res.headers.get('content-type') || '';
+    const disposition = res.headers.get('content-disposition') || '';
+    const filenameFromHeader = parseFilename(disposition);
+
+    // RAGFlow returns JSON on error; binary/text on success.
+    if (contentType.includes('application/json')) {
+      const text = await res.text();
+      let message = `RAGFlow download failed (${res.status})`;
+      try {
+        const json = JSON.parse(text) as ApiEnvelope<unknown>;
+        if (json.message) message = json.message;
+        else if (json.code !== 0) message = `RAGFlow error code ${json.code}`;
+      } catch {
+        message = text.slice(0, 200) || message;
+      }
+      throw badRequest(message);
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => '');
+      throw badRequest(
+        `RAGFlow download failed (${res.status}): ${text.slice(0, 200)}`,
+      );
+    }
+
+    const ab = await res.arrayBuffer();
+    const buffer = Buffer.from(ab);
+    const filename = filenameFromHeader || `document-${documentId}`;
+    return {
+      buffer,
+      contentType: contentType || guessContentType(filename),
+      filename,
+    };
+  }
+
   async listChunks(
     datasetId: string,
     documentId: string,
@@ -203,18 +262,26 @@ export class RagflowService {
       },
     );
     const chunks = data?.chunks || [];
-    return chunks.map((c) => ({
-      id: String(c.id || c.chunk_id || ''),
-      content: String(c.content || c.content_with_weight || ''),
-      documentId: c.document_id ? String(c.document_id) : undefined,
-      documentName: c.document_keyword
-        ? String(c.document_keyword)
-        : c.docnm_kwd
-          ? String(c.docnm_kwd)
-          : undefined,
-      datasetId: c.dataset_id ? String(c.dataset_id) : undefined,
-      score: typeof c.similarity === 'number' ? c.similarity : undefined,
-    }));
+    return chunks.map((c) => {
+      const rawPositions = c.positions ?? c.position;
+      let positions: RetrieveHit['positions'];
+      if (Array.isArray(rawPositions)) {
+        positions = rawPositions as RetrieveHit['positions'];
+      }
+      return {
+        id: String(c.id || c.chunk_id || ''),
+        content: String(c.content || c.content_with_weight || ''),
+        documentId: c.document_id ? String(c.document_id) : undefined,
+        documentName: c.document_keyword
+          ? String(c.document_keyword)
+          : c.docnm_kwd
+            ? String(c.docnm_kwd)
+            : undefined,
+        datasetId: c.dataset_id ? String(c.dataset_id) : undefined,
+        score: typeof c.similarity === 'number' ? c.similarity : undefined,
+        positions,
+      };
+    });
   }
 
   mapRunToStatus(run: string | number | undefined): 'unstart' | 'running' | 'done' | 'fail' {
@@ -232,4 +299,45 @@ export class RagflowService {
     if (v.includes('RUN')) return 'running';
     return 'unstart';
   }
+}
+
+function parseFilename(contentDisposition: string): string | undefined {
+  if (!contentDisposition) return undefined;
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(contentDisposition);
+  if (utf8?.[1]) {
+    try {
+      return decodeURIComponent(utf8[1].trim().replace(/^"|"$/g, ''));
+    } catch {
+      return utf8[1].trim().replace(/^"|"$/g, '');
+    }
+  }
+  const plain = /filename="?([^";]+)"?/i.exec(contentDisposition);
+  return plain?.[1]?.trim() || undefined;
+}
+
+function guessContentType(filename: string): string {
+  const ext = filename.split('.').pop()?.toLowerCase() || '';
+  const map: Record<string, string> = {
+    pdf: 'application/pdf',
+    txt: 'text/plain; charset=utf-8',
+    md: 'text/markdown; charset=utf-8',
+    markdown: 'text/markdown; charset=utf-8',
+    html: 'text/html; charset=utf-8',
+    htm: 'text/html; charset=utf-8',
+    json: 'application/json',
+    csv: 'text/csv; charset=utf-8',
+    doc: 'application/msword',
+    docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+    xls: 'application/vnd.ms-excel',
+    xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ppt: 'application/vnd.ms-powerpoint',
+    pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+    png: 'image/png',
+    jpg: 'image/jpeg',
+    jpeg: 'image/jpeg',
+    gif: 'image/gif',
+    webp: 'image/webp',
+    svg: 'image/svg+xml',
+  };
+  return map[ext] || 'application/octet-stream';
 }

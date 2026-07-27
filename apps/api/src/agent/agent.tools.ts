@@ -1,14 +1,15 @@
+import { Type } from 'typebox';
 import { KnowledgeService } from '../knowledge/knowledge.service';
-import { DocumentsService } from '../documents/documents.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { PrismaService } from '../prisma/prisma.service';
+import type { RetrieveHit } from '../ragflow/ragflow.types';
 
-/** Local tool shape compatible with pi-agent-core AgentTool execute contract. */
+/** pi-agent-core AgentTool shape (TypeBox parameters). */
 export type AppAgentTool = {
   name: string;
   label: string;
   description: string;
-  parameters: Record<string, unknown>;
+  parameters: unknown;
   execute: (
     toolCallId: string,
     params: Record<string, unknown>,
@@ -16,189 +17,230 @@ export type AppAgentTool = {
     onUpdate?: (partial: unknown) => void,
   ) => Promise<{
     content: Array<{ type: 'text'; text: string }>;
-    details?: unknown;
+    details: unknown;
   }>;
 };
 
-function objectSchema(properties: Record<string, unknown>, required: string[] = []) {
-  return {
-    type: 'object',
-    properties,
-    required,
-    additionalProperties: false,
-  };
+/** Normalized citation source for chat UI. */
+export type CitationSource = {
+  id: string;
+  content: string;
+  documentName?: string;
+  documentId?: string;
+  /** App document UUID (for Locate / preview). */
+  appDocumentId?: string;
+  knowledgeBaseId?: string;
+  knowledgeBaseName?: string;
+  score?: number;
+  /** 1-based display index among returned hits. */
+  index: number;
+  evidenceLabel: string;
+  positions?: number[][];
+};
+
+export function evidenceLabelFromScore(score?: number): string {
+  if (typeof score !== 'number' || Number.isNaN(score)) return 'Evidence';
+  if (score >= 0.75) return 'Strong evidence';
+  if (score >= 0.5) return 'Moderate evidence';
+  return 'Weak evidence';
+}
+
+export function hitsToCitationSources(
+  hits: Array<
+    RetrieveHit & {
+      knowledgeBaseId?: string;
+      knowledgeBaseName?: string;
+      appDocumentId?: string;
+      positions?: number[][];
+    }
+  >,
+): CitationSource[] {
+  return hits.map((h, i) => ({
+    id: h.id || `hit-${i + 1}`,
+    content: h.content || '',
+    documentName: h.documentName,
+    documentId: h.documentId,
+    appDocumentId: h.appDocumentId,
+    knowledgeBaseId: h.knowledgeBaseId,
+    knowledgeBaseName: h.knowledgeBaseName,
+    score: h.score,
+    index: i + 1,
+    evidenceLabel: evidenceLabelFromScore(h.score),
+    positions: h.positions,
+  }));
+}
+
+const MAX_TOP_K = 10;
+const DEFAULT_TOP_K = 10;
+
+function clampTopK(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_TOP_K;
+  return Math.min(MAX_TOP_K, Math.max(1, Math.floor(value)));
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((v) => String(v)).filter(Boolean);
 }
 
 export function createUserTools(deps: {
   userId: string;
   knowledge: KnowledgeService;
-  documents: DocumentsService;
   ragflow: RagflowService;
   prisma: PrismaService;
 }): AppAgentTool[] {
-  const { userId, knowledge, documents, ragflow, prisma } = deps;
-
-  const listKbs: AppAgentTool = {
-    name: 'list_my_knowledge_bases',
-    label: 'List knowledge bases',
-    description: 'List knowledge bases owned by the current user.',
-    parameters: objectSchema({}),
-    execute: async () => {
-      const items = await knowledge.list(userId);
-      return {
-        content: [{ type: 'text', text: JSON.stringify(items, null, 2) }],
-        details: { count: items.length },
-      };
-    },
-  };
-
-  const createKb: AppAgentTool = {
-    name: 'create_knowledge_base',
-    label: 'Create knowledge base',
-    description: 'Create a new knowledge base for the current user.',
-    parameters: objectSchema(
-      {
-        name: { type: 'string', description: 'Knowledge base name' },
-        description: { type: 'string' },
-        chunkMethod: { type: 'string' },
-      },
-      ['name'],
-    ),
-    execute: async (_id, params) => {
-      const kb = await knowledge.create(userId, {
-        name: String(params.name || ''),
-        description: params.description ? String(params.description) : undefined,
-        chunkMethod: params.chunkMethod ? String(params.chunkMethod) : undefined,
-      });
-      return {
-        content: [{ type: 'text', text: JSON.stringify(kb, null, 2) }],
-        details: kb,
-      };
-    },
-  };
-
-  const listDocs: AppAgentTool = {
-    name: 'list_documents',
-    label: 'List documents',
-    description: 'List documents in a knowledge base owned by the user.',
-    parameters: objectSchema(
-      { knowledgeBaseId: { type: 'string' } },
-      ['knowledgeBaseId'],
-    ),
-    execute: async (_id, params) => {
-      const items = await documents.list(userId, String(params.knowledgeBaseId));
-      return {
-        content: [{ type: 'text', text: JSON.stringify(items, null, 2) }],
-        details: { count: items.length },
-      };
-    },
-  };
-
-  const parseDocs: AppAgentTool = {
-    name: 'parse_documents',
-    label: 'Parse documents',
-    description: 'Trigger chunking/parse for a document in an owned knowledge base.',
-    parameters: objectSchema(
-      {
-        knowledgeBaseId: { type: 'string' },
-        documentId: { type: 'string' },
-      },
-      ['knowledgeBaseId', 'documentId'],
-    ),
-    execute: async (_id, params) => {
-      const doc = await documents.parse(
-        userId,
-        String(params.knowledgeBaseId),
-        String(params.documentId),
-      );
-      return {
-        content: [{ type: 'text', text: JSON.stringify(doc, null, 2) }],
-        details: doc,
-      };
-    },
-  };
-
-  const previewDoc: AppAgentTool = {
-    name: 'preview_document',
-    label: 'Preview document',
-    description: 'Preview document metadata and sample chunks.',
-    parameters: objectSchema(
-      {
-        knowledgeBaseId: { type: 'string' },
-        documentId: { type: 'string' },
-      },
-      ['knowledgeBaseId', 'documentId'],
-    ),
-    execute: async (_id, params) => {
-      const preview = await documents.preview(
-        userId,
-        String(params.knowledgeBaseId),
-        String(params.documentId),
-        5,
-      );
-      return {
-        content: [{ type: 'text', text: JSON.stringify(preview, null, 2) }],
-        details: preview,
-      };
-    },
-  };
+  const { userId, knowledge, ragflow, prisma } = deps;
 
   const retrieve: AppAgentTool = {
     name: 'retrieve_chunks',
     label: 'Retrieve chunks',
     description:
-      'Retrieve relevant chunks from the user knowledge bases to answer a question.',
-    parameters: objectSchema(
-      {
-        question: { type: 'string' },
-        knowledgeBaseId: { type: 'string' },
-        topK: { type: 'number' },
-      },
-      ['question'],
-    ),
+      'Retrieve relevant text chunks from knowledge bases the user selected in the UI. Prefer this before claiming facts from documents. Pass knowledgeBaseIds from the selected-KB prompt (required). Returns at most 10 chunks (topK default 10).',
+    parameters: Type.Object({
+      question: Type.String({ description: 'Question or search query' }),
+      knowledgeBaseId: Type.Optional(
+        Type.String({ description: 'Optional single app knowledge base UUID (user-selected)' }),
+      ),
+      knowledgeBaseIds: Type.Optional(
+        Type.Array(Type.String(), {
+          description: 'User-selected app knowledge base UUIDs to search (from the UI selection)',
+        }),
+      ),
+      topK: Type.Optional(
+        Type.Number({ description: `Max chunks (default ${DEFAULT_TOP_K}, max ${MAX_TOP_K})` }),
+      ),
+    }),
     execute: async (_id, params) => {
-      let kbs = await knowledge.list(userId);
-      if (params.knowledgeBaseId) {
-        kbs = kbs.filter((k) => k.id === String(params.knowledgeBaseId));
-      }
-      if (!kbs.length) {
+      const multiIds = asStringArray(params.knowledgeBaseIds);
+      const singleId = params.knowledgeBaseId
+        ? String(params.knowledgeBaseId)
+        : '';
+      const scopeIds = multiIds.length
+        ? multiIds
+        : singleId
+          ? [singleId]
+          : [];
+
+      // KBs are chosen only by the user in the UI — never invent or auto-pick ids.
+      if (!scopeIds.length) {
         return {
-          content: [{ type: 'text', text: 'No knowledge bases available.' }],
-          details: { hits: [] },
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                hits: [],
+                message:
+                  'No knowledge bases selected. The user must select knowledge bases in the UI before retrieval.',
+              }),
+            },
+          ],
+          details: { hits: [], sources: [] },
         };
       }
+
+      let kbs = await knowledge.list(userId);
+      const allowed = new Set(scopeIds);
+      kbs = kbs.filter((k) => allowed.has(k.id));
+      if (!kbs.length) {
+        return {
+          content: [
+            {
+              type: 'text',
+              text: JSON.stringify({
+                hits: [],
+                message:
+                  'Selected knowledge base ids were not found or are not owned by this user.',
+              }),
+            },
+          ],
+          details: { hits: [], sources: [] },
+        };
+      }
+
       const owned = await prisma.knowledgeBase.findMany({
         where: { ownerUserId: userId, id: { in: kbs.map((k) => k.id) } },
+        include: {
+          documents: {
+            select: {
+              id: true,
+              ragflowDocumentId: true,
+              name: true,
+            },
+          },
+        },
       });
+
+      const topK = clampTopK(params.topK);
       const hits = await ragflow.retrieve({
         datasetIds: owned.map((k) => k.ragflowDatasetId),
         question: String(params.question || ''),
-        topK: typeof params.topK === 'number' ? params.topK : 6,
+        topK,
       });
+
       const byRf = new Map(owned.map((k) => [k.ragflowDatasetId, k]));
-      const mapped = hits.map((h) => ({
-        ...h,
-        knowledgeBaseId: h.datasetId ? byRf.get(h.datasetId)?.id : undefined,
-        knowledgeBaseName: h.datasetId ? byRf.get(h.datasetId)?.name : undefined,
-      }));
+      const docByRf = new Map<
+        string,
+        { appDocumentId: string; knowledgeBaseId: string; name: string }
+      >();
+      for (const kb of owned) {
+        for (const d of kb.documents) {
+          docByRf.set(d.ragflowDocumentId, {
+            appDocumentId: d.id,
+            knowledgeBaseId: kb.id,
+            name: d.name,
+          });
+        }
+      }
+
+      const mapped = hits.map((h) => {
+        const kb = h.datasetId ? byRf.get(h.datasetId) : undefined;
+        const doc = h.documentId ? docByRf.get(h.documentId) : undefined;
+        return {
+          ...h,
+          documentName: h.documentName || doc?.name,
+          knowledgeBaseId: kb?.id ?? doc?.knowledgeBaseId,
+          knowledgeBaseName: kb?.name,
+          appDocumentId: doc?.appDocumentId,
+        };
+      });
+
+      const sources = hitsToCitationSources(mapped);
+
       return {
         content: [{ type: 'text', text: JSON.stringify(mapped, null, 2) }],
-        details: { hits: mapped },
+        details: { hits: mapped, sources },
       };
     },
   };
 
-  return [listKbs, createKb, listDocs, parseDocs, previewDoc, retrieve];
+  return [retrieve];
 }
 
-export const DOMAIN_SYSTEM_PROMPT = `You are a vertical-domain RAG expert assistant for pi-rag.
-You help the current user manage their private knowledge bases and answer questions using only their data.
+export const DOMAIN_SYSTEM_PROMPT = `You are the CSB Knowledge Base Portal assistant.
+You answer the current user's questions. Knowledge bases are created, managed, and selected only in the UI; you do not create or list them.
 
 Rules:
-- Only use tools to access knowledge; never invent document contents.
+- Knowledge bases are selected by the user in the UI only. Never invent or guess knowledge base ids.
+- When the user message includes selected knowledge base IDs, you MUST call retrieve_chunks with those knowledgeBaseIds and topK=10 before answering factual questions. Do not invent document content.
+- If no knowledge bases are selected, answer without document retrieval and, if facts from documents are needed, ask the user to select knowledge bases in the UI.
+- Only use tool results for document content; never invent document contents.
 - Knowledge bases are user-private; never claim access to other users' data.
-- Prefer retrieve_chunks before answering domain questions.
-- If retrieval returns nothing relevant, say you don't know based on the knowledge base.
-- When helping with ingestion, guide: create KB → upload (via UI) → parse → preview chunks.
+- If retrieval returns nothing relevant, say you don't know based on the selected knowledge bases.
 - Be concise and practical. Cite document names when possible.
+- Prefer topK=10 (maximum 10 chunks). Use the most relevant chunks only.
 `;
+
+/** Build a prompt prefix when the UI has knowledge bases selected. */
+export function buildSelectedKbPromptPrefix(
+  selected: Array<{ id: string; name: string }>,
+): string {
+  if (!selected.length) return '';
+  const lines = selected.map((k) => `- ${k.name} (id: ${k.id})`).join('\n');
+  const ids = JSON.stringify(selected.map((k) => k.id));
+  return (
+    `[Selected knowledge bases for this question]\n${lines}\n\n` +
+    `You MUST call retrieve_chunks with knowledgeBaseIds=${ids} and topK=10 before answering. ` +
+    `Base your analysis only on the retrieved chunks. Mention document names when citing facts.\n\n` +
+    `[User question]\n`
+  );
+}

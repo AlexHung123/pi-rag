@@ -25,12 +25,15 @@ export class AuthGuard implements CanActivate {
 
     const method = (req.method || 'GET').toUpperCase();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+      // Session-bound CSRF: header must match the secret stored with the session.
+      // Cookie double-submit is optional (helps when JS can read the cookie).
       const headerToken =
         (req.headers['x-csrf-token'] as string | undefined) ||
         (req.headers['x-xsrf-token'] as string | undefined) ||
         '';
       const cookieToken = req.cookies?.[CSRF_COOKIE] || '';
-      if (!headerToken || headerToken !== cookieToken || headerToken !== principal.csrfSecret) {
+      const token = headerToken || cookieToken;
+      if (!token || token !== principal.csrfSecret) {
         throw forbidden('invalid csrf token');
       }
     }

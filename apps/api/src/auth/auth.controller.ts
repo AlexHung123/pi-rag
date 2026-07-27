@@ -108,7 +108,18 @@ export class AuthController {
 
   @Get('me')
   @UseGuards(AuthGuard)
-  me(@CurrentUser() user: AuthPrincipal) {
+  me(
+    @CurrentUser() user: AuthPrincipal,
+    @Res({ passthrough: true }) res: Response,
+  ) {
+    // Refresh readable CSRF cookie so SPA can always sync after reload.
+    const secure = (process.env.COOKIE_SECURE || 'false').toLowerCase() === 'true';
+    res.cookie(CSRF_COOKIE, user.csrfSecret, {
+      httpOnly: false,
+      sameSite: 'lax',
+      secure,
+      path: '/',
+    });
     return {
       user: {
         id: user.userId,

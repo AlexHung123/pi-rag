@@ -35,7 +35,7 @@ Chat today uses a custom OpenAI `fetch` loop plus a keyword-based fallback. The 
 | LLM layer | `@earendil-works/pi-ai` OpenAI-compatible custom provider |
 | Lifecycle | **Approach B:** persistent agent per conversation |
 | Capacity model | **Bounded pool** of conversation-bound sessions (not anonymous workers) |
-| Tools | `list_my_knowledge_bases`, `retrieve_chunks` only |
+| Tools | `retrieve_chunks` only (KBs selected by user in UI) |
 | Persistence | **P0:** Postgres user/assistant messages only |
 | Rehydrate source | Last N user/assistant messages from DB on pool miss |
 | SSE contract | Keep existing client events |
@@ -57,8 +57,7 @@ POST /api/conversations/:id/messages  (SSE)
               ▼
         agent.prompt(userMessage)
               │
-              ├─ tool: list_my_knowledge_bases (owned only)
-              ├─ tool: retrieve_chunks → RAGFlow (owned dataset IDs only)
+              ├─ tool: retrieve_chunks → RAGFlow (user-selected + owned dataset IDs only)
               ▼
         map pi events → SSE frames
               │
@@ -72,7 +71,7 @@ POST /api/conversations/:id/messages  (SSE)
 |-----------|----------------|
 | `AgentSessionPool` | In-memory map of conversation sessions; getOrCreate, dispose, TTL/LRU eviction |
 | `createPiAgent` / model factory | Build pi-ai provider + `Agent` with system prompt and tools |
-| `createUserTools` | Bound tools: list KBs + retrieve (ownership enforced) |
+| `createUserTools` | Bound tools: retrieve only (user-selected KBs, ownership enforced) |
 | `AgentService` | Orchestrate pool + prompt + event streaming for chat |
 | `ChatService` | Ownership, message persistence, dispose on conversation delete |
 
@@ -153,18 +152,12 @@ If neither `OPENAI_BASE_URL` nor a usable key/config is present, stream an SSE `
 
 ## 7. Tools
 
-### `list_my_knowledge_bases`
-
-- **Input:** none  
-- **Behavior:** `knowledge.list(userId)`  
-- **Output:** JSON list of owned KBs (id, name, description, …)
-
 ### `retrieve_chunks`
 
-- **Input:** `question` (required), optional `knowledgeBaseId`, optional `topK`  
+- **Input:** `question` (required), `knowledgeBaseIds` / `knowledgeBaseId` (user-selected; required for search), optional `topK`  
 - **Behavior:**  
-  - Resolve owned KBs for `userId`  
-  - If `knowledgeBaseId` set, filter to that id only (must be owned)  
+  - Require user-selected KB ids from the UI (never auto-list or invent KBs)  
+  - Resolve owned KBs for `userId` and filter to selected ids only  
   - Map to RAGFlow dataset ids  
   - Call `ragflow.retrieve`  
   - Return hits as JSON (content, scores, doc names, KB ids/names)  
@@ -172,15 +165,17 @@ If neither `OPENAI_BASE_URL` nor a usable key/config is present, stream an SSE `
 
 ### Removed from agent surface
 
+- `list_my_knowledge_bases` (KB selection is UI-only)
 - `create_knowledge_base`
 - `list_documents`, `parse_documents`, `preview_document` (UI/API remains)
 
 ### System prompt (intent)
 
 - Domain Q&A assistant for the current user’s knowledge bases.
-- For factual/domain questions: prefer `retrieve_chunks` (use `list_my_knowledge_bases` when needed to choose a KB).
-- Do not invent document content; if retrieval is empty/irrelevant, say you don’t know from the knowledge bases.
-- KB create/upload/parse is done in the UI — do not claim to create KBs via tools.
+- Knowledge bases are selected only by the user in the UI; agent must not list or pick KBs.
+- For factual/domain questions with selected KBs: call `retrieve_chunks` with those ids.
+- Do not invent document content; if retrieval is empty/irrelevant, say you don’t know from the selected knowledge bases.
+- KB create/upload/parse/select is done in the UI — do not claim to create or list KBs via tools.
 
 ## 8. Event → SSE Mapping
 

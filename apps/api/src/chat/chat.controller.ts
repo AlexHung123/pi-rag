@@ -60,6 +60,7 @@ export class ChatController {
         user.userId,
         id,
         body.content,
+        body.knowledgeBaseIds,
       )) {
         res.write(`event: ${frame.event}\n`);
         res.write(`data: ${JSON.stringify(frame.data)}\n\n`);

@@ -3,11 +3,24 @@ import { useAuth } from './contexts/AuthContext';
 import Login from './components/Login';
 import Markdown from './components/Markdown';
 import KnowledgePanel from './components/KnowledgePanel';
+import AppSidebar, { type WorkspaceView } from './components/AppSidebar';
+import SourceReferences from './components/SourceReferences';
+import DocumentLocateDrawer from './components/DocumentLocateDrawer';
 import {
   chatApi,
+  kbApi,
   type ChatMessage,
+  type CitationSource,
   type Conversation,
+  type KnowledgeBase,
 } from './services/api';
+
+function sourcesFromMessage(m: ChatMessage): CitationSource[] {
+  if (Array.isArray(m.sources) && m.sources.length) return m.sources;
+  const meta = m.metadata;
+  if (meta && Array.isArray(meta.sources)) return meta.sources as CitationSource[];
+  return [];
+}
 
 export default function App() {
   const { user, loading, logout } = useAuth();
@@ -17,13 +30,48 @@ export default function App() {
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
   const [toolHint, setToolHint] = useState('');
-  const [kbOpen, setKbOpen] = useState(false);
+  const [workspace, setWorkspace] = useState<WorkspaceView>('chat');
+  const [sidebarOpen, setSidebarOpen] = useState(() =>
+    typeof window === 'undefined' ? true : window.innerWidth > 768,
+  );
   const [error, setError] = useState('');
+  const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
+  const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
+  const [kbPickerOpen, setKbPickerOpen] = useState(false);
+  const [locateSource, setLocateSource] = useState<CitationSource | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const kbPickerRef = useRef<HTMLDivElement>(null);
+  /** Monotonic id so slower / out-of-order list responses cannot wipe newer state. */
+  const listRequestIdRef = useRef(0);
+  const sendingRef = useRef(false);
 
   const refreshConversations = useCallback(async () => {
+    const reqId = ++listRequestIdRef.current;
     const res = await chatApi.list();
-    setConversations(res.items);
+    const items = Array.isArray(res.items) ? res.items : [];
+    // Ignore stale responses (e.g. initial load finishing after a create+list).
+    if (reqId !== listRequestIdRef.current) return items;
+    setConversations(items);
+    // Drop selection if the conversation no longer exists (deleted elsewhere, DB reset).
+    // Skip while a send is in flight so we don't clear a just-created id mid-stream.
+    if (!sendingRef.current) {
+      setActiveId((current) => {
+        if (current && !items.some((c) => c.id === current)) {
+          // Defer message clear to avoid setState-during-setState.
+          queuePromise.resolve().then(() => {
+            setMessages((msgs) => (msgs.length ? [] : msgs));
+          });
+          return null;
+        }
+        return current;
+      });
+    }
+    return items;
+  }, []);
+
+  const refreshKnowledgeBases = useCallback(async () => {
+    const res = await kbApi.list();
+    setKnowledgeBases(res.items);
     return res.items;
   }, []);
 
@@ -32,51 +80,138 @@ export default function App() {
     refreshConversations().catch((e) =>
       setError(e instanceof Error ? e.message : String(e)),
     );
-  }, [user, refreshConversations]);
+    refreshKnowledgeBases().catch(() => {
+      /* non-blocking for chat */
+    });
+  }, [user, refreshConversations, refreshKnowledgeBases]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, sending]);
 
+  useEffect(() => {
+    if (!kbPickerOpen) return;
+    const onDocClick = (e: MouseEvent) => {
+      if (!kbPickerRef.current?.contains(e.target as Node)) {
+        setKbPickerOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [kbPickerOpen]);
+
+  /**
+   * Resolve a conversation id that exists for this user.
+   * Recovers from stale activeId (deleted chat, wiped list race, etc.).
+   */
+  const ensureConversationId = async (
+    preferredId: string | null,
+  ): Promise<string> => {
+    if (preferredId) {
+      if (conversations.some((c) => c.id === preferredId)) {
+        return preferredId;
+      }
+      try {
+        await chatApi.get(preferredId);
+        return preferredId;
+      } catch {
+        // Stale or not owned — drop selection; create a fresh conversation below.
+        setActiveId(null);
+        setMessages([]);
+      }
+    }
+    const c = await chatApi.create();
+    setActiveId(c.id);
+    await refreshConversations();
+    return c.id;
+  };
+
   const openConversation = async (id: string) => {
-    setActiveId(id);
     setError('');
-    const detail = await chatApi.get(id);
-    setMessages(detail.messages as ChatMessage[]);
+    setWorkspace('chat');
+    try {
+      const detail = await chatApi.get(id);
+      setActiveId(id);
+      setMessages(
+        (detail.messages as ChatMessage[]).map((m) => ({
+          ...m,
+          sources: sourcesFromMessage(m),
+        })),
+      );
+    } catch (e) {
+      setActiveId(null);
+      setMessages([]);
+      setError(e instanceof Error ? e.message : String(e));
+      await refreshConversations().catch(() => undefined);
+    }
   };
 
   const newChat = async () => {
-    const c = await chatApi.create();
-    await refreshConversations();
-    setActiveId(c.id);
-    setMessages([]);
+    try {
+      setError('');
+      const c = await chatApi.create();
+      setActiveId(c.id);
+      setMessages([]);
+      setWorkspace('chat');
+      if (!sidebarOpen) setSidebarOpen(true);
+      await refreshConversations();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
   };
 
   const deleteChat = async (id: string) => {
-    await chatApi.remove(id);
-    if (activeId === id) {
-      setActiveId(null);
-      setMessages([]);
+    try {
+      await chatApi.remove(id);
+      if (activeId === id) {
+        setActiveId(null);
+        setMessages([]);
+      }
+      await refreshConversations();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
-    await refreshConversations();
   };
+
+  const changeWorkspace = (next: WorkspaceView) => {
+    setWorkspace(next);
+    if (next === 'chat' && !sidebarOpen) {
+      setSidebarOpen(true);
+    }
+    if (next === 'knowledge') {
+      void refreshKnowledgeBases();
+    }
+  };
+
+  const toggleKb = (id: string) => {
+    setSelectedKbIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+    );
+  };
+
+  const clearKbSelection = () => setSelectedKbIds([]);
+
+  const selectAllKbs = () =>
+    setSelectedKbIds(knowledgeBases.map((k) => k.id));
 
   const send = async () => {
     const content = input.trim();
     if (!content || sending) return;
     setSending(true);
+    sendingRef.current = true;
     setError('');
     setToolHint('');
     setInput('');
+    setKbPickerOpen(false);
 
-    let convId = activeId;
+    let convId: string | null = null;
+    let assistantText = '';
+    let assistantSources: CitationSource[] = [];
+    let finalMessageId = '';
     try {
-      if (!convId) {
-        const c = await chatApi.create();
-        convId = c.id;
-        setActiveId(c.id);
-        await refreshConversations();
-      }
+      // Ensure we stream against a conversation that still exists for this user.
+      // Fixes "conversation not found" when activeId is stale (deleted / desynced).
+      convId = await ensureConversationId(activeId);
 
       const tempUser: ChatMessage = {
         id: `tmp-user-${Date.now()}`,
@@ -90,51 +225,119 @@ export default function App() {
         content: '',
         createdAt: new Date().toISOString(),
       };
+      finalMessageId = tempAssistant.id;
       setMessages((prev) => [...prev, tempUser, tempAssistant]);
 
-      let assistantText = '';
-      for await (const frame of chatApi.streamMessage(convId, content)) {
-        if (frame.event === 'text_delta') {
-          assistantText += String(frame.data.delta || '');
-          const text = assistantText;
-          setMessages((prev) => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            if (last?.role === 'assistant') {
-              copy[copy.length - 1] = { ...last, content: text };
+      const streamOpts =
+        selectedKbIds.length > 0 ? { knowledgeBaseIds: selectedKbIds } : undefined;
+
+      const runStream = async (id: string) => {
+        let sawConversationMissing = false;
+        for await (const frame of chatApi.streamMessage(id, content, streamOpts)) {
+          if (frame.event === 'text_delta') {
+            assistantText += String(frame.data.delta || '');
+            const text = assistantText;
+            // Stream text only — never attach Sources mid-stream
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last?.role === 'assistant') {
+                copy[copy.length - 1] = {
+                  ...last,
+                  content: text,
+                };
+              }
+              return copy;
+            });
+          } else if (frame.event === 'tool_start') {
+            setToolHint(`Running tool: ${String(frame.data.name || '')}`);
+          } else if (frame.event === 'tool_end') {
+            setToolHint('');
+          } else if (frame.event === 'sources') {
+            // Buffer only; show after the full assistant reply is complete
+            const raw = frame.data.sources;
+            if (Array.isArray(raw) && raw.length > 0) {
+              assistantSources = raw as CitationSource[];
             }
-            return copy;
-          });
-        } else if (frame.event === 'tool_start') {
-          setToolHint(`Running tool: ${String(frame.data.name || '')}`);
-        } else if (frame.event === 'tool_end') {
-          setToolHint('');
-        } else if (frame.event === 'assistant_message') {
-          const finalContent = String(frame.data.content || assistantText);
-          const finalId = String(frame.data.id || tempAssistant.id);
-          setMessages((prev) => {
-            const copy = [...prev];
-            const last = copy[copy.length - 1];
-            if (last?.role === 'assistant') {
-              copy[copy.length - 1] = {
-                ...last,
-                id: finalId,
-                content: finalContent,
-              };
+          } else if (frame.event === 'assistant_message') {
+            const finalContent = String(frame.data.content || assistantText);
+            finalMessageId = String(frame.data.id || tempAssistant.id);
+            const raw = frame.data.sources;
+            // Prefer non-empty payload; keep mid-stream buffer if final list is empty
+            if (Array.isArray(raw) && raw.length > 0) {
+              assistantSources = raw as CitationSource[];
             }
-            return copy;
-          });
-        } else if (frame.event === 'error') {
-          setError(String(frame.data.message || 'stream error'));
+            setMessages((prev) => {
+              const copy = [...prev];
+              const last = copy[copy.length - 1];
+              if (last?.role === 'assistant') {
+                copy[copy.length - 1] = {
+                  ...last,
+                  id: finalMessageId,
+                  content: finalContent,
+                  // Still hide until stream ends (sending → false below)
+                  sources: undefined,
+                };
+              }
+              return copy;
+            });
+          } else if (frame.event === 'error') {
+            const msg = String(frame.data.message || 'stream error');
+            if (/conversation not found/i.test(msg)) {
+              sawConversationMissing = true;
+            } else {
+              setError(msg);
+            }
+          }
         }
+        return sawConversationMissing;
+      };
+
+      let missing = await runStream(convId);
+      // One automatic recovery: create a fresh conversation and resend once.
+      if (missing && !assistantText) {
+        setError('');
+        const fresh = await ensureConversationId(null);
+        convId = fresh;
+        missing = await runStream(fresh);
+        if (missing) {
+          setError('conversation not found');
+        }
+      } else if (missing) {
+        setError('conversation not found');
       }
+
       await refreshConversations();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
+      // Attach Sources only after the stream is fully done (with sending cleared)
+      setMessages((prev) => {
+        const copy = [...prev];
+        const last = copy[copy.length - 1];
+        if (last?.role === 'assistant') {
+          copy[copy.length - 1] = {
+            ...last,
+            id: finalMessageId || last.id,
+            content: assistantText || last.content,
+            sources: assistantSources.length ? assistantSources : last.sources,
+          };
+        }
+        return copy;
+      });
       setSending(false);
+      sendingRef.current = false;
       setToolHint('');
     }
+  };
+
+  const handleLocate = (source: CitationSource) => {
+    if (!source.knowledgeBaseId && !source.appDocumentId && !source.documentName) {
+      setError('This source has no linked document to locate.');
+      return;
+    }
+    setError('');
+    setLocateSource(source);
   };
 
   if (loading) {
@@ -146,126 +349,238 @@ export default function App() {
   }
 
   const activeTitle =
-    conversations.find((c) => c.id === activeId)?.title || 'New chat';
+    conversations.find((c) => c.id === activeId)?.title || 'New conversation';
+
+  const chatOpen = workspace === 'chat' && sidebarOpen;
+  const selectedKbNames = knowledgeBases
+    .filter((k) => selectedKbIds.includes(k.id))
+    .map((k) => k.name);
 
   return (
     <div className="chat-page">
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          <h2>pi-rag</h2>
-          <button className="btn btn-secondary" type="button" onClick={newChat}>
-            New chat
-          </button>
-        </div>
-        <div className="sidebar-body">
-          <div className="sidebar-section-title">Conversations</div>
-          {conversations.length === 0 && (
-            <p className="empty-hint" style={{ padding: '0 12px' }}>
-              No conversations yet.
-            </p>
-          )}
-          {conversations.map((c) => (
-            <button
-              key={c.id}
-              type="button"
-              className={`conv-item ${activeId === c.id ? 'active' : ''}`}
-              onClick={() => openConversation(c.id)}
-            >
-              <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {c.title}
-              </span>
-              <span
-                role="button"
-                tabIndex={0}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  deleteChat(c.id);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') {
-                    e.stopPropagation();
-                    deleteChat(c.id);
-                  }
-                }}
-                style={{ color: 'var(--text-tertiary)' }}
-              >
-                ×
-              </span>
-            </button>
-          ))}
-        </div>
-        <div className="sidebar-footer">
-          <span>{user.username}</span>
-          <button className="btn btn-ghost" type="button" onClick={() => logout()}>
-            Logout
-          </button>
-        </div>
-      </aside>
+      <AppSidebar
+        isOpen={sidebarOpen}
+        onToggle={() => setSidebarOpen((v) => !v)}
+        activeWorkspace={workspace}
+        onChangeWorkspace={changeWorkspace}
+        conversations={conversations}
+        activeConversationId={activeId}
+        onSelectConversation={(id) => {
+          void openConversation(id);
+        }}
+        onCreateConversation={() => {
+          void newChat();
+        }}
+        onDeleteConversation={(id) => {
+          void deleteChat(id);
+        }}
+        username={user.username}
+        onLogout={logout}
+      />
 
-      <main className="main-pane">
-        <div className="main-toolbar">
-          <h3>{activeTitle}</h3>
-          <button
-            className="btn btn-secondary"
-            type="button"
-            onClick={() => setKbOpen((v) => !v)}
-          >
-            {kbOpen ? 'Hide knowledge' : 'Knowledge'}
-          </button>
-        </div>
+      {locateSource && (
+        <DocumentLocateDrawer
+          source={locateSource}
+          onClose={() => setLocateSource(null)}
+        />
+      )}
 
-        <div className="chat-area">
-          {error && <p className="error-text">{error}</p>}
-          {messages.length === 0 ? (
-            <div className="chat-empty">
-              <div>
-                <h2 style={{ marginTop: 0 }}>Domain RAG expert</h2>
-                <p>
-                  Create a private knowledge base, upload docs, parse chunks, then ask
-                  questions. Your data stays isolated per account.
-                </p>
+      {workspace === 'knowledge' ? (
+        <div className="app-workspace knowledge-workspace">
+          <KnowledgePanel onBackToChat={() => changeWorkspace('chat')} />
+        </div>
+      ) : (
+        <main
+          className={`chat-workspace ${chatOpen ? 'sidebar-open' : 'sidebar-closed'}`}
+        >
+          <div className="chat-topbar">
+            <div className="chat-topbar-main">
+              <div className="chat-topbar-left">
+                <span className="chat-topbar-title" title={activeTitle}>
+                  {activeTitle}
+                </span>
+              </div>
+              <div className="chat-topbar-right">
+                <span className="chat-topbar-hint">{user.username}</span>
               </div>
             </div>
-          ) : (
-            <div className="message-list">
-              {toolHint && <div className="tool-chip">{toolHint}</div>}
-              {messages.map((m) => (
-                <div key={m.id} className={`message ${m.role}`}>
-                  <div className="role">{m.role}</div>
-                  {m.role === 'assistant' ? (
-                    <Markdown content={m.content || (sending ? '…' : '')} />
-                  ) : (
-                    <div className="content">{m.content}</div>
-                  )}
-                </div>
-              ))}
-              <div ref={bottomRef} />
-            </div>
-          )}
-        </div>
-
-        <div className="composer">
-          <div className="composer-inner">
-            <textarea
-              value={input}
-              placeholder="Ask about your knowledge base, or say “create knowledge base Product Manual”…"
-              onChange={(e) => setInput(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  send();
-                }
-              }}
-              disabled={sending}
-            />
-            <button className="btn" type="button" disabled={sending || !input.trim()} onClick={send}>
-              {sending ? '…' : 'Send'}
-            </button>
           </div>
-        </div>
-      </main>
 
-      <KnowledgePanel open={kbOpen} onClose={() => setKbOpen(false)} />
+          <div className="chat-messages">
+            {error && <p className="error-text chat-error">{error}</p>}
+            {messages.length === 0 ? (
+              <div className="welcome-message">
+                <div>
+                  <div className="welcome-mark">
+                    <span aria-hidden />
+                  </div>
+                  <h2>CSB Knowledge Portal</h2>
+                  <p>
+                    Select one or more knowledge bases below, then ask a question.
+                    Retrieval uses up to 10 chunks with source references.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="message-list">
+                {toolHint && <div className="tool-chip">{toolHint}</div>}
+                {messages.map((m, idx) => {
+                  const sources = sourcesFromMessage(m);
+                  // Hide Sources on the in-flight reply until streaming finishes
+                  const isStreamingReply =
+                    sending &&
+                    m.role === 'assistant' &&
+                    idx === messages.length - 1;
+                  const showSources = !isStreamingReply && sources.length > 0;
+                  return (
+                    <div key={m.id} className={`message ${m.role}`}>
+                      <div className="role">{m.role}</div>
+                      {m.role === 'assistant' ? (
+                        <>
+                          <Markdown content={m.content || (sending ? '…' : '')} />
+                          {showSources && (
+                            <SourceReferences
+                              sources={sources}
+                              onLocate={handleLocate}
+                            />
+                          )}
+                        </>
+                      ) : (
+                        <div className="content">{m.content}</div>
+                      )}
+                    </div>
+                  );
+                })}
+                <div ref={bottomRef} />
+              </div>
+            )}
+          </div>
+
+          <div className="input-area">
+            <div className="input-stack">
+              <div className="kb-select-bar" ref={kbPickerRef}>
+                <button
+                  type="button"
+                  className={`kb-select-trigger ${selectedKbIds.length ? 'has-selection' : ''}`}
+                  onClick={() => {
+                    setKbPickerOpen((v) => !v);
+                    if (!knowledgeBases.length) void refreshKnowledgeBases();
+                  }}
+                  disabled={sending}
+                  aria-expanded={kbPickerOpen}
+                  aria-haspopup="listbox"
+                >
+                  <span className="kb-select-label">
+                    {selectedKbIds.length === 0
+                      ? 'Knowledge bases (optional)'
+                      : selectedKbIds.length === 1
+                        ? selectedKbNames[0] || '1 selected'
+                        : `${selectedKbIds.length} knowledge bases`}
+                  </span>
+                  <span className="kb-select-chevron" aria-hidden>
+                    ▾
+                  </span>
+                </button>
+
+                {selectedKbIds.length > 0 && (
+                  <div className="kb-selected-chips">
+                    {selectedKbNames.map((name, i) => (
+                      <button
+                        key={selectedKbIds[i]}
+                        type="button"
+                        className="kb-chip"
+                        onClick={() => toggleKb(selectedKbIds[i])}
+                        title={`Remove ${name}`}
+                        disabled={sending}
+                      >
+                        {name}
+                        <span aria-hidden>×</span>
+                      </button>
+                    ))}
+                    <button
+                      type="button"
+                      className="kb-chip-clear"
+                      onClick={clearKbSelection}
+                      disabled={sending}
+                    >
+                      Clear
+                    </button>
+                  </div>
+                )}
+
+                {kbPickerOpen && (
+                  <div className="kb-select-dropdown" role="listbox" aria-multiselectable>
+                    <div className="kb-select-actions">
+                      <button type="button" onClick={selectAllKbs} disabled={!knowledgeBases.length}>
+                        Select all
+                      </button>
+                      <button type="button" onClick={clearKbSelection} disabled={!selectedKbIds.length}>
+                        Clear
+                      </button>
+                    </div>
+                    {knowledgeBases.length === 0 ? (
+                      <p className="kb-select-empty">
+                        No knowledge bases yet. Create one in the Knowledge workspace.
+                      </p>
+                    ) : (
+                      <ul className="kb-select-options">
+                        {knowledgeBases.map((kb) => {
+                          const checked = selectedKbIds.includes(kb.id);
+                          return (
+                            <li key={kb.id}>
+                              <label className={`kb-select-option ${checked ? 'checked' : ''}`}>
+                                <input
+                                  type="checkbox"
+                                  checked={checked}
+                                  onChange={() => toggleKb(kb.id)}
+                                />
+                                <span className="kb-option-text">
+                                  <span className="kb-option-name">{kb.name}</span>
+                                  {kb.description ? (
+                                    <span className="kb-option-desc">{kb.description}</span>
+                                  ) : null}
+                                </span>
+                              </label>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <div className="input-container">
+                <textarea
+                  value={input}
+                  placeholder={
+                    selectedKbIds.length
+                      ? 'Ask a question about the selected knowledge bases…'
+                      : 'Ask about your knowledge base, or select knowledge bases above…'
+                  }
+                  onChange={(e) => setInput(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault();
+                      void send();
+                    }
+                  }}
+                  disabled={sending}
+                  rows={1}
+                />
+                <button
+                  className={`send-btn ${input.trim() && !sending ? 'send-btn-active' : ''}`}
+                  type="button"
+                  disabled={sending || !input.trim()}
+                  onClick={() => void send()}
+                >
+                  {sending ? '…' : 'Send'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </main>
+      )}
     </div>
   );
 }

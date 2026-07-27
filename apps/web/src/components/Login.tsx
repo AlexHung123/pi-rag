@@ -27,8 +27,8 @@ export default function Login() {
   return (
     <div className="login-page">
       <form className="login-card" onSubmit={onSubmit}>
-        <h1>pi-rag</h1>
-        <p className="subtitle">Vertical domain RAG expert · private knowledge per user</p>
+        <h1>CSB Knowledge Portal</h1>
+        <p className="subtitle">Private knowledge bases · upload, chunk, and ask with isolation per user</p>
 
         {(localError || error) && (
           <p className="error-text">{localError || error}</p>

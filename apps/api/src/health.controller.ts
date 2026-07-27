@@ -6,7 +6,7 @@ export class HealthController {
   health() {
     return {
       ok: true,
-      service: 'pi-rag-api',
+      service: 'csb-kb-portal-api',
       time: new Date().toISOString(),
     };
   }

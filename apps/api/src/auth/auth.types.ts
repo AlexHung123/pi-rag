@@ -6,5 +6,5 @@ export type AuthPrincipal = {
   csrfSecret: string;
 };
 
-export const SESSION_COOKIE = 'pi_rag_session';
-export const CSRF_COOKIE = 'pi_rag_csrf';
+export const SESSION_COOKIE = 'csb_kb_session';
+export const CSRF_COOKIE = 'csb_kb_csrf';

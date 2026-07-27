@@ -1,12 +1,28 @@
 const API_BASE = '';
 
+/** In-memory CSRF from login/me body — more reliable than document.cookie alone. */
+let memoryCsrfToken = '';
+
+export function setCsrfToken(token: string | undefined | null) {
+  memoryCsrfToken = (token || '').trim();
+}
+
 function getCookie(name: string): string {
+  if (typeof document === 'undefined') return '';
   const m = document.cookie.match(new RegExp(`(?:^|; )${name}=([^;]*)`));
   return m ? decodeURIComponent(m[1]) : '';
 }
 
 export function getCsrfToken(): string {
-  return getCookie('pi_rag_csrf');
+  return memoryCsrfToken || getCookie('csb_kb_csrf');
+}
+
+function errorMessageFromBody(data: unknown, fallback: string): string {
+  if (!data || typeof data !== 'object') return fallback;
+  const msg = (data as { message?: unknown }).message;
+  if (typeof msg === 'string' && msg.trim()) return msg;
+  if (Array.isArray(msg) && msg.length) return msg.map(String).join('; ');
+  return fallback;
 }
 
 async function parseJson<T>(res: Response): Promise<T> {
@@ -18,11 +34,12 @@ async function parseJson<T>(res: Response): Promise<T> {
     data = { message: text };
   }
   if (!res.ok) {
-    const msg =
-      typeof data === 'object' && data && 'message' in data
-        ? String((data as { message: unknown }).message)
-        : res.statusText;
-    throw new Error(msg || `HTTP ${res.status}`);
+    throw new Error(errorMessageFromBody(data, res.statusText || `HTTP ${res.status}`));
+  }
+  // Capture csrf from any auth-shaped response
+  if (data && typeof data === 'object' && 'csrfToken' in data) {
+    const t = (data as { csrfToken?: string }).csrfToken;
+    if (t) setCsrfToken(t);
   }
   return data as T;
 }
@@ -55,9 +72,17 @@ export type KnowledgeBase = {
   name: string;
   description: string;
   chunkMethod: string;
+  parserConfig?: Record<string, unknown>;
   documentCount?: number;
   createdAt: string;
   updatedAt: string;
+};
+
+export type CreateKnowledgeBaseBody = {
+  name: string;
+  description?: string;
+  chunkMethod?: string;
+  parserConfig?: Record<string, unknown>;
 };
 
 export type DocumentItem = {
@@ -74,17 +99,37 @@ export type DocumentItem = {
   updatedAt: string;
 };
 
+/** RAGFlow position box: [pageNumber, x1, x2, y1, y2] in PDF page space */
+export type ChunkPosition = number[];
+
 export type ChunkItem = {
   id: string;
   content: string;
   available?: boolean;
+  positions?: ChunkPosition[];
+  imageId?: string;
 };
 
 export type Conversation = {
   id: string;
   title: string;
+  messageCount: number;
   createdAt: string;
   updatedAt: string;
+};
+
+export type CitationSource = {
+  id: string;
+  content: string;
+  documentName?: string;
+  documentId?: string;
+  appDocumentId?: string;
+  knowledgeBaseId?: string;
+  knowledgeBaseName?: string;
+  score?: number;
+  index: number;
+  evidenceLabel: string;
+  positions?: number[][];
 };
 
 export type ChatMessage = {
@@ -92,6 +137,12 @@ export type ChatMessage = {
   role: 'user' | 'assistant' | 'tool' | 'system';
   content: string;
   createdAt: string;
+  metadata?: {
+    sources?: CitationSource[];
+    knowledgeBaseIds?: string[];
+    [key: string]: unknown;
+  } | null;
+  sources?: CitationSource[];
 };
 
 export const authApi = {
@@ -109,13 +160,18 @@ export const authApi = {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),
-  logout: () =>
-    apiFetch<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+  logout: async () => {
+    const res = await apiFetch<{ ok: boolean }>('/api/auth/logout', {
+      method: 'POST',
+    });
+    setCsrfToken('');
+    return res;
+  },
 };
 
 export const kbApi = {
   list: () => apiFetch<{ items: KnowledgeBase[] }>('/api/knowledge-bases'),
-  create: (body: { name: string; description?: string; chunkMethod?: string }) =>
+  create: (body: CreateKnowledgeBaseBody) =>
     apiFetch<KnowledgeBase>('/api/knowledge-bases', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -146,6 +202,46 @@ export const docApi = {
       chunks: ChunkItem[];
       totalChunks: number;
     }>(`/api/knowledge-bases/${kbId}/documents/${docId}/preview`),
+  chunks: (
+    kbId: string,
+    docId: string,
+    opts?: { page?: number; pageSize?: number; keywords?: string },
+  ) => {
+    const qs = new URLSearchParams();
+    if (opts?.page) qs.set('page', String(opts.page));
+    if (opts?.pageSize) qs.set('pageSize', String(opts.pageSize));
+    if (opts?.keywords) qs.set('keywords', opts.keywords);
+    const q = qs.toString();
+    return apiFetch<{
+      document: DocumentItem;
+      chunks: ChunkItem[];
+      total: number;
+      page: number;
+      pageSize: number;
+    }>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/chunks${q ? `?${q}` : ''}`,
+    );
+  },
+  /** Blob URL for inline file preview (revoke when done). */
+  fetchFileBlob: async (kbId: string, docId: string): Promise<{ blob: Blob; objectUrl: string }> => {
+    const res = await fetch(
+      `${API_BASE}/api/knowledge-bases/${kbId}/documents/${docId}/file`,
+      { credentials: 'include' },
+    );
+    if (!res.ok) {
+      const text = await res.text();
+      let message = text || `HTTP ${res.status}`;
+      try {
+        const j = JSON.parse(text) as { message?: string };
+        if (j.message) message = j.message;
+      } catch {
+        // keep text
+      }
+      throw new Error(message);
+    }
+    const blob = await res.blob();
+    return { blob, objectUrl: URL.createObjectURL(blob) };
+  },
   remove: (kbId: string, docId: string) =>
     apiFetch<{ ok: boolean }>(
       `/api/knowledge-bases/${kbId}/documents/${docId}`,
@@ -169,7 +265,12 @@ export const chatApi = {
   streamMessage: async function* (
     conversationId: string,
     content: string,
+    opts?: { knowledgeBaseIds?: string[] },
   ): AsyncGenerator<{ event: string; data: Record<string, unknown> }> {
+    const body: { content: string; knowledgeBaseIds?: string[] } = { content };
+    if (opts?.knowledgeBaseIds?.length) {
+      body.knowledgeBaseIds = opts.knowledgeBaseIds;
+    }
     const res = await fetch(`/api/conversations/${conversationId}/messages`, {
       method: 'POST',
       credentials: 'include',
@@ -177,11 +278,18 @@ export const chatApi = {
         'Content-Type': 'application/json',
         'X-CSRF-Token': getCsrfToken(),
       },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify(body),
     });
     if (!res.ok || !res.body) {
       const text = await res.text();
-      throw new Error(text || `HTTP ${res.status}`);
+      let message = text || `HTTP ${res.status}`;
+      try {
+        const j = JSON.parse(text) as { message?: string };
+        if (j.message) message = j.message;
+      } catch {
+        // keep text
+      }
+      throw new Error(message);
     }
     const reader = res.body.getReader();
     const decoder = new TextDecoder();

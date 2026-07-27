@@ -1,23 +1,26 @@
-# pi-rag
+# CSB Knowledge Base Portal
 
-Vertical-domain RAG expert: **React + NestJS + Postgres + RAGFlow + agent tools**.
+Multi-user knowledge base portal: **React + NestJS + Postgres + RAGFlow + pi-agent-core**.
 
 Each user has isolated knowledge bases. Pipeline:
 
-1. Create knowledge base  
+1. Create knowledge base (UI)  
 2. Upload document  
 3. Parse / cut chunks  
 4. Preview chunks  
-5. Chat with retrieval-aware agent  
+5. Chat with a pooled **pi-agent-core** agent that retrieves from owned KBs  
 
-Design: [`docs/superpowers/specs/2026-07-23-pi-rag-design.md`](docs/superpowers/specs/2026-07-23-pi-rag-design.md)
+Design:
+
+- [`docs/superpowers/specs/2026-07-23-pi-rag-design.md`](docs/superpowers/specs/2026-07-23-pi-rag-design.md)
+- [`docs/superpowers/specs/2026-07-24-pi-agent-pool-design.md`](docs/superpowers/specs/2026-07-24-pi-agent-pool-design.md)
 
 ## Prerequisites
 
 - Node.js 20+
 - Docker (for Postgres)
 - Optional: a running [RAGFlow](https://ragflow.io) instance + API key  
-  Without RAGFlow, set `RAGFLOW_MOCK=true` (default in `.env.example`) to use an in-memory mock engine.
+  Without RAGFlow, set `RAGFLOW_MOCK=true` to use an in-memory mock engine.
 
 ## Quick start
 
@@ -55,8 +58,11 @@ See [`.env.example`](.env.example).
 | `RAGFLOW_BASE_URL` / `RAGFLOW_API_KEY` | Real RAGFlow instance |
 | `RAGFLOW_MOCK` | `true` = local mock engine (no RAGFlow required) |
 | `AUTH_ALLOW_REGISTER` | Allow self-registration |
-| `OPENAI_API_KEY` | Optional; enables LLM tool-calling chat |
-| `OPENAI_BASE_URL` / `OPENAI_MODEL` | OpenAI-compatible endpoint |
+| `OPENAI_API_KEY` | API key for OpenAI-compatible LLM (optional for local servers) |
+| `OPENAI_BASE_URL` / `OPENAI_MODEL` | OpenAI-compatible endpoint and model (required for chat agent) |
+| `AGENT_POOL_MAX` | Max live pi agents in memory (default 100) |
+| `AGENT_SESSION_TTL_MS` | Idle agent eviction TTL (default 30m) |
+| `AGENT_HISTORY_LIMIT` | Max prior messages when rehydrating agent (default 20) |
 
 ## Workspace layout
 

@@ -1,12 +1,13 @@
-# pi-rag Design Spec
+# CSB Knowledge Base Portal Design Spec
 
 **Date:** 2026-07-23  
 **Status:** Approved for planning  
-**Stack:** React (Vite) + NestJS + Postgres + RAGFlow + `@earendil-works/pi-agent-core`
+**Product name:** CSB Knowledge Base Portal  
+**Stack:** React (Vite) + NestJS + Postgres + RAGFlow + agent tools  
 
 ## 1. Problem & Goals
 
-Build a **vertical-domain RAG expert** web product where each user can:
+Build the **CSB Knowledge Base Portal** web product where each user can:
 
 1. Create their own knowledge bases (datasets)
 2. Upload documents
@@ -294,12 +295,9 @@ apps/api/src
 
 | Tool | Purpose |
 |------|---------|
-| `list_my_knowledge_bases` | Discover owned KBs |
-| `create_knowledge_base` | Create KB |
-| `list_documents` | List docs in a KB |
-| `parse_documents` | Trigger parse for doc ids |
-| `preview_document` | Meta + sample chunks |
-| `retrieve_chunks` | P3 RAG retrieval |
+| `retrieve_chunks` | P3 RAG retrieval (user-selected KBs only) |
+
+KB create/list/select, document list/upload/parse, and preview remain REST+UI only (not agent tools).
 
 Upload remains primarily REST+UI for reliability and progress UX.
 

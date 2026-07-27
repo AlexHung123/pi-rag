@@ -6,7 +6,7 @@ import React, {
   useMemo,
   useState,
 } from 'react';
-import { authApi, type User } from '../services/api';
+import { authApi, setCsrfToken, type User } from '../services/api';
 
 type AuthContextValue = {
   user: User | null;
@@ -34,9 +34,15 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
         const boot = await authApi.bootstrap();
         if (!cancelled) setAllowRegister(boot.allowRegister);
         const me = await authApi.me();
-        if (!cancelled) setUser(me.user);
+        if (!cancelled) {
+          setCsrfToken(me.csrfToken);
+          setUser(me.user);
+        }
       } catch {
-        if (!cancelled) setUser(null);
+        if (!cancelled) {
+          setCsrfToken('');
+          setUser(null);
+        }
       } finally {
         if (!cancelled) setLoading(false);
       }
@@ -50,6 +56,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setError('');
     try {
       const res = await authApi.login(username, password);
+      setCsrfToken(res.csrfToken);
       setUser(res.user);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Login failed');
@@ -61,6 +68,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     setError('');
     try {
       const res = await authApi.register(username, password);
+      setCsrfToken(res.csrfToken);
       setUser(res.user);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Register failed');
@@ -72,6 +80,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     try {
       await authApi.logout();
     } finally {
+      setCsrfToken('');
       setUser(null);
     }
   }, []);
