@@ -165,6 +165,7 @@ export default function AdminDatasetsPanel({ onOpenDocuments }: Props) {
               <th>Name</th>
               <th>Docs</th>
               <th>Chunks</th>
+              <th>Visibility</th>
               <th>Chunk Method</th>
               <th>Owner</th>
               <th>Created</th>
@@ -174,13 +175,13 @@ export default function AdminDatasetsPanel({ onOpenDocuments }: Props) {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={8} className="admin-empty">
+                <td colSpan={9} className="admin-empty">
                   Loading…
                 </td>
               </tr>
             ) : items.length === 0 ? (
               <tr>
-                <td colSpan={8} className="admin-empty">
+                <td colSpan={9} className="admin-empty">
                   No datasets found
                 </td>
               </tr>
@@ -209,6 +210,13 @@ export default function AdminDatasetsPanel({ onOpenDocuments }: Props) {
                   </td>
                   <td>
                     <CountTag value={row.chunkCount} tone="green" />
+                  </td>
+                  <td>
+                    <span
+                      className={`kb-visibility-badge ${row.visibility === 'public' ? 'public' : 'private'}`}
+                    >
+                      {row.visibility === 'public' ? 'Public' : 'Private'}
+                    </span>
                   </td>
                   <td>
                     <span className="admin-badge purple">

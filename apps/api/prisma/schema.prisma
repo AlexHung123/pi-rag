@@ -26,6 +26,16 @@ enum MessageRole {
   system
 }
 
+enum KnowledgeBaseVisibility {
+  private
+  public
+}
+
+enum KnowledgeBaseRole {
+  viewer
+  editor
+}
+
 model User {
   id           String    @id @default(uuid()) @db.Uuid
   username     String    @unique
@@ -35,10 +45,11 @@ model User {
   createdAt    DateTime  @default(now()) @map("created_at")
   updatedAt    DateTime  @updatedAt @map("updated_at")
 
-  sessions       Session[]
-  knowledgeBases KnowledgeBase[]
-  documents      Document[]
-  conversations  Conversation[]
+  sessions              Session[]
+  knowledgeBases        KnowledgeBase[]
+  knowledgeBaseMembers  KnowledgeBaseMember[]
+  documents             Document[]
+  conversations         Conversation[]
 
   @@map("users")
 }
@@ -61,22 +72,41 @@ model Session {
 }
 
 model KnowledgeBase {
-  id               String   @id @default(uuid()) @db.Uuid
-  ownerUserId      String   @map("owner_user_id") @db.Uuid
-  ragflowDatasetId String   @unique @map("ragflow_dataset_id")
+  id               String                  @id @default(uuid()) @db.Uuid
+  ownerUserId      String                  @map("owner_user_id") @db.Uuid
+  ragflowDatasetId String                  @unique @map("ragflow_dataset_id")
   name             String
-  description      String   @default("")
-  chunkMethod      String   @default("naive") @map("chunk_method")
-  parserConfig     Json     @default("{}") @map("parser_config")
-  createdAt        DateTime @default(now()) @map("created_at")
-  updatedAt        DateTime @updatedAt @map("updated_at")
+  description      String                  @default("")
+  chunkMethod      String                  @default("naive") @map("chunk_method")
+  parserConfig     Json                    @default("{}") @map("parser_config")
+  visibility       KnowledgeBaseVisibility @default(private)
+  createdAt        DateTime                @default(now()) @map("created_at")
+  updatedAt        DateTime                @updatedAt @map("updated_at")
 
-  owner     User       @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  owner     User                  @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
   documents Document[]
+  members   KnowledgeBaseMember[]
 
   @@unique([ownerUserId, name])
   @@index([ownerUserId])
+  @@index([visibility])
   @@map("knowledge_bases")
+}
+
+model KnowledgeBaseMember {
+  id              String            @id @default(uuid()) @db.Uuid
+  knowledgeBaseId String            @map("knowledge_base_id") @db.Uuid
+  userId          String            @map("user_id") @db.Uuid
+  role            KnowledgeBaseRole @default(viewer)
+  createdAt       DateTime          @default(now()) @map("created_at")
+  updatedAt       DateTime          @updatedAt @map("updated_at")
+
+  knowledgeBase KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([knowledgeBaseId, userId])
+  @@index([userId])
+  @@map("knowledge_base_members")
 }
 
 model Document {

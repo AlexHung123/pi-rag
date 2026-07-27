@@ -624,9 +624,23 @@ export default function App() {
                                   onChange={() => toggleKb(kb.id)}
                                 />
                                 <span className="kb-option-text">
-                                  <span className="kb-option-name">{kb.name}</span>
+                                  <span className="kb-option-name">
+                                    {kb.name}
+                                    <span
+                                      className={`kb-visibility-badge sm ${kb.visibility === 'public' ? 'public' : 'private'}`}
+                                    >
+                                      {kb.visibility === 'public' ? 'Public' : 'Private'}
+                                    </span>
+                                  </span>
                                   {kb.description ? (
                                     <span className="kb-option-desc">{kb.description}</span>
+                                  ) : !kb.isOwner && kb.ownerUsername ? (
+                                    <span className="kb-option-desc">
+                                      by {kb.ownerUsername}
+                                      {kb.myRole === 'editor' || kb.myRole === 'viewer'
+                                        ? ` · ${kb.myRole}`
+                                        : ''}
+                                    </span>
                                   ) : null}
                                 </span>
                               </label>

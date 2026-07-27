@@ -1,6 +1,13 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FileText, Folder, Upload, X } from 'lucide-react'
-import { docApi, kbApi, type DocumentItem, type KnowledgeBase } from '../services/api'
+import {
+  docApi,
+  kbApi,
+  type DocumentItem,
+  type KnowledgeBase,
+  type KnowledgeBaseMember,
+  type KnowledgeBaseMemberRole,
+} from '../services/api'
 import DocumentPreviewPage from './DocumentPreviewPage'
 
 const AVATAR_COLORS = ['#ea580c', '#2563eb', '#db2777', '#059669', '#7c3aed', '#d97706', '#0891b2', '#4f46e5']
@@ -79,6 +86,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const [docs, setDocs] = useState<DocumentItem[]>([])
   const [newName, setNewName] = useState('')
+  const [newVisibility, setNewVisibility] = useState<'private' | 'public'>('private')
   const [pdfParser, setPdfParser] = useState<PdfParserValue>(DEFAULT_PDF_PARSER)
   const [chunkTokenNum, setChunkTokenNum] = useState(DEFAULT_CHUNK_TOKEN_NUM)
   const [createOpen, setCreateOpen] = useState(false)
@@ -95,6 +103,12 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const [docsLoading, setDocsLoading] = useState(false)
   const [previewDoc, setPreviewDoc] = useState<DocumentItem | null>(null)
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set())
+  const [members, setMembers] = useState<KnowledgeBaseMember[]>([])
+  const [membersLoading, setMembersLoading] = useState(false)
+  const [shareCandidates, setShareCandidates] = useState<Array<{ id: string; username: string }>>([])
+  const [shareUserId, setShareUserId] = useState('')
+  const [shareRole, setShareRole] = useState<KnowledgeBaseMemberRole>('viewer')
+  const [shareError, setShareError] = useState('')
   const fileRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
 
@@ -119,6 +133,42 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     }
   }, [])
 
+  const loadSharePanel = useCallback(async (kbId: string) => {
+    setMembersLoading(true)
+    setShareError('')
+    try {
+      const [membersRes, candidatesRes] = await Promise.all([
+        kbApi.listMembers(kbId),
+        kbApi.listShareCandidates(kbId),
+      ])
+      setMembers(membersRes.items)
+      setShareCandidates(candidatesRes.items)
+      setShareUserId(prev =>
+        candidatesRes.items.some(u => u.id === prev) ? prev : candidatesRes.items[0]?.id || '',
+      )
+    } catch (e) {
+      setMembers([])
+      setShareCandidates([])
+      setShareUserId('')
+      setShareError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMembersLoading(false)
+    }
+  }, [])
+
+  const selectedKb = useMemo(() => kbs.find(k => k.id === selectedId) ?? null, [kbs, selectedId])
+
+  const canEditContent = useMemo(() => {
+    if (!selectedKb) return false
+    if (selectedKb.isOwner || selectedKb.myRole === 'owner') return true
+    return selectedKb.myRole === 'editor'
+  }, [selectedKb])
+
+  const canAdminKb = useMemo(() => {
+    if (!selectedKb) return false
+    return selectedKb.isOwner || selectedKb.myRole === 'owner'
+  }, [selectedKb])
+
   useEffect(() => {
     loadKbs().catch(e => setError(e instanceof Error ? e.message : String(e)))
   }, [loadKbs])
@@ -128,11 +178,26 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
       setDocs([])
       setSelectedDocIds(new Set())
       setDocsLoading(false)
+      setMembers([])
+      setShareCandidates([])
+      setShareUserId('')
+      setShareRole('viewer')
+      setShareError('')
       return
     }
     setDocs([])
     loadDocs(selectedId).catch(e => setError(e instanceof Error ? e.message : String(e)))
   }, [selectedId, loadDocs])
+
+  useEffect(() => {
+    if (!selectedId || !canAdminKb) {
+      setMembers([])
+      setShareCandidates([])
+      setShareUserId('')
+      return
+    }
+    void loadSharePanel(selectedId)
+  }, [selectedId, canAdminKb, loadSharePanel])
 
   useEffect(() => {
     if (!selectedId) return
@@ -143,8 +208,6 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     }, 2000)
     return () => clearInterval(t)
   }, [selectedId, docs, loadDocs])
-
-  const selectedKb = useMemo(() => kbs.find(k => k.id === selectedId) ?? null, [kbs, selectedId])
 
   const filteredKbs = useMemo(() => {
     const q = search.trim().toLowerCase()
@@ -161,6 +224,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const openCreateModal = () => {
     setError('')
     setNewName('')
+    setNewVisibility('private')
     setPdfParser(DEFAULT_PDF_PARSER)
     setChunkTokenNum(DEFAULT_CHUNK_TOKEN_NUM)
     setCreateOpen(true)
@@ -187,12 +251,14 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     try {
       const kb = await kbApi.create({
         name,
+        visibility: newVisibility,
         parserConfig: {
           layout_recognize: pdfParser,
           chunk_token_num: Math.round(chunkTokenNum)
         }
       })
       setNewName('')
+      setNewVisibility('private')
       setPdfParser(DEFAULT_PDF_PARSER)
       setChunkTokenNum(DEFAULT_CHUNK_TOKEN_NUM)
       setCreateOpen(false)
@@ -321,6 +387,70 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     setDocs([])
   }
 
+  const onToggleVisibility = async () => {
+    if (!selectedKb || !canAdminKb) return
+    const next = selectedKb.visibility === 'public' ? 'private' : 'public'
+    setBusy(true)
+    setError('')
+    try {
+      const updated = await kbApi.update(selectedKb.id, { visibility: next })
+      setKbs(prev => prev.map(k => (k.id === updated.id ? { ...k, ...updated } : k)))
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onAddMember = async () => {
+    if (!selectedKb || !canAdminKb) return
+    const candidate = shareCandidates.find(u => u.id === shareUserId)
+    if (!candidate) {
+      setShareError('Select a user to share with.')
+      return
+    }
+    setBusy(true)
+    setShareError('')
+    try {
+      await kbApi.addMember(selectedKb.id, { username: candidate.username, role: shareRole })
+      setShareRole('viewer')
+      await loadSharePanel(selectedKb.id)
+    } catch (e) {
+      setShareError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onChangeMemberRole = async (userId: string, role: KnowledgeBaseMemberRole) => {
+    if (!selectedKb || !canAdminKb) return
+    setBusy(true)
+    setShareError('')
+    try {
+      const updated = await kbApi.updateMember(selectedKb.id, userId, { role })
+      setMembers(prev => prev.map(m => (m.userId === userId ? updated : m)))
+    } catch (e) {
+      setShareError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onRemoveMember = async (userId: string, username: string) => {
+    if (!selectedKb || !canAdminKb) return
+    if (!confirm(`Remove access for ${username}?`)) return
+    setBusy(true)
+    setShareError('')
+    try {
+      await kbApi.removeMember(selectedKb.id, userId)
+      await loadSharePanel(selectedKb.id)
+    } catch (e) {
+      setShareError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
   const toggleDoc = (id: string) => {
     setSelectedDocIds(prev => {
       const next = new Set(prev)
@@ -417,34 +547,56 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                       {initial(kb.name)}
                     </div>
                     <div className="kb-dataset-card-info">
-                      <div className="kb-dataset-card-name" title={kb.name}>
-                        {kb.name}
+                      <div className="kb-dataset-card-name-row">
+                        <div className="kb-dataset-card-name" title={kb.name}>
+                          {kb.name}
+                        </div>
+                        <span
+                          className={`kb-visibility-badge ${kb.visibility === 'public' ? 'public' : 'private'}`}
+                          title={
+                            kb.visibility === 'public'
+                              ? 'Public — any logged-in user can use'
+                              : 'Private — owner and people shared with'
+                          }
+                        >
+                          {kb.visibility === 'public' ? 'Public' : 'Private'}
+                        </span>
+                        {!kb.isOwner && kb.myRole && kb.myRole !== 'owner' ? (
+                          <span className="kb-visibility-badge shared" title={`Shared with you as ${kb.myRole}`}>
+                            Shared
+                          </span>
+                        ) : null}
                       </div>
                       <div className="kb-dataset-card-meta">
                         {kb.documentCount ?? 0} {(kb.documentCount ?? 0) === 1 ? 'file' : 'files'}
+                        {!kb.isOwner && kb.ownerUsername ? ` · by ${kb.ownerUsername}` : ''}
+                        {!kb.isOwner && kb.myRole === 'editor' ? ' · editor' : ''}
+                        {!kb.isOwner && kb.myRole === 'viewer' && kb.visibility !== 'public' ? ' · viewer' : ''}
                       </div>
                       <div className="kb-dataset-card-meta">{formatDateTime(kb.createdAt)}</div>
                     </div>
                   </div>
-                  <span
-                    className="kb-dataset-card-delete"
-                    role="button"
-                    tabIndex={0}
-                    title="Delete dataset"
-                    onClick={e => {
-                      e.stopPropagation()
-                      void onDeleteKb(kb.id)
-                    }}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault()
+                  {kb.isOwner ? (
+                    <span
+                      className="kb-dataset-card-delete"
+                      role="button"
+                      tabIndex={0}
+                      title="Delete dataset"
+                      onClick={e => {
                         e.stopPropagation()
                         void onDeleteKb(kb.id)
-                      }
-                    }}
-                  >
-                    ×
-                  </span>
+                      }}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' || e.key === ' ') {
+                          e.preventDefault()
+                          e.stopPropagation()
+                          void onDeleteKb(kb.id)
+                        }
+                      }}
+                    >
+                      ×
+                    </span>
+                  ) : null}
                 </button>
               ))}
             </div>
@@ -472,6 +624,37 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                   }}
                   disabled={busy}
                 />
+              </div>
+              <div className="field">
+                <span className="kb-visibility-label" id="kb-visibility-label">
+                  Visibility
+                </span>
+                <div className="kb-visibility-toggle" role="radiogroup" aria-labelledby="kb-visibility-label">
+                  <label className={`kb-visibility-option${newVisibility === 'private' ? ' active' : ''}`}>
+                    <input
+                      type="radio"
+                      name="kb-visibility"
+                      value="private"
+                      checked={newVisibility === 'private'}
+                      disabled={busy}
+                      onChange={() => setNewVisibility('private')}
+                    />
+                    <span className="kb-visibility-option-title">Private</span>
+                    <span className="kb-visibility-option-hint">Only you (and people you share with)</span>
+                  </label>
+                  <label className={`kb-visibility-option${newVisibility === 'public' ? ' active' : ''}`}>
+                    <input
+                      type="radio"
+                      name="kb-visibility"
+                      value="public"
+                      checked={newVisibility === 'public'}
+                      disabled={busy}
+                      onChange={() => setNewVisibility('public')}
+                    />
+                    <span className="kb-visibility-option-title">Public</span>
+                    <span className="kb-visibility-option-hint">Any logged-in user can use</span>
+                  </label>
+                </div>
               </div>
               <div className="field">
                 <label htmlFor="kb-pdf-parser">PDF parser</label>
@@ -555,8 +738,20 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               </div>
               <div className="kb-detail-kb-meta">
                 {selectedKb?.documentCount ?? docs.length} {(selectedKb?.documentCount ?? docs.length) === 1 ? 'file' : 'files'}
+                {selectedKb && !selectedKb.isOwner && selectedKb.ownerUsername
+                  ? ` · by ${selectedKb.ownerUsername}`
+                  : ''}
               </div>
               <div className="kb-detail-kb-meta">Created {selectedKb ? formatDateShort(selectedKb.createdAt) : '—'}</div>
+              {selectedKb ? (
+                <div className="kb-detail-kb-meta">
+                  <span
+                    className={`kb-visibility-badge ${selectedKb.visibility === 'public' ? 'public' : 'private'}`}
+                  >
+                    {selectedKb.visibility === 'public' ? 'Public' : 'Private'}
+                  </span>
+                </div>
+              ) : null}
             </div>
           </button>
 
@@ -569,6 +764,109 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
             </button>
           </nav>
 
+          {canAdminKb && selectedKb ? (
+            <div className="kb-detail-visibility-panel">
+              <div className="kb-detail-visibility-label">Visibility</div>
+              <button
+                type="button"
+                className="btn btn-secondary btn-sm"
+                disabled={busy}
+                onClick={() => void onToggleVisibility()}
+                title="Toggle private / public"
+              >
+                Make {selectedKb.visibility === 'public' ? 'private' : 'public'}
+              </button>
+              <p className="field-hint">
+                {selectedKb.visibility === 'public'
+                  ? 'Any logged-in user can use this dataset in chat and view files.'
+                  : 'Only you and people you share with can access this dataset.'}
+              </p>
+
+              <div className="kb-detail-visibility-label" style={{ marginTop: 8 }}>
+                Share with users
+              </div>
+              <div className="kb-share-form">
+                <select
+                  className="kb-share-user-select"
+                  value={shareUserId}
+                  disabled={busy || membersLoading || shareCandidates.length === 0}
+                  onChange={e => setShareUserId(e.target.value)}
+                  aria-label="User to share with"
+                >
+                  {shareCandidates.length === 0 ? (
+                    <option value="">No users available</option>
+                  ) : (
+                    shareCandidates.map(u => (
+                      <option key={u.id} value={u.id}>
+                        {u.username}
+                      </option>
+                    ))
+                  )}
+                </select>
+                <select
+                  className="kb-share-role-select"
+                  value={shareRole}
+                  disabled={busy || shareCandidates.length === 0}
+                  onChange={e => setShareRole(e.target.value as KnowledgeBaseMemberRole)}
+                  aria-label="Share role"
+                >
+                  <option value="viewer">Viewer</option>
+                  <option value="editor">Editor</option>
+                </select>
+                <button
+                  type="button"
+                  className="btn btn-sm"
+                  disabled={busy || !shareUserId || shareCandidates.length === 0}
+                  onClick={() => void onAddMember()}
+                >
+                  Add
+                </button>
+              </div>
+              <p className="field-hint">
+                {shareCandidates.length === 0 && !membersLoading
+                  ? 'All other users already have access, or no other accounts exist.'
+                  : 'Viewer: use in chat & preview. Editor: also upload/parse/delete files.'}
+              </p>
+              {shareError ? <p className="error-text">{shareError}</p> : null}
+              {membersLoading ? (
+                <p className="field-hint">Loading members…</p>
+              ) : members.length === 0 ? (
+                <p className="field-hint">Not shared with anyone yet.</p>
+              ) : (
+                <ul className="kb-share-member-list">
+                  {members.map(m => (
+                    <li key={m.userId} className="kb-share-member-row">
+                      <span className="kb-share-member-name" title={m.username}>
+                        {m.username}
+                      </span>
+                      <select
+                        className="kb-share-role-select"
+                        value={m.role}
+                        disabled={busy}
+                        onChange={e =>
+                          void onChangeMemberRole(m.userId, e.target.value as KnowledgeBaseMemberRole)
+                        }
+                        aria-label={`Role for ${m.username}`}
+                      >
+                        <option value="viewer">Viewer</option>
+                        <option value="editor">Editor</option>
+                      </select>
+                      <button
+                        type="button"
+                        className="btn btn-danger btn-sm"
+                        disabled={busy}
+                        onClick={() => void onRemoveMember(m.userId, m.username)}
+                        title={`Remove ${m.username}`}
+                      >
+                        ×
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : null}
+
           <div className="kb-detail-rail-footer">
             <button type="button" className="btn btn-ghost" onClick={() => setSelectedId(null)}>
               ← All datasets
@@ -580,7 +878,11 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           <div className="kb-files-header">
             <div>
               <h2 className="kb-files-title">Files</h2>
-              <p className="kb-files-subtitle">Please wait for your files to finish parsing before starting an AI-powered chat.</p>
+              <p className="kb-files-subtitle">
+                {canEditContent
+                  ? 'Please wait for your files to finish parsing before starting an AI-powered chat.'
+                  : 'Read-only access. You can browse and preview files; only the owner can manage content.'}
+              </p>
             </div>
             <div className="kb-files-header-actions">
               <input
@@ -590,9 +892,11 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 value={docSearch}
                 onChange={e => setDocSearch(e.target.value)}
               />
-              <button className="btn" type="button" disabled={busy} onClick={openUploadModal}>
-                + Add file
-              </button>
+              {canEditContent ? (
+                <button className="btn" type="button" disabled={busy} onClick={openUploadModal}>
+                  + Add file
+                </button>
+              ) : null}
             </div>
           </div>
 
@@ -663,20 +967,27 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                           <span className={`badge ${doc.status}`}>
                             {doc.status === 'running' ? `${Math.round((doc.progress || 0) * 100)}%` : doc.status}
                           </span>
-                          {doc.status === 'running' ? (
-                            <button
-                              className="btn btn-secondary btn-sm"
-                              type="button"
-                              disabled={busy}
-                              onClick={() => void onStopParse(doc.id)}
-                            >
-                              Stop
-                            </button>
-                          ) : (
-                            <button className="btn btn-secondary btn-sm" type="button" disabled={busy} onClick={() => void onParse(doc.id)}>
-                              {doc.status === 'done' ? 'Re-parse' : 'Parse'}
-                            </button>
-                          )}
+                          {canEditContent ? (
+                            doc.status === 'running' ? (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void onStopParse(doc.id)}
+                              >
+                                Stop
+                              </button>
+                            ) : (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void onParse(doc.id)}
+                              >
+                                {doc.status === 'done' ? 'Re-parse' : 'Parse'}
+                              </button>
+                            )
+                          ) : null}
                         </div>
                       </td>
                       <td>
@@ -684,9 +995,16 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                           <button className="btn btn-secondary btn-sm" type="button" disabled={busy} onClick={() => setPreviewDoc(doc)}>
                             Preview
                           </button>
-                          <button className="btn btn-danger btn-sm" type="button" disabled={busy} onClick={() => void onDeleteDoc(doc.id)}>
-                            Delete
-                          </button>
+                          {canEditContent ? (
+                            <button
+                              className="btn btn-danger btn-sm"
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void onDeleteDoc(doc.id)}
+                            >
+                              Delete
+                            </button>
+                          ) : null}
                         </div>
                       </td>
                     </tr>

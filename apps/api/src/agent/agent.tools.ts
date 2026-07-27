@@ -138,6 +138,7 @@ export function createUserTools(deps: {
         };
       }
 
+      // Readable KBs only (owned, public, or shared) — never invent ids.
       let kbs = await knowledge.list(userId);
       const allowed = new Set(scopeIds);
       kbs = kbs.filter((k) => allowed.has(k.id));
@@ -149,7 +150,7 @@ export function createUserTools(deps: {
               text: JSON.stringify({
                 hits: [],
                 message:
-                  'Selected knowledge base ids were not found or are not owned by this user.',
+                  'Selected knowledge base ids were not found or are not accessible to this user.',
               }),
             },
           ],
@@ -157,8 +158,15 @@ export function createUserTools(deps: {
         };
       }
 
-      const owned = await prisma.knowledgeBase.findMany({
-        where: { ownerUserId: userId, id: { in: kbs.map((k) => k.id) } },
+      const accessible = await prisma.knowledgeBase.findMany({
+        where: {
+          id: { in: kbs.map((k) => k.id) },
+          OR: [
+            { ownerUserId: userId },
+            { visibility: 'public' },
+            { members: { some: { userId } } },
+          ],
+        },
         include: {
           documents: {
             select: {
@@ -172,17 +180,17 @@ export function createUserTools(deps: {
 
       const topK = clampTopK(params.topK);
       const hits = await ragflow.retrieve({
-        datasetIds: owned.map((k) => k.ragflowDatasetId),
+        datasetIds: accessible.map((k) => k.ragflowDatasetId),
         question: String(params.question || ''),
         topK,
       });
 
-      const byRf = new Map(owned.map((k) => [k.ragflowDatasetId, k]));
+      const byRf = new Map(accessible.map((k) => [k.ragflowDatasetId, k]));
       const docByRf = new Map<
         string,
         { appDocumentId: string; knowledgeBaseId: string; name: string }
       >();
-      for (const kb of owned) {
+      for (const kb of accessible) {
         for (const d of kb.documents) {
           docByRf.set(d.ragflowDocumentId, {
             appDocumentId: d.id,

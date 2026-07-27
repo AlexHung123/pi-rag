@@ -67,11 +67,15 @@ export async function apiFetch<T>(
 
 export type User = { id: string; username: string; role: string };
 
+export type KnowledgeBaseVisibility = 'private' | 'public';
+export type KnowledgeBaseRole = 'owner' | 'viewer' | 'editor';
+
 export type AdminDataset = {
   id: string;
   name: string;
   description: string;
   chunkMethod: string;
+  visibility?: KnowledgeBaseVisibility;
   documentCount: number;
   chunkCount: number;
   ownerUserId: string;
@@ -154,6 +158,11 @@ export type KnowledgeBase = {
   description: string;
   chunkMethod: string;
   parserConfig?: Record<string, unknown>;
+  visibility: KnowledgeBaseVisibility;
+  ownerUserId: string;
+  ownerUsername?: string;
+  isOwner: boolean;
+  myRole?: KnowledgeBaseRole | null;
   documentCount?: number;
   createdAt: string;
   updatedAt: string;
@@ -164,6 +173,22 @@ export type CreateKnowledgeBaseBody = {
   description?: string;
   chunkMethod?: string;
   parserConfig?: Record<string, unknown>;
+  visibility?: KnowledgeBaseVisibility;
+};
+
+export type UpdateKnowledgeBaseBody = {
+  visibility?: KnowledgeBaseVisibility;
+};
+
+export type KnowledgeBaseMemberRole = 'viewer' | 'editor';
+
+export type KnowledgeBaseMember = {
+  id: string;
+  userId: string;
+  username: string;
+  role: KnowledgeBaseMemberRole;
+  createdAt: string;
+  updatedAt: string;
 };
 
 export type DocumentItem = {
@@ -257,8 +282,33 @@ export const kbApi = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  update: (id: string, body: UpdateKnowledgeBaseBody) =>
+    apiFetch<KnowledgeBase>(`/api/knowledge-bases/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
   remove: (id: string) =>
     apiFetch<{ ok: boolean }>(`/api/knowledge-bases/${id}`, { method: 'DELETE' }),
+  listMembers: (kbId: string) =>
+    apiFetch<{ items: KnowledgeBaseMember[] }>(`/api/knowledge-bases/${kbId}/members`),
+  listShareCandidates: (kbId: string) =>
+    apiFetch<{ items: Array<{ id: string; username: string }> }>(
+      `/api/knowledge-bases/${kbId}/share-candidates`,
+    ),
+  addMember: (kbId: string, body: { username: string; role?: KnowledgeBaseMemberRole }) =>
+    apiFetch<KnowledgeBaseMember>(`/api/knowledge-bases/${kbId}/members`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  updateMember: (kbId: string, userId: string, body: { role: KnowledgeBaseMemberRole }) =>
+    apiFetch<KnowledgeBaseMember>(`/api/knowledge-bases/${kbId}/members/${userId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  removeMember: (kbId: string, userId: string) =>
+    apiFetch<{ ok: boolean }>(`/api/knowledge-bases/${kbId}/members/${userId}`, {
+      method: 'DELETE',
+    }),
 };
 
 export const docApi = {

@@ -66,6 +66,7 @@ export class AdminService {
         name: kb.name,
         description: kb.description,
         chunkMethod: kb.chunkMethod,
+        visibility: kb.visibility,
         documentCount: kb._count.documents,
         chunkCount: kb.documents.reduce((s, d) => s + (d.chunkCount || 0), 0),
         ownerUserId: kb.ownerUserId,

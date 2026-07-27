@@ -42,9 +42,9 @@ export class DocumentsService {
   }
 
   async list(userId: string, knowledgeBaseId: string) {
-    await this.knowledge.getOwned(userId, knowledgeBaseId);
+    await this.knowledge.getReadable(userId, knowledgeBaseId);
     const docs = await this.prisma.document.findMany({
-      where: { knowledgeBaseId, ownerUserId: userId },
+      where: { knowledgeBaseId },
       orderBy: { createdAt: 'desc' },
     });
     // refresh running docs opportunistically
@@ -55,18 +55,35 @@ export class DocumentsService {
         .map((d) => this.refreshStatus(userId, knowledgeBaseId, d.id).catch(() => null)),
     );
     const fresh = await this.prisma.document.findMany({
-      where: { knowledgeBaseId, ownerUserId: userId },
+      where: { knowledgeBaseId },
       orderBy: { createdAt: 'desc' },
     });
     return fresh.map((d) => this.serialize(d));
   }
 
-  async getOwned(userId: string, knowledgeBaseId: string, docId: string) {
+  /** Document in a readable KB (any doc in the KB, not only uploader's). */
+  async getInReadableKb(userId: string, knowledgeBaseId: string, docId: string) {
+    await this.knowledge.getReadable(userId, knowledgeBaseId);
     const doc = await this.prisma.document.findFirst({
-      where: { id: docId, knowledgeBaseId, ownerUserId: userId },
+      where: { id: docId, knowledgeBaseId },
     });
     if (!doc) throw notFound('document not found');
     return doc;
+  }
+
+  /** Document in a content-editable KB. */
+  async getInEditableKb(userId: string, knowledgeBaseId: string, docId: string) {
+    await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const doc = await this.prisma.document.findFirst({
+      where: { id: docId, knowledgeBaseId },
+    });
+    if (!doc) throw notFound('document not found');
+    return doc;
+  }
+
+  /** @deprecated use getInReadableKb / getInEditableKb */
+  async getOwned(userId: string, knowledgeBaseId: string, docId: string) {
+    return this.getInEditableKb(userId, knowledgeBaseId, docId);
   }
 
   async upload(
@@ -74,7 +91,7 @@ export class DocumentsService {
     knowledgeBaseId: string,
     file: { originalname: string; buffer: Buffer; size: number; mimetype?: string },
   ) {
-    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
     if (!file?.buffer?.length) throw badRequest('file is required');
     const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
     if (file.size > maxBytes) throw badRequest(`file exceeds max size ${maxBytes}`);
@@ -105,8 +122,8 @@ export class DocumentsService {
   }
 
   async parse(userId: string, knowledgeBaseId: string, docId: string) {
-    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
-    const doc = await this.getOwned(userId, knowledgeBaseId, docId);
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
     await this.ragflow.parseDocuments(kb.ragflowDatasetId, [doc.ragflowDocumentId]);
     const updated = await this.prisma.document.update({
       where: { id: doc.id },
@@ -121,8 +138,8 @@ export class DocumentsService {
   }
 
   async stopParse(userId: string, knowledgeBaseId: string, docId: string) {
-    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
-    const doc = await this.getOwned(userId, knowledgeBaseId, docId);
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
     await this.ragflow.stopParseDocuments(kb.ragflowDatasetId, [doc.ragflowDocumentId]);
     const updated = await this.prisma.document.update({
       where: { id: doc.id },
@@ -137,8 +154,8 @@ export class DocumentsService {
   }
 
   async refreshStatus(userId: string, knowledgeBaseId: string, docId: string) {
-    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
-    const doc = await this.getOwned(userId, knowledgeBaseId, docId);
+    const kb = await this.knowledge.getReadable(userId, knowledgeBaseId);
+    const doc = await this.getInReadableKb(userId, knowledgeBaseId, docId);
     const rf = await this.ragflow.getDocument(kb.ragflowDatasetId, doc.ragflowDocumentId);
     if (!rf) return this.serialize(doc);
 
@@ -190,8 +207,8 @@ export class DocumentsService {
     docId: string,
     opts: { page?: number; pageSize?: number; keywords?: string },
   ) {
-    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
-    const doc = await this.getOwned(userId, knowledgeBaseId, docId);
+    const kb = await this.knowledge.getReadable(userId, knowledgeBaseId);
+    const doc = await this.getInReadableKb(userId, knowledgeBaseId, docId);
     const result = await this.ragflow.listChunks(kb.ragflowDatasetId, doc.ragflowDocumentId, opts);
     if (result.total !== doc.chunkCount) {
       await this.prisma.document.update({
@@ -235,8 +252,8 @@ export class DocumentsService {
   }
 
   async downloadFile(userId: string, knowledgeBaseId: string, docId: string) {
-    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
-    const doc = await this.getOwned(userId, knowledgeBaseId, docId);
+    const kb = await this.knowledge.getReadable(userId, knowledgeBaseId);
+    const doc = await this.getInReadableKb(userId, knowledgeBaseId, docId);
     const file = await this.ragflow.downloadDocument(
       kb.ragflowDatasetId,
       doc.ragflowDocumentId,
@@ -249,8 +266,8 @@ export class DocumentsService {
   }
 
   async remove(userId: string, knowledgeBaseId: string, docId: string) {
-    const kb = await this.knowledge.getOwned(userId, knowledgeBaseId);
-    const doc = await this.getOwned(userId, knowledgeBaseId, docId);
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
     try {
       await this.ragflow.deleteDocuments(kb.ragflowDatasetId, [doc.ragflowDocumentId]);
     } catch {
