@@ -5,9 +5,11 @@ import {
   RagflowDataset,
   RagflowDocument,
   RetrieveHit,
+  RetrieveOptions,
 } from './ragflow.types';
 import { RagflowMockStore } from './ragflow-mock.store';
 import { badRequest } from '../common/errors';
+import { getRagRetrievalConfig } from '../rag/rag-config';
 
 type ApiEnvelope<T> = { code: number; message?: string; data?: T };
 
@@ -254,49 +256,76 @@ export class RagflowService {
     };
   }
 
-  async retrieve(input: {
-    datasetIds: string[];
-    question: string;
-    topK?: number;
-  }): Promise<RetrieveHit[]> {
-    const topK = input.topK || 6;
+  async retrieve(input: RetrieveOptions): Promise<RetrieveHit[]> {
+    const defaults = getRagRetrievalConfig();
+    const pageSize = Math.max(1, input.pageSize ?? defaults.pageSize);
+    const topK = Math.max(pageSize, input.topK ?? defaults.topK);
+    const similarityThreshold =
+      input.similarityThreshold ?? defaults.similarityThreshold;
+    const vectorSimilarityWeight =
+      input.vectorSimilarityWeight ?? defaults.vectorSimilarityWeight;
+    const rerankId = input.rerankId ?? defaults.rerankId;
+
     if (this.useMock()) {
-      return this.mock.retrieve(input.datasetIds, input.question, topK);
+      return this.mock.retrieve(input.datasetIds, input.question, pageSize, {
+        similarityThreshold,
+      });
     }
-    // RAGFlow retrieval endpoint
+
+    const body: Record<string, unknown> = {
+      question: input.question,
+      dataset_ids: input.datasetIds,
+      // Over-retrieve then let page_size trim; hybrid/rerank reorder inside RAGFlow.
+      top_k: topK,
+      page_size: pageSize,
+      similarity_threshold: similarityThreshold,
+      vector_similarity_weight: vectorSimilarityWeight,
+    };
+    if (input.documentIds?.length) {
+      body.document_ids = input.documentIds;
+    }
+    if (rerankId) {
+      body.rerank_id = rerankId;
+    }
+
+    this.logger.debug(
+      `retrieve q="${input.question.slice(0, 80)}" datasets=${input.datasetIds.length} top_k=${topK} page_size=${pageSize} thr=${similarityThreshold} v_weight=${vectorSimilarityWeight}${rerankId ? ` rerank=${rerankId}` : ''}`,
+    );
+
     const data = await this.request<{ chunks?: Array<Record<string, unknown>> }>(
       'POST',
       '/api/v1/retrieval',
-      {
-        body: {
-          question: input.question,
-          dataset_ids: input.datasetIds,
-          top_k: topK,
-          page_size: topK,
-        },
-      },
+      { body },
     );
     const chunks = data?.chunks || [];
-    return chunks.map((c) => {
-      const rawPositions = c.positions ?? c.position;
-      let positions: RetrieveHit['positions'];
-      if (Array.isArray(rawPositions)) {
-        positions = rawPositions as RetrieveHit['positions'];
-      }
-      return {
-        id: String(c.id || c.chunk_id || ''),
-        content: String(c.content || c.content_with_weight || ''),
-        documentId: c.document_id ? String(c.document_id) : undefined,
-        documentName: c.document_keyword
-          ? String(c.document_keyword)
-          : c.docnm_kwd
-            ? String(c.docnm_kwd)
-            : undefined,
-        datasetId: c.dataset_id ? String(c.dataset_id) : undefined,
-        score: typeof c.similarity === 'number' ? c.similarity : undefined,
-        positions,
-      };
-    });
+    return chunks.map((c) => this.mapRetrievalChunk(c));
+  }
+
+  private mapRetrievalChunk(c: Record<string, unknown>): RetrieveHit {
+    const rawPositions = c.positions ?? c.position;
+    let positions: RetrieveHit['positions'];
+    if (Array.isArray(rawPositions)) {
+      positions = rawPositions as RetrieveHit['positions'];
+    }
+    const score =
+      typeof c.similarity === 'number'
+        ? c.similarity
+        : typeof c.score === 'number'
+          ? c.score
+          : undefined;
+    return {
+      id: String(c.id || c.chunk_id || ''),
+      content: String(c.content || c.content_with_weight || ''),
+      documentId: c.document_id ? String(c.document_id) : undefined,
+      documentName: c.document_keyword
+        ? String(c.document_keyword)
+        : c.docnm_kwd
+          ? String(c.docnm_kwd)
+          : undefined,
+      datasetId: c.dataset_id ? String(c.dataset_id) : undefined,
+      score,
+      positions,
+    };
   }
 
   mapRunToStatus(run: string | number | undefined): 'unstart' | 'running' | 'done' | 'fail' {

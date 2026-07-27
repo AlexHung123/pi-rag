@@ -3,6 +3,19 @@ import { KnowledgeService } from '../knowledge/knowledge.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { RetrieveHit } from '../ragflow/ragflow.types';
+import { getRagRetrievalConfig } from '../rag/rag-config';
+import {
+  dedupeHitsById,
+  evidenceLabelFromScore,
+  filterHitsByThreshold,
+  formatEvidenceForModel,
+  mappedHitsToCitationSources,
+  type CitationSource,
+  type MappedHit,
+} from '../rag/evidence';
+
+export type { CitationSource };
+export { evidenceLabelFromScore };
 
 /** pi-agent-core AgentTool shape (TypeBox parameters). */
 export type AppAgentTool = {
@@ -21,30 +34,6 @@ export type AppAgentTool = {
   }>;
 };
 
-/** Normalized citation source for chat UI. */
-export type CitationSource = {
-  id: string;
-  content: string;
-  documentName?: string;
-  documentId?: string;
-  /** App document UUID (for Locate / preview). */
-  appDocumentId?: string;
-  knowledgeBaseId?: string;
-  knowledgeBaseName?: string;
-  score?: number;
-  /** 1-based display index among returned hits. */
-  index: number;
-  evidenceLabel: string;
-  positions?: number[][];
-};
-
-export function evidenceLabelFromScore(score?: number): string {
-  if (typeof score !== 'number' || Number.isNaN(score)) return 'Evidence';
-  if (score >= 0.75) return 'Strong evidence';
-  if (score >= 0.5) return 'Moderate evidence';
-  return 'Weak evidence';
-}
-
 export function hitsToCitationSources(
   hits: Array<
     RetrieveHit & {
@@ -55,32 +44,48 @@ export function hitsToCitationSources(
     }
   >,
 ): CitationSource[] {
-  return hits.map((h, i) => ({
-    id: h.id || `hit-${i + 1}`,
-    content: h.content || '',
-    documentName: h.documentName,
-    documentId: h.documentId,
-    appDocumentId: h.appDocumentId,
-    knowledgeBaseId: h.knowledgeBaseId,
-    knowledgeBaseName: h.knowledgeBaseName,
-    score: h.score,
-    index: i + 1,
-    evidenceLabel: evidenceLabelFromScore(h.score),
-    positions: h.positions,
-  }));
-}
-
-const MAX_TOP_K = 10;
-const DEFAULT_TOP_K = 10;
-
-function clampTopK(value: unknown): number {
-  if (typeof value !== 'number' || !Number.isFinite(value)) return DEFAULT_TOP_K;
-  return Math.min(MAX_TOP_K, Math.max(1, Math.floor(value)));
+  return mappedHitsToCitationSources(hits);
 }
 
 function asStringArray(value: unknown): string[] {
   if (!Array.isArray(value)) return [];
   return value.map((v) => String(v)).filter(Boolean);
+}
+
+function clampPageSize(value: unknown, fallback: number, max: number): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback;
+  return Math.min(max, Math.max(1, Math.floor(value)));
+}
+
+/**
+ * Optional light multi-query expansion without an extra LLM call:
+ * if the agent already passes queries[], use them; otherwise use question alone
+ * (or split on "?" / "？" for multi-part questions).
+ */
+function resolveQueries(
+  params: Record<string, unknown>,
+  maxQueries: number,
+  multiEnabled: boolean,
+): string[] {
+  const fromArray = asStringArray(params.queries)
+    .map((q) => q.trim())
+    .filter(Boolean);
+  if (fromArray.length) {
+    return Array.from(new Set(fromArray)).slice(0, maxQueries);
+  }
+  const question = String(params.question || '').trim();
+  if (!question) return [];
+  if (!multiEnabled) return [question];
+
+  // Split multi-part questions into short sub-queries when clearly multi-sentence.
+  const parts = question
+    .split(/(?<=[?？])\s+|(?<=[。！])\s+/)
+    .map((p) => p.trim())
+    .filter((p) => p.length >= 4);
+  if (parts.length > 1) {
+    return Array.from(new Set([question, ...parts])).slice(0, maxQueries);
+  }
+  return [question];
 }
 
 export function createUserTools(deps: {
@@ -90,24 +95,39 @@ export function createUserTools(deps: {
   prisma: PrismaService;
 }): AppAgentTool[] {
   const { userId, knowledge, ragflow, prisma } = deps;
+  const ragCfg = getRagRetrievalConfig();
 
   const retrieve: AppAgentTool = {
     name: 'retrieve_chunks',
     label: 'Retrieve chunks',
     description:
-      'Retrieve relevant text chunks from knowledge bases the user selected in the UI. Prefer this before claiming facts from documents. Pass knowledgeBaseIds from the selected-KB prompt (required). Returns at most 10 chunks (topK default 10).',
+      'Retrieve relevant text chunks from knowledge bases the user selected in the UI. Prefer this before claiming facts from documents. Pass knowledgeBaseIds from the selected-KB prompt (required). Prefer a clear self-contained question (or queries[] for multi-aspect). Returns ranked evidence with [n] citation indices.',
     parameters: Type.Object({
-      question: Type.String({ description: 'Question or search query' }),
+      question: Type.String({
+        description:
+          'Primary search question (self-contained; resolve pronouns from chat context)',
+      }),
+      queries: Type.Optional(
+        Type.Array(Type.String(), {
+          description:
+            'Optional 1–3 short semantic sub-queries for multi-aspect retrieval; merged and deduped',
+        }),
+      ),
       knowledgeBaseId: Type.Optional(
-        Type.String({ description: 'Optional single app knowledge base UUID (user-selected)' }),
+        Type.String({
+          description: 'Optional single app knowledge base UUID (user-selected)',
+        }),
       ),
       knowledgeBaseIds: Type.Optional(
         Type.Array(Type.String(), {
-          description: 'User-selected app knowledge base UUIDs to search (from the UI selection)',
+          description:
+            'User-selected app knowledge base UUIDs to search (from the UI selection)',
         }),
       ),
       topK: Type.Optional(
-        Type.Number({ description: `Max chunks (default ${DEFAULT_TOP_K}, max ${MAX_TOP_K})` }),
+        Type.Number({
+          description: `Max evidence chunks returned (default ${ragCfg.pageSize}, max 20)`,
+        }),
       ),
     }),
     execute: async (_id, params) => {
@@ -123,18 +143,11 @@ export function createUserTools(deps: {
 
       // KBs are chosen only by the user in the UI — never invent or auto-pick ids.
       if (!scopeIds.length) {
+        const message =
+          'No knowledge bases selected. The user must select knowledge bases in the UI before retrieval.';
         return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                hits: [],
-                message:
-                  'No knowledge bases selected. The user must select knowledge bases in the UI before retrieval.',
-              }),
-            },
-          ],
-          details: { hits: [], sources: [] },
+          content: [{ type: 'text', text: message }],
+          details: { hits: [], sources: [], message },
         };
       }
 
@@ -143,18 +156,11 @@ export function createUserTools(deps: {
       const allowed = new Set(scopeIds);
       kbs = kbs.filter((k) => allowed.has(k.id));
       if (!kbs.length) {
+        const message =
+          'Selected knowledge base ids were not found or are not accessible to this user.';
         return {
-          content: [
-            {
-              type: 'text',
-              text: JSON.stringify({
-                hits: [],
-                message:
-                  'Selected knowledge base ids were not found or are not accessible to this user.',
-              }),
-            },
-          ],
-          details: { hits: [], sources: [] },
+          content: [{ type: 'text', text: message }],
+          details: { hits: [], sources: [], message },
         };
       }
 
@@ -178,12 +184,39 @@ export function createUserTools(deps: {
         },
       });
 
-      const topK = clampTopK(params.topK);
-      const hits = await ragflow.retrieve({
-        datasetIds: accessible.map((k) => k.ragflowDatasetId),
-        question: String(params.question || ''),
-        topK,
-      });
+      const pageSize = clampPageSize(params.topK, ragCfg.pageSize, 20);
+      // Over-retrieve candidates inside RAGFlow (~3x page, or env RAG_TOP_K).
+      const topK = Math.max(pageSize, ragCfg.topK);
+      const queries = resolveQueries(
+        params,
+        ragCfg.multiQueryMax,
+        ragCfg.multiQueryEnabled,
+      );
+      if (!queries.length) {
+        const message = 'retrieve_chunks requires a non-empty question.';
+        return {
+          content: [{ type: 'text', text: message }],
+          details: { hits: [], sources: [], message },
+        };
+      }
+
+      const datasetIds = accessible.map((k) => k.ragflowDatasetId);
+      const allHits: MappedHit[] = [];
+
+      for (const q of queries) {
+        const hits = await ragflow.retrieve({
+          datasetIds,
+          question: q,
+          pageSize,
+          topK,
+          similarityThreshold: ragCfg.similarityThreshold,
+          vectorSimilarityWeight: ragCfg.vectorSimilarityWeight,
+          rerankId: ragCfg.rerankId,
+        });
+        for (const h of hits) {
+          allHits.push({ ...h, sourceQuery: q });
+        }
+      }
 
       const byRf = new Map(accessible.map((k) => [k.ragflowDatasetId, k]));
       const docByRf = new Map<
@@ -200,7 +233,7 @@ export function createUserTools(deps: {
         }
       }
 
-      const mapped = hits.map((h) => {
+      const mapped: MappedHit[] = allHits.map((h) => {
         const kb = h.datasetId ? byRf.get(h.datasetId) : undefined;
         const doc = h.documentId ? docByRf.get(h.documentId) : undefined;
         return {
@@ -212,11 +245,40 @@ export function createUserTools(deps: {
         };
       });
 
-      const sources = hitsToCitationSources(mapped);
+      let merged = dedupeHitsById(mapped);
+      merged = filterHitsByThreshold(merged, ragCfg.similarityThreshold);
+      merged = merged.slice(0, pageSize);
+
+      const maxScore = merged.reduce(
+        (m, h) => Math.max(m, typeof h.score === 'number' ? h.score : 0),
+        0,
+      );
+      const insufficient =
+        merged.length === 0 ||
+        (maxScore > 0 && maxScore < ragCfg.similarityThreshold + 0.1);
+
+      const sources = mappedHitsToCitationSources(merged);
+      const text = formatEvidenceForModel(merged, {
+        maxChunkChars: ragCfg.maxChunkChars,
+        query: queries.join(' | '),
+        insufficient,
+        message:
+          merged.length === 0
+            ? 'No chunks passed the similarity threshold. Refuse to invent facts.'
+            : undefined,
+      });
 
       return {
-        content: [{ type: 'text', text: JSON.stringify(mapped, null, 2) }],
-        details: { hits: mapped, sources },
+        content: [{ type: 'text', text }],
+        details: {
+          hits: merged,
+          sources,
+          queries,
+          pageSize,
+          topK,
+          similarityThreshold: ragCfg.similarityThreshold,
+          insufficient,
+        },
       };
     },
   };
@@ -234,26 +296,31 @@ Language:
 
 Rules:
 - Knowledge bases are selected by the user in the UI only. Never invent or guess knowledge base ids.
-- When the user message includes selected knowledge base IDs, you MUST call retrieve_chunks with those knowledgeBaseIds and topK=10 before answering factual questions. Do not invent document content.
-- If no knowledge bases are selected, answer without document retrieval and, if facts from documents are needed, ask the user to select knowledge bases in the UI.
-- Only use tool results for document content; never invent document contents.
+- When the user message includes selected knowledge base IDs, you MUST call retrieve_chunks with those knowledgeBaseIds before answering factual questions. Do not invent document content.
+- Prefer a self-contained question (resolve "it/this/上面" from history). Optional queries[] for multi-aspect topics.
+- Only use tool evidence for document content; cite with [1], [2] matching evidence indices.
+- If retrieval returns no / weak evidence, say you don't know based on the selected knowledge bases.
 - Knowledge bases are user-private; never claim access to other users' data.
-- If retrieval returns nothing relevant, say you don't know based on the selected knowledge bases.
-- Be concise and practical. Cite document names when possible.
-- Prefer topK=10 (maximum 10 chunks). Use the most relevant chunks only.
+- Be concise and practical. Mention document names when citing facts.
 `;
 
 /** Build a prompt prefix when the UI has knowledge bases selected. */
 export function buildSelectedKbPromptPrefix(
   selected: Array<{ id: string; name: string }>,
+  opts?: { rewriteQuery?: string },
 ): string {
   if (!selected.length) return '';
   const lines = selected.map((k) => `- ${k.name} (id: ${k.id})`).join('\n');
   const ids = JSON.stringify(selected.map((k) => k.id));
+  const rewriteHint = opts?.rewriteQuery
+    ? `Suggested retrieval question (self-contained): ${opts.rewriteQuery}\n` +
+      `You may pass this as retrieve_chunks.question (or refine it).\n\n`
+    : '';
   return (
     `[Selected knowledge bases for this question]\n${lines}\n\n` +
-    `You MUST call retrieve_chunks with knowledgeBaseIds=${ids} and topK=10 before answering. ` +
-    `Base your analysis only on the retrieved chunks. Mention document names when citing facts.\n\n` +
+    `You MUST call retrieve_chunks with knowledgeBaseIds=${ids} before answering factual questions. ` +
+    `Base your analysis only on the retrieved evidence. Cite with [1], [2], … and mention document names.\n\n` +
+    rewriteHint +
     `[User question]\n`
   );
 }

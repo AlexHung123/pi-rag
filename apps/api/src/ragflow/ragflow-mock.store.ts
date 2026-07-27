@@ -167,7 +167,16 @@ export class RagflowMockStore {
     return { chunks: chunks.slice(start, start + pageSize), total };
   }
 
-  retrieve(datasetIds: string[], question: string, topK: number): RetrieveHit[] {
+  retrieve(
+    datasetIds: string[],
+    question: string,
+    topK: number,
+    opts: { similarityThreshold?: number } = {},
+  ): RetrieveHit[] {
+    const threshold =
+      typeof opts.similarityThreshold === 'number'
+        ? opts.similarityThreshold
+        : 0.05;
     const q = question.toLowerCase();
     const hits: RetrieveHit[] = [];
     for (const dsId of datasetIds) {
@@ -179,7 +188,7 @@ export class RagflowMockStore {
           const score = content.toLowerCase().includes(q)
             ? 0.9
             : overlapScore(q, content.toLowerCase());
-          if (score > 0.05) {
+          if (score >= threshold) {
             hits.push({
               id: chunk.id,
               content,

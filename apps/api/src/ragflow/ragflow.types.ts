@@ -52,3 +52,24 @@ export type RetrieveHit = {
   /** PDF highlight boxes when returned by retrieval. */
   positions?: RagflowChunkPosition[];
 };
+
+/** Options for RAGFlow POST /api/v1/retrieval */
+export type RetrieveOptions = {
+  datasetIds: string[];
+  question: string;
+  /** Final page size (chunks returned after RAGFlow ranking). */
+  pageSize?: number;
+  /**
+   * Candidate pool size (RAGFlow top_k). Prefer larger than pageSize
+   * so hybrid/rerank can re-order before truncation.
+   */
+  topK?: number;
+  /** Drop results below this similarity when the engine scores them. */
+  similarityThreshold?: number;
+  /** 1 = pure vector, 0 = pure keyword (RAGFlow vector_similarity_weight). */
+  vectorSimilarityWeight?: number;
+  /** Optional document filter (RAGFlow document ids). */
+  documentIds?: string[];
+  /** Optional RAGFlow rerank model id. */
+  rerankId?: string;
+};

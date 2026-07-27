@@ -16,6 +16,7 @@ import {
 import { importEsm } from './import-esm';
 import { createLlmDebugHooks } from './llm-debug';
 import { isLlmConfigured, loadPiModelBundle } from './pi-model';
+import { rewriteQueryForRetrieval } from '../rag/query-rewrite';
 
 export type AgentStreamEvent =
   | { type: 'text_delta'; delta: string }
@@ -90,7 +91,18 @@ export class AgentService {
         .filter((k) => selectedKbIds.includes(k.id))
         .map((k) => ({ id: k.id, name: k.name }));
       if (selected.length) {
-        promptText = `${buildSelectedKbPromptPrefix(selected)}${userMessage}`;
+        // Multi-turn: rewrite into a self-contained retrieval hint for the agent.
+        const rewritten = await rewriteQueryForRetrieval(userMessage, history);
+        if (rewritten.rewritten) {
+          this.logger.debug(
+            `query rewrite: "${rewritten.original.slice(0, 60)}" → "${rewritten.rewriteQuery.slice(0, 60)}"`,
+          );
+        }
+        promptText = `${buildSelectedKbPromptPrefix(selected, {
+          rewriteQuery: rewritten.rewritten
+            ? rewritten.rewriteQuery
+            : undefined,
+        })}${userMessage}`;
       }
     }
 
