@@ -129,4 +129,11 @@ export class AuthController {
       csrfToken: user.csrfSecret,
     };
   }
+
+  /** Current user's total document storage usage vs quota. */
+  @Get('me/storage')
+  @UseGuards(AuthGuard)
+  storage(@CurrentUser() user: AuthPrincipal) {
+    return this.auth.getStorage(user.userId);
+  }
 }

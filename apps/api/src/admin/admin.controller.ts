@@ -183,13 +183,31 @@ export class AdminController {
 
   @Post('users')
   createUser(
-    @Body() body: { username?: string; password?: string; role?: Role },
+    @Body()
+    body: {
+      username?: string;
+      password?: string;
+      role?: Role;
+      storageQuotaBytes?: number;
+    },
   ) {
     return this.admin.createUser({
       username: body.username || '',
       password: body.password || '',
       role: body.role,
+      storageQuotaBytes: body.storageQuotaBytes,
     });
+  }
+
+  @Patch('users/:id/storage-quota')
+  setUserStorageQuota(
+    @Param('id') id: string,
+    @Body() body: { storageQuotaBytes?: number },
+  ) {
+    if (body.storageQuotaBytes === undefined || body.storageQuotaBytes === null) {
+      throw badRequest('storageQuotaBytes is required');
+    }
+    return this.admin.setUserStorageQuota(id, Number(body.storageQuotaBytes));
   }
 
   @Patch('users/:id/status')

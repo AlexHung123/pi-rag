@@ -67,6 +67,14 @@ export async function apiFetch<T>(
 
 export type User = { id: string; username: string; role: string };
 
+/** Total document storage for the current user (sum of sizeBytes vs quota). */
+export type StorageUsage = {
+  usedBytes: number;
+  quotaBytes: number;
+  remainingBytes: number;
+  usageRatio: number;
+};
+
 export type KnowledgeBaseVisibility = 'private' | 'public';
 export type KnowledgeBaseRole = 'owner' | 'viewer' | 'editor';
 
@@ -118,6 +126,9 @@ export type AdminUser = {
   datasetCount: number;
   documentCount: number;
   conversationCount: number;
+  storageQuotaBytes: number;
+  storageUsedBytes: number;
+  storageRemainingBytes: number;
   createdAt: string;
   updatedAt: string;
 };
@@ -256,6 +267,7 @@ export const authApi = {
     apiFetch<{ allowRegister: boolean }>('/api/auth/bootstrap'),
   me: () =>
     apiFetch<{ user: User; csrfToken: string }>('/api/auth/me'),
+  storage: () => apiFetch<StorageUsage>('/api/auth/me/storage'),
   login: (username: string, password: string) =>
     apiFetch<{ user: User; csrfToken: string }>('/api/auth/login', {
       method: 'POST',
@@ -484,6 +496,7 @@ export const adminApi = {
     username: string;
     password: string;
     role?: string;
+    storageQuotaBytes?: number;
   }) =>
     apiFetch<AdminUser>('/api/admin/users', {
       method: 'POST',
@@ -499,6 +512,19 @@ export const adminApi = {
       `/api/admin/users/${id}/role`,
       { method: 'PATCH', body: JSON.stringify({ role }) },
     ),
+  setUserStorageQuota: (id: string, storageQuotaBytes: number) =>
+    apiFetch<{
+      id: string;
+      username: string;
+      role: string;
+      disabled: boolean;
+      storageQuotaBytes: number;
+      storageUsedBytes: number;
+      storageRemainingBytes: number;
+    }>(`/api/admin/users/${id}/storage-quota`, {
+      method: 'PATCH',
+      body: JSON.stringify({ storageQuotaBytes }),
+    }),
   setUserPassword: (id: string, password: string) =>
     apiFetch<{ ok: boolean }>(`/api/admin/users/${id}/password`, {
       method: 'PATCH',

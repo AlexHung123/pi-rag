@@ -1,21 +1,25 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { FileText, Folder, Upload, X } from 'lucide-react'
 import {
+  authApi,
   docApi,
   kbApi,
   type DocumentItem,
   type KnowledgeBase,
   type KnowledgeBaseMember,
   type KnowledgeBaseMemberRole,
+  type StorageUsage,
 } from '../services/api'
 import DocumentPreviewPage from './DocumentPreviewPage'
 
 const AVATAR_COLORS = ['#ea580c', '#2563eb', '#db2777', '#059669', '#7c3aed', '#d97706', '#0891b2', '#4f46e5']
 
 function formatBytes(n: number) {
-  if (n < 1024) return `${n} B`
+  if (!Number.isFinite(n) || n < 0) return '0 B'
+  if (n < 1024) return `${Math.round(n)} B`
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`
-  return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`
+  return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`
 }
 
 function formatDateTime(iso: string) {
@@ -109,8 +113,18 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const [shareUserId, setShareUserId] = useState('')
   const [shareRole, setShareRole] = useState<KnowledgeBaseMemberRole>('viewer')
   const [shareError, setShareError] = useState('')
+  const [storage, setStorage] = useState<StorageUsage | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
   const folderRef = useRef<HTMLInputElement>(null)
+
+  const loadStorage = useCallback(async () => {
+    try {
+      const s = await authApi.storage()
+      setStorage(s)
+    } catch {
+      // Non-fatal: upload still works; bar just hidden if this fails.
+    }
+  }, [])
 
   const loadKbs = useCallback(async (opts?: { quiet?: boolean }) => {
     if (!opts?.quiet) setKbsLoading(true)
@@ -171,7 +185,8 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
   useEffect(() => {
     loadKbs().catch(e => setError(e instanceof Error ? e.message : String(e)))
-  }, [loadKbs])
+    void loadStorage()
+  }, [loadKbs, loadStorage])
 
   useEffect(() => {
     if (!selectedId) {
@@ -309,17 +324,63 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     })
   }
 
+  const pendingTotalBytes = useMemo(
+    () => pendingFiles.reduce((s, f) => s + f.size, 0),
+    [pendingFiles],
+  )
+
+  const storageWarning = useMemo(() => {
+    if (!storage) return null
+    if (storage.usageRatio >= 1 || storage.remainingBytes <= 0) {
+      return {
+        level: 'full' as const,
+        text: `Storage full (${formatBytes(storage.usedBytes)} / ${formatBytes(storage.quotaBytes)}). Existing files are kept, but you cannot upload more until you free space or an admin raises your quota.`,
+      }
+    }
+    if (storage.usageRatio >= 0.95) {
+      return {
+        level: 'critical' as const,
+        text: `Almost full (${Math.round(storage.usageRatio * 100)}% used). Only ${formatBytes(storage.remainingBytes)} remaining.`,
+      }
+    }
+    if (storage.usageRatio >= 0.8) {
+      return {
+        level: 'warn' as const,
+        text: `Running low on storage (${Math.round(storage.usageRatio * 100)}% used). Total limit is for all your uploaded files combined.`,
+      }
+    }
+    return null
+  }, [storage])
+
+  const pendingExceedsQuota = useMemo(() => {
+    if (!storage || !pendingFiles.length) return false
+    return pendingTotalBytes > storage.remainingBytes
+  }, [storage, pendingFiles.length, pendingTotalBytes])
+
   const removePendingFile = (index: number) => {
     setPendingFiles(prev => prev.filter((_, i) => i !== index))
   }
 
   const saveUpload = async () => {
     if (!selectedId || !pendingFiles.length) return
+    if (storage && pendingTotalBytes > storage.remainingBytes) {
+      setError(
+        `Selected files (${formatBytes(pendingTotalBytes)}) exceed remaining storage (${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total).`,
+      )
+      return
+    }
     setBusy(true)
     setError('')
     try {
+      let remaining = storage?.remainingBytes
       for (const file of pendingFiles) {
+        if (remaining !== undefined && file.size > remaining) {
+          throw new Error(
+            `File "${file.name}" (${formatBytes(file.size)}) exceeds remaining storage (${formatBytes(remaining)}).`,
+          )
+        }
         const doc = await docApi.upload(selectedId, file)
+        if (remaining !== undefined) remaining -= file.size
         if (parseOnCreation && doc?.id) {
           await docApi.parse(selectedId, doc.id)
         }
@@ -329,8 +390,10 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
       setUploadDragOver(false)
       await loadDocs(selectedId, { quiet: true })
       await loadKbs({ quiet: true })
+      await loadStorage()
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
+      await loadStorage()
     } finally {
       setBusy(false)
       if (fileRef.current) fileRef.current.value = ''
@@ -377,6 +440,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     })
     await loadDocs(selectedId, { quiet: true })
     await loadKbs({ quiet: true })
+    await loadStorage()
   }
 
   const onDeleteKb = async (id: string) => {
@@ -385,6 +449,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     if (selectedId === id) setSelectedId(null)
     await loadKbs({ quiet: true })
     setDocs([])
+    await loadStorage()
   }
 
   const onToggleVisibility = async () => {
@@ -893,12 +958,56 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 onChange={e => setDocSearch(e.target.value)}
               />
               {canEditContent ? (
-                <button className="btn" type="button" disabled={busy} onClick={openUploadModal}>
+                <button
+                  className="btn"
+                  type="button"
+                  disabled={busy || (!!storage && storage.remainingBytes <= 0)}
+                  onClick={openUploadModal}
+                  title={
+                    storage && storage.remainingBytes <= 0
+                      ? 'Storage full — delete files or ask an admin to raise your quota'
+                      : 'Upload files'
+                  }
+                >
                   + Add file
                 </button>
               ) : null}
             </div>
           </div>
+
+          {storage && canEditContent ? (
+            <div
+              className={`kb-storage-bar${
+                storageWarning?.level === 'full' || storageWarning?.level === 'critical'
+                  ? ' kb-storage-bar-critical'
+                  : storageWarning?.level === 'warn'
+                    ? ' kb-storage-bar-warn'
+                    : ''
+              }`}
+              title="Total size of all files you have uploaded (not per file)."
+            >
+              <div className="kb-storage-bar-head">
+                <span className="kb-storage-bar-label">Storage</span>
+                <span className="kb-storage-bar-values">
+                  {formatBytes(storage.usedBytes)} / {formatBytes(storage.quotaBytes)}
+                  <span className="kb-storage-bar-remaining">
+                    · {formatBytes(storage.remainingBytes)} free
+                  </span>
+                </span>
+              </div>
+              <div className="kb-storage-track" aria-hidden>
+                <div
+                  className="kb-storage-fill"
+                  style={{ width: `${Math.min(100, Math.round(storage.usageRatio * 100))}%` }}
+                />
+              </div>
+              <p className="kb-storage-hint">
+                {storageWarning
+                  ? storageWarning.text
+                  : 'Quota is the total for all your uploaded files combined, not a single-file limit.'}
+              </p>
+            </div>
+          ) : null}
 
           {error && !uploadOpen && <p className="error-text">{error}</p>}
 
@@ -1039,6 +1148,35 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
             {error && <p className="error-text">{error}</p>}
 
+            {storage ? (
+              <div
+                className={`kb-storage-bar kb-storage-bar-modal${
+                  storageWarning?.level === 'full' || storageWarning?.level === 'critical'
+                    ? ' kb-storage-bar-critical'
+                    : storageWarning?.level === 'warn'
+                      ? ' kb-storage-bar-warn'
+                      : ''
+                }`}
+              >
+                <div className="kb-storage-bar-head">
+                  <span className="kb-storage-bar-label">Your storage</span>
+                  <span className="kb-storage-bar-values">
+                    {formatBytes(storage.usedBytes)} / {formatBytes(storage.quotaBytes)}
+                  </span>
+                </div>
+                <div className="kb-storage-track" aria-hidden>
+                  <div
+                    className="kb-storage-fill"
+                    style={{ width: `${Math.min(100, Math.round(storage.usageRatio * 100))}%` }}
+                  />
+                </div>
+                <p className="kb-storage-hint">
+                  Total for all files you upload. Remaining: {formatBytes(storage.remainingBytes)}.
+                  {storageWarning ? ` ${storageWarning.text}` : ''}
+                </p>
+              </div>
+            ) : null}
+
             <div className="kb-upload-parse-row">
               <span className="kb-upload-parse-label">Parse on creation</span>
               <label className="kb-switch" title="Start parsing immediately after upload">
@@ -1128,6 +1266,9 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               <p className="kb-upload-dropzone-hint">
                 Supports single or batch file upload. PDF, TXT, MD, and other common document types.
                 Click to browse{uploadMode === 'folder' ? ' a folder' : ''}.
+                {storage
+                  ? ` Storage remaining: ${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total.`
+                  : ''}
               </p>
             </div>
 
@@ -1155,27 +1296,50 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
             />
 
             {pendingFiles.length > 0 && (
-              <ul className="kb-upload-file-list">
-                {pendingFiles.map((file, index) => (
-                  <li key={`${file.name}-${file.size}-${file.lastModified}-${index}`} className="kb-upload-file-item">
-                    <FileText size={14} aria-hidden />
-                    <span className="kb-upload-file-name" title={file.webkitRelativePath || file.name}>
-                      {file.webkitRelativePath || file.name}
-                    </span>
-                    <span className="kb-upload-file-size">{formatBytes(file.size)}</span>
-                    <button
-                      type="button"
-                      className="kb-upload-file-remove"
-                      aria-label={`Remove ${file.name}`}
-                      disabled={busy}
-                      onClick={() => removePendingFile(index)}
-                    >
-                      <X size={14} />
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <>
+                <ul className="kb-upload-file-list">
+                  {pendingFiles.map((file, index) => {
+                    const over = !!storage && file.size > storage.remainingBytes
+                    return (
+                      <li
+                        key={`${file.name}-${file.size}-${file.lastModified}-${index}`}
+                        className={`kb-upload-file-item${over ? ' kb-upload-file-item-over' : ''}`}
+                      >
+                        <FileText size={14} aria-hidden />
+                        <span className="kb-upload-file-name" title={file.webkitRelativePath || file.name}>
+                          {file.webkitRelativePath || file.name}
+                        </span>
+                        <span className="kb-upload-file-size">{formatBytes(file.size)}</span>
+                        {over ? (
+                          <span className="kb-upload-file-over-tag" title="Exceeds remaining storage">
+                            Over quota
+                          </span>
+                        ) : null}
+                        <button
+                          type="button"
+                          className="kb-upload-file-remove"
+                          aria-label={`Remove ${file.name}`}
+                          disabled={busy}
+                          onClick={() => removePendingFile(index)}
+                        >
+                          <X size={14} />
+                        </button>
+                      </li>
+                    )
+                  })}
+                </ul>
+                {storage ? (
+                  <p className={`kb-upload-selected-summary${pendingExceedsQuota ? ' is-over' : ''}`}>
+                    Selected {formatBytes(pendingTotalBytes)}
+                    {pendingExceedsQuota
+                      ? ` · exceeds remaining ${formatBytes(storage.remainingBytes)}`
+                      : ` · remaining ${formatBytes(storage.remainingBytes)}`}
+                  </p>
+                ) : null}
+              </>
             )}
+
+            {error && uploadOpen ? <p className="error-text">{error}</p> : null}
 
             <div className="kb-modal-actions">
               <button className="btn btn-secondary" type="button" disabled={busy} onClick={closeUploadModal}>
@@ -1184,7 +1348,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               <button
                 className="btn kb-upload-save"
                 type="button"
-                disabled={busy || pendingFiles.length === 0}
+                disabled={busy || pendingFiles.length === 0 || pendingExceedsQuota}
                 onClick={() => void saveUpload()}
               >
                 {busy ? 'Uploading…' : 'Save'}

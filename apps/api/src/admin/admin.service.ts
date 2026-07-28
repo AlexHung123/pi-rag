@@ -5,6 +5,11 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { AgentSessionPool } from '../agent/agent-session.pool';
 import { badRequest, notFound } from '../common/errors';
+import {
+  assertWithinStorageQuota,
+  defaultStorageQuotaBytes,
+  parseQuotaBytesInput,
+} from '../common/storage-quota';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -205,6 +210,8 @@ export class AdminService {
     if (!file?.buffer?.length) throw badRequest('file is required');
     const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
     if (file.size > maxBytes) throw badRequest(`file exceeds max size ${maxBytes}`);
+    // Admin upload attributes the document to the KB owner — charge that user's quota.
+    await assertWithinStorageQuota(this.prisma, kb.ownerUserId, file.size);
 
     const safeName =
       file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
@@ -530,18 +537,38 @@ export class AdminService {
       }),
     ]);
 
+    const userIds = rows.map((u) => u.id);
+    const usedGroups =
+      userIds.length === 0
+        ? []
+        : await this.prisma.document.groupBy({
+            by: ['ownerUserId'],
+            where: { ownerUserId: { in: userIds } },
+            _sum: { sizeBytes: true },
+          });
+    const usedMap = new Map(
+      usedGroups.map((g) => [g.ownerUserId, Number(g._sum.sizeBytes ?? 0n)]),
+    );
+
     return {
-      items: rows.map((u) => ({
-        id: u.id,
-        username: u.username,
-        role: u.role,
-        disabled: !!u.disabledAt,
-        datasetCount: u._count.knowledgeBases,
-        documentCount: u._count.documents,
-        conversationCount: u._count.conversations,
-        createdAt: u.createdAt.toISOString(),
-        updatedAt: u.updatedAt.toISOString(),
-      })),
+      items: rows.map((u) => {
+        const storageQuotaBytes = Number(u.storageQuotaBytes);
+        const storageUsedBytes = usedMap.get(u.id) ?? 0;
+        return {
+          id: u.id,
+          username: u.username,
+          role: u.role,
+          disabled: !!u.disabledAt,
+          datasetCount: u._count.knowledgeBases,
+          documentCount: u._count.documents,
+          conversationCount: u._count.conversations,
+          storageQuotaBytes,
+          storageUsedBytes,
+          storageRemainingBytes: Math.max(0, storageQuotaBytes - storageUsedBytes),
+          createdAt: u.createdAt.toISOString(),
+          updatedAt: u.updatedAt.toISOString(),
+        };
+      }),
       total,
       page,
       pageSize,
@@ -552,6 +579,7 @@ export class AdminService {
     username: string;
     password: string;
     role?: Role;
+    storageQuotaBytes?: number;
   }) {
     const uname = (body.username || '').trim();
     if (uname.length < 2) {
@@ -561,6 +589,10 @@ export class AdminService {
       throw badRequest('password must be at least 6 characters');
     }
     const role: Role = body.role === 'admin' ? 'admin' : 'user';
+    const quota =
+      body.storageQuotaBytes !== undefined
+        ? parseQuotaBytesInput(body.storageQuotaBytes)!
+        : defaultStorageQuotaBytes();
     const exists = await this.prisma.user.findUnique({
       where: { username: uname },
     });
@@ -571,6 +603,7 @@ export class AdminService {
         username: uname,
         passwordHash: await bcrypt.hash(body.password, BCRYPT_ROUNDS),
         role,
+        storageQuotaBytes: BigInt(quota),
       },
     });
     return {
@@ -581,8 +614,37 @@ export class AdminService {
       datasetCount: 0,
       documentCount: 0,
       conversationCount: 0,
+      storageQuotaBytes: Number(user.storageQuotaBytes),
+      storageUsedBytes: 0,
+      storageRemainingBytes: Number(user.storageQuotaBytes),
       createdAt: user.createdAt.toISOString(),
       updatedAt: user.updatedAt.toISOString(),
+    };
+  }
+
+  async setUserStorageQuota(userId: string, storageQuotaBytes: number) {
+    const quota = parseQuotaBytesInput(storageQuotaBytes);
+    if (quota === undefined) throw badRequest('storageQuotaBytes is required');
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw notFound('user not found');
+    const updated = await this.prisma.user.update({
+      where: { id: userId },
+      data: { storageQuotaBytes: BigInt(quota) },
+    });
+    const agg = await this.prisma.document.aggregate({
+      where: { ownerUserId: userId },
+      _sum: { sizeBytes: true },
+    });
+    const storageUsedBytes = Number(agg._sum.sizeBytes ?? 0n);
+    const storageQuota = Number(updated.storageQuotaBytes);
+    return {
+      id: updated.id,
+      username: updated.username,
+      role: updated.role,
+      disabled: !!updated.disabledAt,
+      storageQuotaBytes: storageQuota,
+      storageUsedBytes,
+      storageRemainingBytes: Math.max(0, storageQuota - storageUsedBytes),
     };
   }
 

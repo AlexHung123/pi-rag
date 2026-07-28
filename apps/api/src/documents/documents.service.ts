@@ -4,6 +4,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
 import { badRequest, notFound } from '../common/errors';
+import { assertWithinStorageQuota } from '../common/storage-quota';
 
 @Injectable()
 export class DocumentsService {
@@ -95,6 +96,8 @@ export class DocumentsService {
     if (!file?.buffer?.length) throw badRequest('file is required');
     const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
     if (file.size > maxBytes) throw badRequest(`file exceeds max size ${maxBytes}`);
+    // Total storage quota is per uploader (ownerUserId on the document row).
+    await assertWithinStorageQuota(this.prisma, userId, file.size);
 
     const safeName = file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
     const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [

@@ -13,8 +13,24 @@ import {
   AdminPagination,
   AdminShell,
   CountTag,
+  formatBytes,
   formatDateTime,
 } from './adminShared';
+
+const GIB = 1024 * 1024 * 1024;
+
+function gbToBytes(gb: string): number | null {
+  const n = Number(gb);
+  if (!Number.isFinite(n) || n < 0) return null;
+  return Math.floor(n * GIB);
+}
+
+function bytesToGbInput(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0';
+  const gb = bytes / GIB;
+  // Keep a few decimals for non-integer GiB quotas
+  return String(Number(gb.toFixed(3)));
+}
 
 export default function AdminUsersPanel() {
   const [items, setItems] = useState<AdminUser[]>([]);
@@ -33,6 +49,8 @@ export default function AdminUsersPanel() {
   const [createUsername, setCreateUsername] = useState('');
   const [createPassword, setCreatePassword] = useState('');
   const [createRole, setCreateRole] = useState<'user' | 'admin'>('user');
+  /** Default 5 GiB — matches server DEFAULT_STORAGE_QUOTA_BYTES */
+  const [createQuotaGb, setCreateQuotaGb] = useState('5');
 
   const [passwordOpen, setPasswordOpen] = useState(false);
   const [passwordUser, setPasswordUser] = useState<AdminUser | null>(null);
@@ -43,6 +61,7 @@ export default function AdminUsersPanel() {
   const [editUser, setEditUser] = useState<AdminUser | null>(null);
   const [editDisabled, setEditDisabled] = useState(false);
   const [editRole, setEditRole] = useState<'user' | 'admin'>('user');
+  const [editQuotaGb, setEditQuotaGb] = useState('5');
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -104,16 +123,23 @@ export default function AdminUsersPanel() {
       setError('Username and password (min 6 chars) are required');
       return;
     }
+    const quotaBytes = gbToBytes(createQuotaGb);
+    if (quotaBytes === null) {
+      setError('Storage quota must be a non-negative number (GB)');
+      return;
+    }
     await run(async () => {
       await adminApi.createUser({
         username: createUsername.trim(),
         password: createPassword,
         role: createRole,
+        storageQuotaBytes: quotaBytes,
       });
       setCreateOpen(false);
       setCreateUsername('');
       setCreatePassword('');
       setCreateRole('user');
+      setCreateQuotaGb('5');
     });
   };
 
@@ -140,6 +166,7 @@ export default function AdminUsersPanel() {
     setEditUser(row);
     setEditDisabled(row.disabled);
     setEditRole(row.role === 'admin' ? 'admin' : 'user');
+    setEditQuotaGb(bytesToGbInput(row.storageQuotaBytes ?? 5 * GIB));
     setEditOpen(true);
     setError('');
   };
@@ -149,7 +176,20 @@ export default function AdminUsersPanel() {
     const statusChanged = editDisabled !== editUser.disabled;
     const roleChanged =
       editRole !== (editUser.role === 'admin' ? 'admin' : 'user');
-    if (!statusChanged && !roleChanged) {
+    const quotaBytes = gbToBytes(editQuotaGb);
+    if (quotaBytes === null) {
+      setError('Storage quota must be a non-negative number (GB)');
+      return;
+    }
+    const quotaChanged = quotaBytes !== (editUser.storageQuotaBytes ?? 0);
+    if (quotaChanged && quotaBytes < (editUser.storageUsedBytes ?? 0)) {
+      const ok = window.confirm(
+        `New quota (${formatBytes(quotaBytes)}) is below current usage (${formatBytes(editUser.storageUsedBytes)}). ` +
+          'Existing files will be kept, but the user cannot upload until usage drops or the quota is raised. Continue?',
+      );
+      if (!ok) return;
+    }
+    if (!statusChanged && !roleChanged && !quotaChanged) {
       setEditOpen(false);
       setEditUser(null);
       return;
@@ -160,6 +200,9 @@ export default function AdminUsersPanel() {
       }
       if (roleChanged) {
         await adminApi.setUserRole(editUser.id, editRole);
+      }
+      if (quotaChanged) {
+        await adminApi.setUserStorageQuota(editUser.id, quotaBytes);
       }
       setEditOpen(false);
       setEditUser(null);
@@ -255,6 +298,7 @@ export default function AdminUsersPanel() {
               <th>Datasets</th>
               <th>Documents</th>
               <th>Conversations</th>
+              <th>Storage</th>
               <th>Status</th>
               <th>Admin</th>
               <th>Created</th>
@@ -264,18 +308,23 @@ export default function AdminUsersPanel() {
           <tbody>
             {loading ? (
               <tr>
-                <td colSpan={9} className="admin-empty">
+                <td colSpan={10} className="admin-empty">
                   Loading…
                 </td>
               </tr>
             ) : items.length === 0 ? (
               <tr>
-                <td colSpan={9} className="admin-empty">
+                <td colSpan={10} className="admin-empty">
                   No users found
                 </td>
               </tr>
             ) : (
-              items.map((row) => (
+              items.map((row) => {
+                const used = row.storageUsedBytes ?? 0;
+                const quota = row.storageQuotaBytes ?? 0;
+                const over = quota > 0 && used > quota;
+                const high = quota > 0 && used / quota >= 0.9;
+                return (
                 <tr key={row.id}>
                   <td className="admin-col-check">
                     <input
@@ -301,6 +350,14 @@ export default function AdminUsersPanel() {
                   </td>
                   <td>
                     <CountTag value={row.conversationCount} tone="cyan" />
+                  </td>
+                  <td>
+                    <span
+                      className={`admin-storage-cell${over ? ' over' : high ? ' high' : ''}`}
+                      title="Total size of documents owned by this user vs their quota"
+                    >
+                      {formatBytes(used)} / {formatBytes(quota || 0)}
+                    </span>
                   </td>
                   <td>
                     <span
@@ -359,7 +416,8 @@ export default function AdminUsersPanel() {
                     </button>
                   </td>
                 </tr>
-              ))
+              );
+              })
             )}
           </tbody>
         </table>
@@ -405,6 +463,19 @@ export default function AdminUsersPanel() {
                 <option value="user">User</option>
                 <option value="admin">Admin</option>
               </select>
+            </label>
+            <label className="admin-form-field">
+              <span>Storage quota (GB)</span>
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={createQuotaGb}
+                onChange={(e) => setCreateQuotaGb(e.target.value)}
+              />
+              <span className="admin-field-hint">
+                Total size of all files this user uploads. Default 5 GB.
+              </span>
             </label>
             <div className="admin-modal-actions">
               <button
@@ -514,6 +585,21 @@ export default function AdminUsersPanel() {
                 <option value="user">No</option>
                 <option value="admin">Yes</option>
               </select>
+            </label>
+            <label className="admin-form-field">
+              <span>Storage quota (GB)</span>
+              <input
+                type="number"
+                min={0}
+                step={0.1}
+                value={editQuotaGb}
+                onChange={(e) => setEditQuotaGb(e.target.value)}
+              />
+              <span className="admin-field-hint">
+                Used {formatBytes(editUser.storageUsedBytes ?? 0)} of current{' '}
+                {formatBytes(editUser.storageQuotaBytes ?? 0)}. Lowering below
+                used keeps files but blocks new uploads.
+              </span>
             </label>
             <div className="admin-modal-actions">
               <button

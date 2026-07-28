@@ -4,6 +4,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { badRequest, forbidden, unauthorized } from '../common/errors';
 import { randomToken, sha256Hex } from '../common/crypto';
 import { AuthPrincipal } from './auth.types';
+import {
+  defaultStorageQuotaBytes,
+  getUserStorageUsage,
+} from '../common/storage-quota';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -38,6 +42,7 @@ export class AuthService {
         username,
         passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),
         role: 'admin',
+        storageQuotaBytes: BigInt(defaultStorageQuotaBytes()),
       },
     });
     this.logger.log(`Bootstrapped admin user "${username}"`);
@@ -60,9 +65,14 @@ export class AuthService {
         username: uname,
         passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),
         role: 'user',
+        storageQuotaBytes: BigInt(defaultStorageQuotaBytes()),
       },
     });
     return user;
+  }
+
+  async getStorage(userId: string) {
+    return getUserStorageUsage(this.prisma, userId);
   }
 
   async login(

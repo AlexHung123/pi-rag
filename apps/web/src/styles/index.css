@@ -2132,6 +2132,130 @@ button {
   margin-top: 8px;
 }
 
+/* Storage quota bar (total across all uploads for current user) */
+.kb-storage-bar {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-color, #e5e7eb);
+  background: var(--bg-secondary, #f8fafc);
+}
+
+.kb-storage-bar-modal {
+  margin-bottom: 14px;
+}
+
+.kb-storage-bar-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  font-size: 0.875rem;
+}
+
+.kb-storage-bar-label {
+  font-weight: 600;
+  color: var(--text-primary, #0f172a);
+}
+
+.kb-storage-bar-values {
+  color: var(--text-secondary, #64748b);
+  font-variant-numeric: tabular-nums;
+}
+
+.kb-storage-bar-remaining {
+  margin-left: 0.25em;
+}
+
+.kb-storage-track {
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+}
+
+.kb-storage-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: #2563eb;
+  transition: width 0.2s ease;
+}
+
+.kb-storage-bar-warn .kb-storage-fill {
+  background: #d97706;
+}
+
+.kb-storage-bar-critical .kb-storage-fill {
+  background: #dc2626;
+}
+
+.kb-storage-bar-warn,
+.kb-storage-bar-critical {
+  border-color: rgba(217, 119, 6, 0.35);
+}
+
+.kb-storage-bar-critical {
+  border-color: rgba(220, 38, 38, 0.35);
+  background: rgba(254, 242, 242, 0.7);
+}
+
+.kb-storage-hint {
+  margin: 8px 0 0;
+  font-size: 0.78rem;
+  line-height: 1.4;
+  color: var(--text-secondary, #64748b);
+}
+
+.kb-upload-file-item-over {
+  border-color: rgba(220, 38, 38, 0.45) !important;
+  background: rgba(254, 242, 242, 0.85);
+}
+
+.kb-upload-file-over-tag {
+  flex-shrink: 0;
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: #b91c1c;
+  white-space: nowrap;
+}
+
+.kb-upload-selected-summary {
+  margin: 8px 0 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary, #64748b);
+}
+
+.kb-upload-selected-summary.is-over {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.admin-storage-cell {
+  font-size: 0.85rem;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.admin-storage-cell.high {
+  color: #b45309;
+  font-weight: 600;
+}
+
+.admin-storage-cell.over {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.admin-field-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 0.75rem;
+  line-height: 1.35;
+  color: var(--text-secondary, #64748b);
+  font-weight: 400;
+}
+
 /* Upload file modal */
 .kb-upload-modal {
   width: min(560px, 100%);
