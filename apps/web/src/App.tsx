@@ -708,7 +708,8 @@ export default function App() {
                       ? 'Ask a question about the selected knowledge bases…'
                       : 'Ask about your knowledge base, or select knowledge bases above…'
                   }
-                  onChange={(e) => setInput(e.target.value)}
+                  onChange={(e) => setInput(e.target.value.slice(0, 32000))}
+                  maxLength={32000}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && !e.shiftKey) {
                       e.preventDefault();

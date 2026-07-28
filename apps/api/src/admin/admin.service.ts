@@ -9,6 +9,7 @@ import {
   assertWithinStorageQuota,
   defaultStorageQuotaBytes,
   parseQuotaBytesInput,
+  withUserStorageLock,
 } from '../common/storage-quota';
 
 const BCRYPT_ROUNDS = 10;
@@ -210,37 +211,40 @@ export class AdminService {
     if (!file?.buffer?.length) throw badRequest('file is required');
     const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
     if (file.size > maxBytes) throw badRequest(`file exceeds max size ${maxBytes}`);
-    // Admin upload attributes the document to the KB owner — charge that user's quota.
-    await assertWithinStorageQuota(this.prisma, kb.ownerUserId, file.size);
 
-    const safeName =
-      file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
-    const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [
-      {
-        filename: safeName,
-        buffer: file.buffer,
-        mimetype: file.mimetype,
-      },
-    ]);
-    const rfDoc = uploaded[0];
-    if (!rfDoc?.id) throw badRequest('RAGFlow upload failed');
+    // Charge KB owner; lock that user so concurrent admin/user uploads cannot race quota.
+    return withUserStorageLock(this.prisma, kb.ownerUserId, async () => {
+      await assertWithinStorageQuota(this.prisma, kb.ownerUserId, file.size);
 
-    const doc = await this.prisma.document.create({
-      data: {
-        knowledgeBaseId: kb.id,
-        ownerUserId: kb.ownerUserId,
-        ragflowDocumentId: rfDoc.id,
-        name: rfDoc.name || safeName,
-        sizeBytes: BigInt(rfDoc.size ?? file.size),
-        status: 'unstart',
-        progress: 0,
-      },
-      include: {
-        knowledgeBase: { select: { name: true } },
-        owner: { select: { username: true } },
-      },
+      const safeName =
+        file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
+      const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [
+        {
+          filename: safeName,
+          buffer: file.buffer,
+          mimetype: file.mimetype,
+        },
+      ]);
+      const rfDoc = uploaded[0];
+      if (!rfDoc?.id) throw badRequest('RAGFlow upload failed');
+
+      const doc = await this.prisma.document.create({
+        data: {
+          knowledgeBaseId: kb.id,
+          ownerUserId: kb.ownerUserId,
+          ragflowDocumentId: rfDoc.id,
+          name: rfDoc.name || safeName,
+          sizeBytes: BigInt(rfDoc.size ?? file.size),
+          status: 'unstart',
+          progress: 0,
+        },
+        include: {
+          knowledgeBase: { select: { name: true } },
+          owner: { select: { username: true } },
+        },
+      });
+      return this.serializeDoc(doc);
     });
-    return this.serializeDoc(doc);
   }
 
   async parseDocuments(kbId: string, documentIds: string[]) {

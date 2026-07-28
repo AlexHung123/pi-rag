@@ -78,11 +78,9 @@ export async function apiFetch<T>(
     headers.set('Content-Type', 'application/json');
   }
   const method = (init.method || 'GET').toUpperCase();
-  // login/register: no session yet. logout: server does not require CSRF.
+  // login: no session yet. logout: server does not require CSRF.
   const skipCsrf =
-    path === '/api/auth/login' ||
-    path === '/api/auth/register' ||
-    path === '/api/auth/logout';
+    path === '/api/auth/login' || path === '/api/auth/logout';
   if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !skipCsrf) {
     headers.set('X-CSRF-Token', await requireCsrfToken());
   } else if (path === '/api/auth/logout') {
@@ -295,18 +293,12 @@ export type ChatMessage = {
 };
 
 export const authApi = {
-  bootstrap: () =>
-    apiFetch<{ allowRegister: boolean }>('/api/auth/bootstrap'),
+  bootstrap: () => apiFetch<{ authEnabled: boolean }>('/api/auth/bootstrap'),
   me: () =>
     apiFetch<{ user: User; csrfToken: string }>('/api/auth/me'),
   storage: () => apiFetch<StorageUsage>('/api/auth/me/storage'),
   login: (username: string, password: string) =>
     apiFetch<{ user: User; csrfToken: string }>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ username, password }),
-    }),
-  register: (username: string, password: string) =>
-    apiFetch<{ user: User; csrfToken: string }>('/api/auth/register', {
       method: 'POST',
       body: JSON.stringify({ username, password }),
     }),

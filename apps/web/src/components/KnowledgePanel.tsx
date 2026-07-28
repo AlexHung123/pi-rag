@@ -432,24 +432,112 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const onDeleteDoc = async (docId: string) => {
     if (!selectedId) return
     if (!confirm('Delete this document?')) return
-    await docApi.remove(selectedId, docId)
-    setSelectedDocIds(prev => {
-      const next = new Set(prev)
-      next.delete(docId)
-      return next
-    })
-    await loadDocs(selectedId, { quiet: true })
-    await loadKbs({ quiet: true })
-    await loadStorage()
+    setBusy(true)
+    setError('')
+    try {
+      await docApi.remove(selectedId, docId)
+      setSelectedDocIds(prev => {
+        const next = new Set(prev)
+        next.delete(docId)
+        return next
+      })
+      await loadDocs(selectedId, { quiet: true })
+      await loadKbs({ quiet: true })
+      await loadStorage()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
   }
 
   const onDeleteKb = async (id: string) => {
     if (!confirm('Delete this knowledge base and its documents from My Knowledge Base?')) return
-    await kbApi.remove(id)
-    if (selectedId === id) setSelectedId(null)
-    await loadKbs({ quiet: true })
-    setDocs([])
-    await loadStorage()
+    setBusy(true)
+    setError('')
+    try {
+      await kbApi.remove(id)
+      if (selectedId === id) setSelectedId(null)
+      await loadKbs({ quiet: true })
+      setDocs([])
+      await loadStorage()
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onBulkParse = async () => {
+    if (!selectedId || selectedDocIds.size === 0 || !canEditContent) return
+    const targets = filteredDocs.filter(
+      d => selectedDocIds.has(d.id) && d.status !== 'running',
+    )
+    if (!targets.length) {
+      setError('No selected documents can be parsed (already running or none selected).')
+      return
+    }
+    setBusy(true)
+    setError('')
+    const failures: string[] = []
+    try {
+      for (let i = 0; i < targets.length; i++) {
+        const doc = targets[i]
+        try {
+          await docApi.parse(selectedId, doc.id)
+        } catch (e) {
+          failures.push(
+            `${doc.name}: ${e instanceof Error ? e.message : String(e)}`,
+          )
+        }
+      }
+      await loadDocs(selectedId, { quiet: true })
+      if (failures.length) {
+        setError(
+          `Parsed ${targets.length - failures.length}/${targets.length}. Failed: ${failures.slice(0, 3).join('; ')}`,
+        )
+      }
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onBulkDelete = async () => {
+    if (!selectedId || selectedDocIds.size === 0 || !canEditContent) return
+    const ids = [...selectedDocIds]
+    if (
+      !confirm(
+        `Delete ${ids.length} selected document${ids.length === 1 ? '' : 's'}?`,
+      )
+    ) {
+      return
+    }
+    setBusy(true)
+    setError('')
+    const failures: string[] = []
+    try {
+      for (const docId of ids) {
+        try {
+          await docApi.remove(selectedId, docId)
+        } catch (e) {
+          const name = docs.find(d => d.id === docId)?.name || docId
+          failures.push(
+            `${name}: ${e instanceof Error ? e.message : String(e)}`,
+          )
+        }
+      }
+      setSelectedDocIds(new Set())
+      await loadDocs(selectedId, { quiet: true })
+      await loadKbs({ quiet: true })
+      await loadStorage()
+      if (failures.length) {
+        setError(
+          `Deleted ${ids.length - failures.length}/${ids.length}. Failed: ${failures.slice(0, 3).join('; ')}`,
+        )
+      }
+    } finally {
+      setBusy(false)
+    }
   }
 
   const onToggleVisibility = async () => {
@@ -1020,6 +1108,38 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           {canEditContent ? renderStorageBar() : null}
 
           {error && !uploadOpen && <p className="error-text">{error}</p>}
+
+          {canEditContent && selectedDocIds.size > 0 && (
+            <div className="kb-bulk-bar">
+              <span className="kb-bulk-count">
+                {selectedDocIds.size} selected
+              </span>
+              <button
+                className="btn btn-secondary btn-sm"
+                type="button"
+                disabled={busy}
+                onClick={() => void onBulkParse()}
+              >
+                Parse selected
+              </button>
+              <button
+                className="btn btn-danger btn-sm"
+                type="button"
+                disabled={busy}
+                onClick={() => void onBulkDelete()}
+              >
+                Delete selected
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                type="button"
+                disabled={busy}
+                onClick={() => setSelectedDocIds(new Set())}
+              >
+                Clear
+              </button>
+            </div>
+          )}
 
           <div className="kb-files-table-wrap">
             <table className="kb-files-table">

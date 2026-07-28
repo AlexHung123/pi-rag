@@ -12,7 +12,9 @@
     "build": "npm run build -w @pi-rag/api && npm run build -w @pi-rag/web",
     "db:generate": "npm run prisma:generate -w @pi-rag/api",
     "db:migrate": "npm run prisma:migrate -w @pi-rag/api",
-    "db:push": "npm run prisma:push -w @pi-rag/api"
+    "db:migrate:deploy": "npm run prisma:migrate:deploy -w @pi-rag/api",
+    "db:push": "npm run prisma:push -w @pi-rag/api",
+    "test:api": "npm run test -w @pi-rag/api"
   },
   "engines": {
     "node": ">=20"

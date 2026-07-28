@@ -1,8 +1,38 @@
+import { createHash } from 'crypto';
 import { PrismaService } from '../prisma/prisma.service';
 import { badRequest, notFound } from './errors';
 
 /** Default total storage per user: 5 GiB */
 export const DEFAULT_STORAGE_QUOTA_BYTES = 5 * 1024 * 1024 * 1024;
+
+/**
+ * Map userId to two int32 keys for pg_advisory_lock (stable, non-cryptographic).
+ * Namespace key1 keeps locks distinct from other app advisory uses.
+ */
+export function storageLockKeys(userId: string): [number, number] {
+  const hash = createHash('sha256').update(`storage-quota:${userId}`).digest();
+  const key1 = 0x73746f72; // 'stor' as namespace
+  const key2 = hash.readInt32BE(0);
+  return [key1, key2];
+}
+
+/**
+ * Serialize check+upload+insert for one user so concurrent uploads cannot
+ * all pass quota against a stale "used" sum (TOCTOU).
+ */
+export async function withUserStorageLock<T>(
+  prisma: PrismaService,
+  userId: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const [key1, key2] = storageLockKeys(userId);
+  await prisma.$executeRaw`SELECT pg_advisory_lock(${key1}, ${key2})`;
+  try {
+    return await fn();
+  } finally {
+    await prisma.$executeRaw`SELECT pg_advisory_unlock(${key1}, ${key2})`;
+  }
+}
 
 export function defaultStorageQuotaBytes(): number {
   const raw = Number(process.env.DEFAULT_STORAGE_QUOTA_BYTES);

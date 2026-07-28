@@ -52,6 +52,8 @@ export type CreateAgentFn = (args: {
 export class AgentSessionPool implements OnModuleDestroy {
   private readonly logger = new Logger(AgentSessionPool.name);
   private readonly sessions = new Map<string, AgentSession>();
+  /** Per-conversation serial queue: prevent double-create and busy races. */
+  private readonly tails = new Map<string, Promise<unknown>>();
 
   private get maxSessions(): number {
     const n = Number(process.env.AGENT_POOL_MAX || 100);
@@ -72,6 +74,7 @@ export class AgentSessionPool implements OnModuleDestroy {
     for (const id of [...this.sessions.keys()]) {
       this.dispose(id);
     }
+    this.tails.clear();
   }
 
   size(): number {
@@ -157,8 +160,35 @@ export class AgentSessionPool implements OnModuleDestroy {
   }
 
   /**
+   * Run work on a per-conversation serial queue so concurrent acquire/create
+   * cannot race (double createAgent or dual busy=true).
+   */
+  private enqueue<T>(conversationId: string, fn: () => Promise<T>): Promise<T> {
+    const prev = this.tails.get(conversationId) ?? Promise.resolve();
+    const run = prev.then(
+      () => fn(),
+      () => fn(),
+    );
+    // Keep the chain alive regardless of success/failure of this step.
+    this.tails.set(
+      conversationId,
+      run.then(
+        () => undefined,
+        () => undefined,
+      ),
+    );
+    return run;
+  }
+
+  /**
    * Acquire a live agent for the conversation (create or reuse).
    * Caller must call `release` when the prompt run finishes.
+   *
+   * Create + mark busy are serialized per conversationId. After acquire
+   * returns, the session stays busy until release (the queue allows the
+   * next waiter only after the previous release when waiters re-enter enqueue).
+   *
+   * Waiters block inside enqueue until the previous holder releases (busy clears).
    */
   async acquire(
     userId: string,
@@ -166,37 +196,43 @@ export class AgentSessionPool implements OnModuleDestroy {
     history: Array<{ role: 'user' | 'assistant'; content: string }>,
     createAgent: CreateAgentFn,
   ): Promise<AgentSession> {
-    this.evictExpired();
+    return this.enqueue(conversationId, async () => {
+      this.evictExpired();
 
-    let session = this.sessions.get(conversationId);
-    if (session && session.userId !== userId) {
-      this.logger.warn(
-        `userId mismatch for conversation ${conversationId}; disposing session`,
-      );
-      this.dispose(conversationId);
-      session = undefined;
-    }
+      let session = this.sessions.get(conversationId);
+      if (session && session.userId !== userId) {
+        this.logger.warn(
+          `userId mismatch for conversation ${conversationId}; disposing session`,
+        );
+        this.dispose(conversationId);
+        session = undefined;
+      }
 
-    if (!session) {
-      this.ensureCapacity();
-      const agent = await createAgent({ conversationId, userId, history });
-      session = {
-        conversationId,
-        userId,
-        agent,
-        lastUsedAt: Date.now(),
-        busy: false,
-      };
-      this.sessions.set(conversationId, session);
-      this.logger.debug(
-        `Created agent session ${conversationId} (pool=${this.sessions.size})`,
-      );
-    }
+      if (!session) {
+        this.ensureCapacity();
+        const agent = await createAgent({ conversationId, userId, history });
+        session = {
+          conversationId,
+          userId,
+          agent,
+          lastUsedAt: Date.now(),
+          busy: false,
+        };
+        this.sessions.set(conversationId, session);
+        this.logger.debug(
+          `Created agent session ${conversationId} (pool=${this.sessions.size})`,
+        );
+      }
 
-    await this.waitUntilIdle(session);
-    session.busy = true;
-    session.lastUsedAt = Date.now();
-    return session;
+      // If still busy (previous run has not released yet), wait outside the
+      // pure critical section by polling — but only one waiter owns busy after.
+      // Because we are inside enqueue, only one acquire body runs at a time;
+      // busy should be false unless release was missed. Wait with timeout.
+      await this.waitUntilIdle(session);
+      session.busy = true;
+      session.lastUsedAt = Date.now();
+      return session;
+    });
   }
 
   release(conversationId: string): void {

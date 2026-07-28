@@ -35,8 +35,12 @@ cp .env.example apps/api/.env
 # 3) Install
 npm install
 
-# 4) DB schema
-npm run db:push
+# 4) DB schema (prefer migrate; push is a local escape hatch)
+npm run db:migrate:deploy
+# Fresh empty DB also works with: npm run db:migrate
+# Existing DBs that were only ever `db push`'d: after first pull of migrations, once:
+#   npx prisma migrate resolve --applied 20260728120000_init -w @pi-rag/api
+#   (from apps/api: npx prisma migrate resolve --applied 20260728120000_init)
 
 # 5) Run API + Web (two terminals)
 npm run dev:api
@@ -46,7 +50,7 @@ npm run dev:web
 - Web: http://localhost:5173  
 - API: http://localhost:3001/health  
 
-Register a user in the UI, open **Knowledge**, create a KB, upload a `.txt`/`.md` file, **Parse**, **Preview**, then chat.
+Sign in (create the first admin via `ADMIN_USERNAME` / `ADMIN_PASSWORD` on empty DB, or use Admin → Users). Open **Knowledge**, create a KB, upload a `.txt`/`.md` file, **Parse**, **Preview**, then chat.
 
 ## Configuration
 
@@ -56,8 +60,9 @@ See [`.env.example`](.env.example).
 |----------|---------|
 | `DATABASE_URL` | Postgres connection string |
 | `RAGFLOW_BASE_URL` / `RAGFLOW_API_KEY` | Real RAGFlow instance |
-| `RAGFLOW_MOCK` | `true` = local mock engine (no RAGFlow required) |
-| `AUTH_ALLOW_REGISTER` | Allow self-registration |
+| `RAGFLOW_MOCK` | `true` = in-memory mock (no RAGFlow). Production requires API key unless this is explicitly `true` |
+| `LLM_DEBUG` | `true` = dump full LLM request payloads to `apps/api/data/llm-debug/` (default off) |
+| `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Bootstrap first admin when the users table is empty |
 | `OPENAI_API_KEY` | API key for OpenAI-compatible LLM (optional for local servers) |
 | `OPENAI_BASE_URL` / `OPENAI_MODEL` | OpenAI-compatible endpoint and model (required for chat agent) |
 | `AGENT_POOL_MAX` | Max live pi agents in memory (default 100) |
@@ -84,6 +89,8 @@ docs/      Design specs
 |--------|-------------|
 | `npm run dev:api` | NestJS watch mode |
 | `npm run dev:web` | Vite dev server (proxies `/api`) |
-| `npm run db:push` | Prisma db push |
-| `npm run db:migrate` | Prisma migrate dev |
+| `npm run db:push` | Prisma db push (local escape hatch only) |
+| `npm run db:migrate` | Prisma migrate dev (create/apply during development) |
+| `npm run db:migrate:deploy` | Prisma migrate deploy (CI / shared / production) |
+| `npm run test:api` | API unit tests (Vitest) |
 | `npm run build` | Build api + web |

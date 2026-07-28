@@ -1,7 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
-import { badRequest, forbidden, unauthorized } from '../common/errors';
+import { unauthorized } from '../common/errors';
 import { randomToken, sha256Hex } from '../common/crypto';
 import { AuthPrincipal } from './auth.types';
 import {
@@ -16,10 +16,6 @@ export class AuthService {
   private readonly logger = new Logger(AuthService.name);
 
   constructor(private readonly prisma: PrismaService) {}
-
-  allowRegister(): boolean {
-    return (process.env.AUTH_ALLOW_REGISTER ?? 'true').toLowerCase() !== 'false';
-  }
 
   sessionTtlMs(): number {
     const days = Number(process.env.SESSION_TTL_DAYS || 7);
@@ -46,29 +42,6 @@ export class AuthService {
       },
     });
     this.logger.log(`Bootstrapped admin user "${username}"`);
-  }
-
-  async register(username: string, password: string) {
-    if (!this.allowRegister()) {
-      throw forbidden('registration is disabled');
-    }
-    const uname = (username || '').trim();
-    if (uname.length < 2) throw badRequest('username must be at least 2 characters');
-    if (!password || password.length < 6) {
-      throw badRequest('password must be at least 6 characters');
-    }
-    const exists = await this.prisma.user.findUnique({ where: { username: uname } });
-    if (exists) throw badRequest('username already taken');
-
-    const user = await this.prisma.user.create({
-      data: {
-        username: uname,
-        passwordHash: await bcrypt.hash(password, BCRYPT_ROUNDS),
-        role: 'user',
-        storageQuotaBytes: BigInt(defaultStorageQuotaBytes()),
-      },
-    });
-    return user;
   }
 
   async getStorage(userId: string) {

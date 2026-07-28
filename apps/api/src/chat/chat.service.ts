@@ -3,7 +3,8 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { AgentService } from '../agent/agent.service';
 import type { CitationSource } from '../agent/agent.tools';
-import { notFound } from '../common/errors';
+import { badRequest, notFound } from '../common/errors';
+import { CHAT_MESSAGE_MAX_CHARS } from './chat.limits';
 
 @Injectable()
 export class ChatService {
@@ -89,6 +90,14 @@ export class ChatService {
     content: string,
     knowledgeBaseIds?: string[],
   ) {
+    if (typeof content !== 'string' || !content.trim()) {
+      throw badRequest('content is required');
+    }
+    if (content.length > CHAT_MESSAGE_MAX_CHARS) {
+      throw badRequest(
+        `content exceeds max length of ${CHAT_MESSAGE_MAX_CHARS} characters`,
+      );
+    }
     const c = await this.getOwned(userId, conversationId);
     const selectedIds = (knowledgeBaseIds || []).filter(Boolean);
 
