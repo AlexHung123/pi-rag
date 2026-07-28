@@ -92,13 +92,16 @@ export class ChatService {
     const c = await this.getOwned(userId, conversationId);
     const selectedIds = (knowledgeBaseIds || []).filter(Boolean);
 
+    const userMeta: Record<string, unknown> = {};
+    if (selectedIds.length) userMeta.knowledgeBaseIds = selectedIds;
+
     const userMsg = await this.prisma.message.create({
       data: {
         conversationId: c.id,
         role: 'user',
         content,
-        metadata: selectedIds.length
-          ? ({ knowledgeBaseIds: selectedIds } as Prisma.InputJsonValue)
+        metadata: Object.keys(userMeta).length
+          ? (userMeta as Prisma.InputJsonValue)
           : undefined,
       },
     });

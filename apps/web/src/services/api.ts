@@ -571,7 +571,10 @@ export const chatApi = {
     content: string,
     opts?: { knowledgeBaseIds?: string[] },
   ): AsyncGenerator<{ event: string; data: Record<string, unknown> }> {
-    const body: { content: string; knowledgeBaseIds?: string[] } = { content };
+    const body: {
+      content: string;
+      knowledgeBaseIds?: string[];
+    } = { content };
     if (opts?.knowledgeBaseIds?.length) {
       body.knowledgeBaseIds = opts.knowledgeBaseIds;
     }

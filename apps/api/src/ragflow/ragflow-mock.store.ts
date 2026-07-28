@@ -171,13 +171,23 @@ export class RagflowMockStore {
     datasetIds: string[],
     question: string,
     topK: number,
-    opts: { similarityThreshold?: number } = {},
+    opts: {
+      similarityThreshold?: number;
+      keyword?: boolean;
+      vectorSimilarityWeight?: number;
+    } = {},
   ): RetrieveHit[] {
     const threshold =
       typeof opts.similarityThreshold === 'number'
         ? opts.similarityThreshold
         : 0.05;
-    const q = question.toLowerCase();
+    const keywordMode = opts.keyword === true;
+    // Low vector weight ≈ prefer exact/term match (keyword path).
+    const preferKeyword =
+      keywordMode ||
+      (typeof opts.vectorSimilarityWeight === 'number' &&
+        opts.vectorSimilarityWeight <= 0.25);
+    const q = question.toLowerCase().trim();
     const hits: RetrieveHit[] = [];
     for (const dsId of datasetIds) {
       const map = this.docsByDataset.get(dsId);
@@ -185,9 +195,20 @@ export class RagflowMockStore {
       for (const doc of map.values()) {
         for (const chunk of doc.chunks) {
           const content = chunk.content || '';
-          const score = content.toLowerCase().includes(q)
-            ? 0.9
-            : overlapScore(q, content.toLowerCase());
+          const lower = content.toLowerCase();
+          let score: number;
+          if (preferKeyword) {
+            // Exact substring / phrase bias (ES keyword stand-in).
+            if (q && lower.includes(q)) {
+              score = 0.95;
+            } else {
+              score = keywordOverlapScore(q, lower);
+            }
+          } else {
+            score = lower.includes(q)
+              ? 0.9
+              : overlapScore(q, lower);
+          }
           if (score >= threshold) {
             hits.push({
               id: chunk.id,
@@ -231,4 +252,21 @@ function overlapScore(q: string, content: string): number {
   let hit = 0;
   for (const t of terms) if (content.includes(t)) hit += 1;
   return hit / terms.length / 3;
+}
+
+/** Stricter term match for keyword/ES path mock. */
+function keywordOverlapScore(q: string, content: string): number {
+  // Split on whitespace and common code/phrase separators.
+  const terms = q
+    .split(/[\s,;|/\\]+/)
+    .map((t) => t.trim())
+    .filter((t) => t.length >= 2);
+  if (!terms.length) return 0;
+  let hit = 0;
+  for (const t of terms) {
+    if (content.includes(t)) hit += 1;
+  }
+  if (hit === 0) return 0;
+  // Require at least one term; full match scores high.
+  return hit === terms.length ? 0.85 : (hit / terms.length) * 0.6;
 }

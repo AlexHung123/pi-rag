@@ -127,3 +127,60 @@ export function mappedHitsToCitationSources(hits: MappedHit[]): CitationSource[]
     positions: h.positions,
   }));
 }
+
+/**
+ * Merge citation sources from multiple tools in one turn.
+ * Dedupes by chunk id (keep highest score), re-indexes [n] 1-based.
+ */
+export function mergeCitationSources(
+  ...batches: CitationSource[][]
+): CitationSource[] {
+  const map = new Map<string, CitationSource>();
+  for (const batch of batches) {
+    for (const s of batch) {
+      if (!s) continue;
+      const key = s.id || `${s.documentId || ''}:${(s.content || '').slice(0, 40)}`;
+      const prev = map.get(key);
+      if (!prev || (s.score ?? 0) > (prev.score ?? 0)) {
+        map.set(key, s);
+      }
+    }
+  }
+  return Array.from(map.values())
+    .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
+    .map((s, i) => ({
+      ...s,
+      index: i + 1,
+      evidenceLabel: s.evidenceLabel || evidenceLabelFromScore(s.score),
+    }));
+}
+
+/**
+ * Apply a total character budget across chunks (for list_document_chunks).
+ * Keeps order; truncates the last included chunk if needed.
+ */
+export function applyCharBudget(
+  hits: MappedHit[],
+  budget: number,
+): MappedHit[] {
+  if (budget <= 0 || !hits.length) return [];
+  const out: MappedHit[] = [];
+  let used = 0;
+  for (const h of hits) {
+    const len = (h.content || '').length;
+    if (used >= budget) break;
+    if (used + len <= budget) {
+      out.push(h);
+      used += len;
+      continue;
+    }
+    const remain = budget - used;
+    if (remain < 40) break;
+    out.push({
+      ...h,
+      content: truncateChunk(h.content || '', remain),
+    });
+    break;
+  }
+  return out;
+}
