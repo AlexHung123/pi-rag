@@ -201,6 +201,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
       return
     }
     setDocs([])
+    setSelectedDocIds(new Set())
     loadDocs(selectedId).catch(e => setError(e instanceof Error ? e.message : String(e)))
   }, [selectedId, loadDocs])
 
@@ -468,35 +469,60 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     }
   }
 
+  const parseableSelected = useMemo(
+    () =>
+      filteredDocs.filter(
+        d => selectedDocIds.has(d.id) && d.status !== 'running',
+      ),
+    [filteredDocs, selectedDocIds],
+  )
+  const runningSelected = useMemo(
+    () =>
+      filteredDocs.filter(
+        d => selectedDocIds.has(d.id) && d.status === 'running',
+      ),
+    [filteredDocs, selectedDocIds],
+  )
+
   const onBulkParse = async () => {
-    if (!selectedId || selectedDocIds.size === 0 || !canEditContent) return
-    const targets = filteredDocs.filter(
-      d => selectedDocIds.has(d.id) && d.status !== 'running',
-    )
-    if (!targets.length) {
-      setError('No selected documents can be parsed (already running or none selected).')
+    if (!selectedId || !canEditContent || parseableSelected.length === 0) {
+      if (selectedDocIds.size > 0 && parseableSelected.length === 0) {
+        setError('No selected documents can be parsed (already running or none selected).')
+      }
       return
     }
     setBusy(true)
     setError('')
-    const failures: string[] = []
     try {
-      for (let i = 0; i < targets.length; i++) {
-        const doc = targets[i]
-        try {
-          await docApi.parse(selectedId, doc.id)
-        } catch (e) {
-          failures.push(
-            `${doc.name}: ${e instanceof Error ? e.message : String(e)}`,
-          )
-        }
-      }
+      const result = await docApi.batchParse(
+        selectedId,
+        parseableSelected.map(d => d.id),
+      )
       await loadDocs(selectedId, { quiet: true })
-      if (failures.length) {
-        setError(
-          `Parsed ${targets.length - failures.length}/${targets.length}. Failed: ${failures.slice(0, 3).join('; ')}`,
-        )
+      if (result.count === 0) {
+        setError('No documents were started (all may already be running).')
       }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      await loadDocs(selectedId, { quiet: true })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onBulkStopParse = async () => {
+    if (!selectedId || !canEditContent || runningSelected.length === 0) return
+    setBusy(true)
+    setError('')
+    try {
+      await docApi.batchStopParse(
+        selectedId,
+        runningSelected.map(d => d.id),
+      )
+      await loadDocs(selectedId, { quiet: true })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      await loadDocs(selectedId, { quiet: true })
     } finally {
       setBusy(false)
     }
@@ -1113,14 +1139,38 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
             <div className="kb-bulk-bar">
               <span className="kb-bulk-count">
                 {selectedDocIds.size} selected
+                {parseableSelected.length > 0
+                  ? ` · ${parseableSelected.length} parseable`
+                  : ''}
+                {runningSelected.length > 0
+                  ? ` · ${runningSelected.length} running`
+                  : ''}
               </span>
               <button
                 className="btn btn-secondary btn-sm"
                 type="button"
-                disabled={busy}
+                disabled={busy || parseableSelected.length === 0}
                 onClick={() => void onBulkParse()}
+                title={
+                  parseableSelected.length === 0
+                    ? 'Select unstart, failed, or done files to parse / re-parse'
+                    : `Parse ${parseableSelected.length} document(s)`
+                }
               >
-                Parse selected
+                Parse selected{parseableSelected.length > 0 ? ` (${parseableSelected.length})` : ''}
+              </button>
+              <button
+                className="btn btn-secondary btn-sm"
+                type="button"
+                disabled={busy || runningSelected.length === 0}
+                onClick={() => void onBulkStopParse()}
+                title={
+                  runningSelected.length === 0
+                    ? 'No selected files are currently parsing'
+                    : `Stop ${runningSelected.length} running parse(s)`
+                }
+              >
+                Stop selected{runningSelected.length > 0 ? ` (${runningSelected.length})` : ''}
               </button>
               <button
                 className="btn btn-danger btn-sm"

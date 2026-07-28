@@ -363,10 +363,22 @@ export const docApi = {
       `/api/knowledge-bases/${kbId}/documents/${docId}/parse`,
       { method: 'POST' },
     ),
+  /** Parse many documents in one request (skips already-running). */
+  batchParse: (kbId: string, documentIds: string[]) =>
+    apiFetch<{ ok: boolean; count: number; skipped: number; items: DocumentItem[] }>(
+      `/api/knowledge-bases/${kbId}/documents/batch-parse`,
+      { method: 'POST', body: JSON.stringify({ documentIds }) },
+    ),
   stopParse: (kbId: string, docId: string) =>
     apiFetch<DocumentItem>(
       `/api/knowledge-bases/${kbId}/documents/${docId}/stop-parse`,
       { method: 'POST' },
+    ),
+  /** Stop parse for many documents in one request (only running). */
+  batchStopParse: (kbId: string, documentIds: string[]) =>
+    apiFetch<{ ok: boolean; count: number; skipped: number; items: DocumentItem[] }>(
+      `/api/knowledge-bases/${kbId}/documents/batch-stop-parse`,
+      { method: 'POST', body: JSON.stringify({ documentIds }) },
     ),
   preview: (kbId: string, docId: string) =>
     apiFetch<{

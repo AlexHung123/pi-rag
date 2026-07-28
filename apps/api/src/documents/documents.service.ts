@@ -147,6 +147,51 @@ export class DocumentsService {
     return this.serialize(updated);
   }
 
+  /**
+   * Start parse for multiple documents in one RAGFlow call.
+   * Skips docs already `running`. Re-parses `done`/`fail`/`unstart`.
+   */
+  async batchParse(userId: string, knowledgeBaseId: string, documentIds: string[]) {
+    if (!documentIds?.length) throw badRequest('documentIds is required');
+    const uniqueIds = [...new Set(documentIds.filter(Boolean))];
+    if (!uniqueIds.length) throw badRequest('documentIds is required');
+
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const docs = await this.prisma.document.findMany({
+      where: { knowledgeBaseId, id: { in: uniqueIds } },
+    });
+    if (!docs.length) throw notFound('document not found');
+
+    const targets = docs.filter((d) => d.status !== 'running');
+    if (!targets.length) {
+      return { ok: true as const, count: 0, skipped: docs.length, items: [] };
+    }
+
+    await this.ragflow.parseDocuments(
+      kb.ragflowDatasetId,
+      targets.map((d) => d.ragflowDocumentId),
+    );
+    await this.prisma.document.updateMany({
+      where: { id: { in: targets.map((d) => d.id) } },
+      data: {
+        status: 'running',
+        progress: 0.05,
+        progressMsg: 'Parse started',
+        errorMessage: null,
+      },
+    });
+    const updated = await this.prisma.document.findMany({
+      where: { id: { in: targets.map((d) => d.id) } },
+      orderBy: { createdAt: 'desc' },
+    });
+    return {
+      ok: true as const,
+      count: updated.length,
+      skipped: docs.length - targets.length,
+      items: updated.map((d) => this.serialize(d)),
+    };
+  }
+
   async stopParse(userId: string, knowledgeBaseId: string, docId: string) {
     const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
     const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
@@ -161,6 +206,48 @@ export class DocumentsService {
       },
     });
     return this.serialize(updated);
+  }
+
+  /** Stop parse for multiple documents in one RAGFlow call. Only affects `running`. */
+  async batchStopParse(userId: string, knowledgeBaseId: string, documentIds: string[]) {
+    if (!documentIds?.length) throw badRequest('documentIds is required');
+    const uniqueIds = [...new Set(documentIds.filter(Boolean))];
+    if (!uniqueIds.length) throw badRequest('documentIds is required');
+
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const docs = await this.prisma.document.findMany({
+      where: { knowledgeBaseId, id: { in: uniqueIds } },
+    });
+    if (!docs.length) throw notFound('document not found');
+
+    const targets = docs.filter((d) => d.status === 'running');
+    if (!targets.length) {
+      return { ok: true as const, count: 0, skipped: docs.length, items: [] };
+    }
+
+    await this.ragflow.stopParseDocuments(
+      kb.ragflowDatasetId,
+      targets.map((d) => d.ragflowDocumentId),
+    );
+    await this.prisma.document.updateMany({
+      where: { id: { in: targets.map((d) => d.id) } },
+      data: {
+        status: 'unstart',
+        progress: 0,
+        progressMsg: 'Parse stopped',
+        errorMessage: null,
+      },
+    });
+    const updated = await this.prisma.document.findMany({
+      where: { id: { in: targets.map((d) => d.id) } },
+      orderBy: { createdAt: 'desc' },
+    });
+    return {
+      ok: true as const,
+      count: updated.length,
+      skipped: docs.length - targets.length,
+      items: updated.map((d) => this.serialize(d)),
+    };
   }
 
   async refreshStatus(userId: string, knowledgeBaseId: string, docId: string) {

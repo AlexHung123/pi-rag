@@ -1,4 +1,5 @@
 import {
+  Body,
   Controller,
   Delete,
   Get,
@@ -47,6 +48,26 @@ export class DocumentsController {
       size: file.size,
       mimetype: file.mimetype,
     });
+  }
+
+  /** Batch parse — static path must be registered before :docId routes. */
+  @Post('batch-parse')
+  async batchParse(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Body() body: { documentIds?: string[] },
+  ) {
+    return this.documents.batchParse(user.userId, kbId, body?.documentIds || []);
+  }
+
+  /** Batch stop parse — static path must be registered before :docId routes. */
+  @Post('batch-stop-parse')
+  async batchStopParse(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Body() body: { documentIds?: string[] },
+  ) {
+    return this.documents.batchStopParse(user.userId, kbId, body?.documentIds || []);
   }
 
   @Get(':docId')
