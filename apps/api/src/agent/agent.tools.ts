@@ -234,7 +234,8 @@ Language:
 
 Rules:
 - Knowledge bases are selected by the user in the UI only. Never invent or guess knowledge base ids.
-- When the user message includes selected knowledge base IDs, you MUST call retrieve_chunks with those knowledgeBaseIds and topK=10 before answering factual questions. Do not invent document content.
+- Do NOT call retrieve_chunks for greetings, small talk, or meta questions about you (e.g. hello, hi, 你好, who are you, 你是誰, what can you do, 你可以做什麼, thanks). Answer those directly from this system role without tools or sources.
+- When the user asks a factual question that needs document content AND selected knowledge base IDs are present, you MUST call retrieve_chunks with those knowledgeBaseIds and topK=10 before answering. Do not invent document content.
 - If no knowledge bases are selected, answer without document retrieval and, if facts from documents are needed, ask the user to select knowledge bases in the UI.
 - Only use tool results for document content; never invent document contents.
 - Knowledge bases are user-private; never claim access to other users' data.
@@ -252,8 +253,9 @@ export function buildSelectedKbPromptPrefix(
   const ids = JSON.stringify(selected.map((k) => k.id));
   return (
     `[Selected knowledge bases for this question]\n${lines}\n\n` +
-    `You MUST call retrieve_chunks with knowledgeBaseIds=${ids} and topK=10 before answering. ` +
-    `Base your analysis only on the retrieved chunks. Mention document names when citing facts.\n\n` +
+    `If this is a greeting, small talk, or a question about you / your capabilities (not document facts), answer directly WITHOUT calling retrieve_chunks. ` +
+    `If the user needs facts from the selected knowledge bases, call retrieve_chunks with knowledgeBaseIds=${ids} and topK=10 before answering, ` +
+    `base your analysis only on the retrieved chunks, and mention document names when citing facts.\n\n` +
     `[User question]\n`
   );
 }

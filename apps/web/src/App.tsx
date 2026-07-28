@@ -12,6 +12,14 @@ import KnowledgePanel from './components/KnowledgePanel';
 import AppSidebar, { type WorkspaceView } from './components/AppSidebar';
 import SourceReferences from './components/SourceReferences';
 import DocumentLocateDrawer from './components/DocumentLocateDrawer';
+import AgentProcessPanel, {
+  applyProcessDone,
+  applyTextStarted,
+  applyToolEnd,
+  applyToolStart,
+  createInitialProcess,
+  type AgentProcessState,
+} from './components/AgentProcessPanel';
 import AdminDatasetsPanel from './components/admin/AdminDatasetsPanel';
 import AdminDocumentsPanel from './components/admin/AdminDocumentsPanel';
 import AdminTasksPanel from './components/admin/AdminTasksPanel';
@@ -40,7 +48,10 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
-  const [toolHint, setToolHint] = useState('');
+  /** Live + last-turn pi-agent process panel (one overlay per reply). */
+  const [agentProcess, setAgentProcess] = useState<AgentProcessState | null>(
+    null,
+  );
   const [workspace, setWorkspace] = useState<WorkspaceView>('chat');
   const [sidebarOpen, setSidebarOpen] = useState(() =>
     typeof window === 'undefined' ? true : window.innerWidth > 768,
@@ -100,7 +111,7 @@ export default function App() {
     setMessages([]);
     setInput('');
     setError('');
-    setToolHint('');
+    setAgentProcess(null);
     setKnowledgeBases([]);
     setSelectedKbIds([]);
     setKbPickerOpen(false);
@@ -123,7 +134,7 @@ export default function App() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, sending]);
+  }, [messages, sending, agentProcess?.steps.length, agentProcess?.status]);
 
   useEffect(() => {
     if (!kbPickerOpen) return;
@@ -154,6 +165,7 @@ export default function App() {
         // Stale or not owned — drop selection; create a fresh conversation below.
         setActiveId(null);
         setMessages([]);
+        setAgentProcess(null);
       }
     }
     const c = await chatApi.create();
@@ -164,6 +176,7 @@ export default function App() {
 
   const openConversation = async (id: string) => {
     setError('');
+    setAgentProcess(null);
     setWorkspace('chat');
     try {
       const detail = await chatApi.get(id);
@@ -185,6 +198,7 @@ export default function App() {
   const newChat = async () => {
     try {
       setError('');
+      setAgentProcess(null);
       const c = await chatApi.create();
       setActiveId(c.id);
       setMessages([]);
@@ -202,6 +216,7 @@ export default function App() {
       if (activeId === id) {
         setActiveId(null);
         setMessages([]);
+        setAgentProcess(null);
       }
       await refreshConversations();
     } catch (e) {
@@ -260,7 +275,6 @@ export default function App() {
     setSending(true);
     sendingRef.current = true;
     setError('');
-    setToolHint('');
     setInput('');
     setKbPickerOpen(false);
 
@@ -268,6 +282,7 @@ export default function App() {
     let assistantText = '';
     let assistantSources: CitationSource[] = [];
     let finalMessageId = '';
+    let sawText = false;
     try {
       // Ensure we stream against a conversation that still exists for this user.
       // Fixes "conversation not found" when activeId is stale (deleted / desynced).
@@ -286,6 +301,7 @@ export default function App() {
         createdAt: new Date().toISOString(),
       };
       finalMessageId = tempAssistant.id;
+      setAgentProcess(createInitialProcess(tempAssistant.id));
       setMessages((prev) => [...prev, tempUser, tempAssistant]);
 
       const streamOpts =
@@ -295,6 +311,10 @@ export default function App() {
         let sawConversationMissing = false;
         for await (const frame of chatApi.streamMessage(id, content, streamOpts)) {
           if (frame.event === 'text_delta') {
+            if (!sawText) {
+              sawText = true;
+              setAgentProcess((p) => applyTextStarted(p));
+            }
             assistantText += String(frame.data.delta || '');
             const text = assistantText;
             // Stream text only — never attach Sources mid-stream
@@ -310,9 +330,12 @@ export default function App() {
               return copy;
             });
           } else if (frame.event === 'tool_start') {
-            setToolHint(`Running tool: ${String(frame.data.name || '')}`);
+            const name = String(frame.data.name || 'tool');
+            setAgentProcess((p) => applyToolStart(p, name));
           } else if (frame.event === 'tool_end') {
-            setToolHint('');
+            const name = String(frame.data.name || 'tool');
+            const ok = frame.data.ok !== false;
+            setAgentProcess((p) => applyToolEnd(p, name, ok));
           } else if (frame.event === 'sources') {
             // Buffer only; show after the full assistant reply is complete
             const raw = frame.data.sources;
@@ -341,6 +364,9 @@ export default function App() {
               }
               return copy;
             });
+            setAgentProcess((p) =>
+              p ? { ...p, messageId: finalMessageId || p.messageId } : p,
+            );
           } else if (frame.event === 'error') {
             const msg = String(frame.data.message || 'stream error');
             if (/conversation not found/i.test(msg)) {
@@ -385,9 +411,16 @@ export default function App() {
         }
         return copy;
       });
+      setAgentProcess((p) => {
+        const done = applyProcessDone(p);
+        if (!done) return done;
+        return {
+          ...done,
+          messageId: finalMessageId || done.messageId,
+        };
+      });
       setSending(false);
       sendingRef.current = false;
-      setToolHint('');
     }
   };
 
@@ -512,7 +545,6 @@ export default function App() {
               </div>
             ) : (
               <div className="message-list">
-                {toolHint && <div className="tool-chip">{toolHint}</div>}
                 {messages.map((m, idx) => {
                   const sources = sourcesFromMessage(m);
                   // Hide Sources on the in-flight reply until streaming finishes
@@ -521,12 +553,23 @@ export default function App() {
                     m.role === 'assistant' &&
                     idx === messages.length - 1;
                   const showSources = !isStreamingReply && sources.length > 0;
+                  const showProcess =
+                    m.role === 'assistant' &&
+                    agentProcess &&
+                    (agentProcess.messageId === m.id ||
+                      (isStreamingReply &&
+                        agentProcess.messageId.startsWith('tmp-assistant')));
                   return (
                     <div key={m.id} className={`message ${m.role}`}>
                       <div className="role">{m.role}</div>
                       {m.role === 'assistant' ? (
                         <>
-                          <Markdown content={m.content || (sending ? '…' : '')} />
+                          {showProcess && (
+                            <AgentProcessPanel process={agentProcess} />
+                          )}
+                          {(m.content || !isStreamingReply) && (
+                            <Markdown content={m.content || ''} />
+                          )}
                           {showSources && (
                             <SourceReferences
                               sources={sources}

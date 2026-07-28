@@ -1477,16 +1477,163 @@ button {
   background: var(--color-primary-hover);
 }
 
-.tool-chip {
+/* ── Pi agent process panel (one collapsible overlay on the reply) ── */
+.agent-process {
+  position: relative;
+  margin: 0 0 12px;
+  max-width: min(100%, 420px);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--bg-primary);
+  box-shadow: var(--shadow-md);
+  overflow: hidden;
+}
+
+.agent-process.is-running {
+  border-color: color-mix(in srgb, var(--color-primary) 35%, var(--border-color));
+  box-shadow:
+    var(--shadow-sm),
+    0 0 0 1px color-mix(in srgb, var(--color-primary) 12%, transparent);
+}
+
+.agent-process-toggle {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: 0;
+  padding: 10px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+
+.agent-process-toggle:hover {
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+}
+
+.agent-process-summary {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  font-size: 0.8rem;
+  gap: 8px;
+  min-width: 0;
+}
+
+.agent-process-chevron {
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  font-size: 14px;
+  line-height: 1;
+}
+
+.agent-process-steps {
+  list-style: none;
+  margin: 0;
+  padding: 2px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-top: 1px solid var(--border-subtle);
+}
+
+.agent-process-step {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text-primary);
+}
+
+.agent-process-step.status-running {
   color: var(--text-secondary);
-  background: var(--color-primary-soft);
-  border-radius: 999px;
-  padding: 4px 10px;
-  margin-bottom: 8px;
+}
+
+.agent-process-step.status-error {
+  color: var(--color-error);
+}
+
+.agent-process-step-icon {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.agent-process-step-label {
+  min-width: 0;
+  word-break: break-word;
+}
+
+.agent-process-check {
+  display: inline-flex;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-success) 16%, transparent);
+  color: var(--color-success);
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  line-height: 1;
+}
+
+.agent-process-check::before {
+  content: '✓';
+  font-weight: 700;
+}
+
+.agent-process-check.sm {
+  width: 15px;
+  height: 15px;
+  font-size: 10px;
+}
+
+.agent-process-x {
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-error) 14%, transparent);
+  color: var(--color-error);
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.agent-process-x::before {
+  content: '×';
+  font-weight: 700;
+}
+
+.agent-process-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid color-mix(in srgb, var(--color-primary) 25%, transparent);
+  border-top-color: var(--color-primary);
+  animation: agent-spin 0.7s linear infinite;
+}
+
+.agent-process-spinner.sm {
+  width: 13px;
+  height: 13px;
+}
+
+@keyframes agent-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 @media (max-width: 768px) {
