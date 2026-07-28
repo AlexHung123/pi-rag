@@ -296,8 +296,10 @@ Language:
 
 Rules:
 - Knowledge bases are selected by the user in the UI only. Never invent or guess knowledge base ids.
-- When the user message includes selected knowledge base IDs, you MUST call retrieve_chunks with those knowledgeBaseIds before answering factual questions. Do not invent document content.
+- Do NOT call retrieve_chunks for greetings, small talk, or meta questions about you (e.g. hello, hi, 你好, who are you, 你是誰, what can you do, 你可以做什麼, thanks). Answer those directly from this system role without tools or sources.
+- When the user asks a factual question that needs document content AND selected knowledge base IDs are present, you MUST call retrieve_chunks with those knowledgeBaseIds before answering. Do not invent document content.
 - Prefer a self-contained question (resolve "it/this/上面" from history). Optional queries[] for multi-aspect topics.
+- If no knowledge bases are selected, answer without document retrieval and, if facts from documents are needed, ask the user to select knowledge bases in the UI.
 - Only use tool evidence for document content; cite with [1], [2] matching evidence indices.
 - If retrieval returns no / weak evidence, say you don't know based on the selected knowledge bases.
 - Knowledge bases are user-private; never claim access to other users' data.
@@ -318,7 +320,8 @@ export function buildSelectedKbPromptPrefix(
     : '';
   return (
     `[Selected knowledge bases for this question]\n${lines}\n\n` +
-    `You MUST call retrieve_chunks with knowledgeBaseIds=${ids} before answering factual questions. ` +
+    `If this is a greeting, small talk, or a question about you / your capabilities (not document facts), answer directly WITHOUT calling retrieve_chunks. ` +
+    `If the user needs facts from the selected knowledge bases, call retrieve_chunks with knowledgeBaseIds=${ids} before answering. ` +
     `Base your analysis only on the retrieved evidence. Cite with [1], [2], … and mention document names.\n\n` +
     rewriteHint +
     `[User question]\n`
