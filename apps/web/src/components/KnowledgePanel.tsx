@@ -254,7 +254,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const createKb = async () => {
     const name = newName.trim()
     if (!name) {
-      setError('Please enter a knowledge base name.')
+      setError('Please enter a name for your knowledge base.')
       return
     }
     if (!Number.isFinite(chunkTokenNum) || chunkTokenNum < CHUNK_TOKEN_MIN || chunkTokenNum > CHUNK_TOKEN_MAX) {
@@ -444,7 +444,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   }
 
   const onDeleteKb = async (id: string) => {
-    if (!confirm('Delete this knowledge base and its documents?')) return
+    if (!confirm('Delete this knowledge base and its documents from My Knowledge Base?')) return
     await kbApi.remove(id)
     if (selectedId === id) setSelectedId(null)
     await loadKbs({ quiet: true })
@@ -571,7 +571,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     )
   }
 
-  /* ── Knowledge Base list (full page) ── */
+  /* ── My Knowledge Base list (full page) ── */
   if (!selectedId) {
     return (
       <div className="kb-page">
@@ -585,7 +585,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 Chat
               </button>
               <button type="button" className="kb-top-nav-item active">
-                Knowledge Base
+                My Knowledge Base
               </button>
             </nav>
           </div>
@@ -597,7 +597,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               <span className="kb-page-title-icon" aria-hidden>
                 ⬡
               </span>
-              Knowledge Base
+              My Knowledge Base
             </h1>
             <div className="kb-page-toolbar-actions">
               <input
@@ -618,7 +618,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           {error && <p className="error-text">{error}</p>}
 
           {kbsLoading ? (
-            <div className="kb-dataset-grid" aria-busy="true" aria-label="Loading knowledge bases">
+            <div className="kb-dataset-grid" aria-busy="true" aria-label="Loading My Knowledge Base">
               {Array.from({ length: 6 }, (_, i) => (
                 <div key={i} className="kb-dataset-card kb-dataset-card-skeleton" aria-hidden>
                   <div className="kb-dataset-card-main">
@@ -636,7 +636,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
             <div className="kb-empty-state">
               <p className="empty-hint">
                 {kbs.length === 0
-                  ? 'No knowledge bases yet. Create one to upload documents.'
+                  ? 'No knowledge bases in My Knowledge Base yet. Create one to upload documents.'
                   : 'No knowledge bases match your search.'}
               </p>
               {kbs.length === 0 && (
@@ -814,7 +814,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     return <DocumentPreviewPage kbId={selectedId} document={previewDoc} onBack={() => setPreviewDoc(null)} />
   }
 
-  /* ── Knowledge Base detail: files table (full page) ── */
+  /* ── My Knowledge Base detail: files table (full page) ── */
   return (
     <div className="kb-page">
       <header className="kb-topbar">
@@ -827,7 +827,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               Chat
             </button>
             <button type="button" className="kb-top-nav-item active" onClick={() => setSelectedId(null)}>
-              Knowledge Base
+              My Knowledge Base
             </button>
           </nav>
         </div>
@@ -835,13 +835,13 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
       <div className="kb-detail-layout">
         <aside className="kb-detail-rail">
-          <button type="button" className="kb-detail-kb-card" onClick={() => setSelectedId(null)} title="Back to knowledge bases">
+          <button type="button" className="kb-detail-kb-card" onClick={() => setSelectedId(null)} title="Back to My Knowledge Base">
             <div className="kb-dataset-avatar kb-dataset-avatar-lg" style={{ background: avatarColor(selectedKb?.name || '') }}>
               {initial(selectedKb?.name || '')}
             </div>
             <div className="kb-detail-kb-info">
               <div className="kb-detail-kb-name" title={selectedKb?.name}>
-                {selectedKb?.name || 'Knowledge Base'}
+                {selectedKb?.name || 'My Knowledge Base'}
               </div>
               <div className="kb-detail-kb-meta">
                 {selectedKb?.documentCount ?? docs.length} {(selectedKb?.documentCount ?? docs.length) === 1 ? 'file' : 'files'}
@@ -976,7 +976,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
           <div className="kb-detail-rail-footer">
             <button type="button" className="btn btn-ghost" onClick={() => setSelectedId(null)}>
-              ← All knowledge bases
+              ← My Knowledge Bases
             </button>
           </div>
         </aside>

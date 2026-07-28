@@ -145,7 +145,8 @@ export default function AdminTasksPanel() {
   return (
     <div className="admin-page">
       <header className="admin-page-header">
-        <h1 className="admin-page-title">Document Parsing Tasks</h1>
+        <h1 className="admin-page-title">Administration Document Parsing Tasks</h1>
+        <p className="admin-page-hint">System administration — not the end-user workspace.</p>
       </header>
       {error ? <p className="error-text admin-error">{error}</p> : null}
 

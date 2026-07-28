@@ -88,11 +88,14 @@ export default function AdminDocumentsPanel({ dataset, onBack }: Props) {
 
   if (!dataset) {
     return (
-      <AdminShell title="Documents">
+      <AdminShell title="Administration Documents">
         <div className="admin-empty-state">
-          <p>Select a knowledge base from the Knowledge Bases tab to view its documents.</p>
+          <p>
+            Select a knowledge base from Administration Knowledge Bases to view
+            its documents.
+          </p>
           <button type="button" className="admin-btn primary" onClick={onBack}>
-            Go to Knowledge Bases
+            Go to Administration Knowledge Bases
           </button>
         </div>
       </AdminShell>
@@ -158,11 +161,14 @@ export default function AdminDocumentsPanel({ dataset, onBack }: Props) {
             type="button"
             className="admin-icon-btn"
             onClick={onBack}
-            aria-label="Back to Knowledge Bases"
+            aria-label="Back to Administration Knowledge Bases"
           >
             <ArrowLeft size={18} />
           </button>
-          {dataset.name}
+          <span>
+            Administration Documents
+            <span className="admin-title-sub"> · {dataset.name}</span>
+          </span>
         </span>
       }
       error={error}

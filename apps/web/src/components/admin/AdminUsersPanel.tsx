@@ -211,7 +211,7 @@ export default function AdminUsersPanel() {
 
   return (
     <AdminShell
-      title="User Management"
+      title="Administration User Management"
       error={error}
       toolbar={
         <>

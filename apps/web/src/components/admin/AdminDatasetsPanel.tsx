@@ -90,7 +90,7 @@ export default function AdminDatasetsPanel({ onOpenDocuments }: Props) {
 
   return (
     <AdminShell
-      title="Knowledge Bases"
+      title="Administration Knowledge Bases"
       error={error}
       toolbar={
         <>

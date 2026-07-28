@@ -134,6 +134,7 @@ export function AdminShell({
     <div className="admin-page">
       <header className="admin-page-header">
         <h1 className="admin-page-title">{title}</h1>
+        <p className="admin-page-hint">System administration — not the end-user workspace.</p>
       </header>
       {error ? <p className="error-text admin-error">{error}</p> : null}
       <div className="admin-card">

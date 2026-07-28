@@ -3378,8 +3378,10 @@ button {
 
 .admin-page-header {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  margin-bottom: 4px;
 }
 
 .admin-page-title {
@@ -3389,10 +3391,22 @@ button {
   color: var(--text-primary);
 }
 
+.admin-page-hint {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--text-secondary, #64748b);
+}
+
 .admin-title-with-back {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+}
+
+.admin-title-sub {
+  font-weight: 500;
+  color: var(--text-secondary, #64748b);
 }
 
 .admin-error {
