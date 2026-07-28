@@ -182,7 +182,7 @@ type RetrieveTrace = {
   ts: string;
   conversationId?: string;
   userId?: string;          // avoid in default logs if privacy-sensitive; hash optional
-  tool?: 'retrieve_chunks' | 'keyword_search' | 'list_document_chunks' | 'fast_rag';
+  tool?: 'retrieve_chunks' | 'keyword_search' | 'list_document_chunks';
   originalQuery?: string;
   rewriteQuery?: string;
   rewritten: boolean;
@@ -277,7 +277,8 @@ Non-admin: no nav entry, API 403.
 Only if retrieve metrics look good but users still get hallucinations:
 
 1. For golden cases with short `goldAnswer` or `mustCiteDocuments`  
-2. Run fast or agent path  
+2. Run agent path  
+
 3. LLM-as-judge: “Does the answer only use provided evidence?” → pass/fail  
 4. Keep separate from Recall@K report  
 
@@ -348,7 +349,7 @@ Do **not** block P3a–c on this.
 
 ```text
 P0 params / evidence / rewrite  ──┐
-P1 tools / fast path            ──┼──► P3 measures & explains outcomes
+P1 tools (agent-only)           ──┼──► P3 measures & explains outcomes
 P2 presets / parse health       ──┘
 ```
 

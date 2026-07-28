@@ -50,7 +50,7 @@ See root `.env.example`:
 
 Tracked as **P1–P3** in the [roadmap](./2026-07-28-rag-quality-roadmap.md):
 
-- Classic fast RAG path (non-agent) — P1
-- Keyword/grep + list-chunks tools — P1
+- Keyword/grep + list-chunks tools — P1 (Fast RAG path not adopted)
+
 - Chunking presets in product UI — P2
 - Eval golden set + retrieval debug UI — P3

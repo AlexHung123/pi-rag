@@ -1,7 +1,7 @@
 # RAG Quality P1 Design
 
 **Date:** 2026-07-28  
-**Status:** Implemented (P1a–d + UI mode toggle)  
+**Status:** Implemented (P1a–b–d); **P1c Fast RAG removed** (agent-only chat)  
 **Product:** CSB Knowledge Base Portal (`pi-rag`)  
 **Depends on:** P0 ([`2026-07-28-rag-quality-p0.md`](./2026-07-28-rag-quality-p0.md))  
 **Next (ingest):** [`2026-07-28-rag-quality-p2-design.md`](./2026-07-28-rag-quality-p2-design.md)  
@@ -16,10 +16,10 @@ P0 improved **how we retrieve** (hybrid params, evidence format, rewrite, multi-
 P1 improves **how we choose retrieval and answer**:
 
 1. More than one retrieval leg (semantic + keyword + document browse)
-2. Optional **fast RAG** path that does not depend on the agent tool loop
-3. Reuse P0 modules; do not reimplement RAGFlow or replace the product architecture
+2. Reuse P0 modules; do not reimplement RAGFlow or replace the product architecture
+3. Chat remains **agent-only** (no separate fast RAG path)
 
-**Non-goals for P1:** chunk presets (P2), golden-set eval UI (P3), GraphRAG/Wiki, in-house vector DB.
+**Non-goals for P1:** Fast RAG / `mode=fast` (removed), chunk presets (P2), golden-set eval UI (P3), GraphRAG/Wiki, in-house vector DB.
 
 ---
 
@@ -52,7 +52,7 @@ P1 improves **how we choose retrieval and answer**:
 4. **Same evidence contract** — every retrieval tool returns:
    - `content[].text` = human-readable evidence with `[n]` indices  
    - `details.sources` = `CitationSource[]` for SSE/UI  
-5. **Incremental PRs** — ship tools before fast path; default chat mode stays `agent` until product chooses otherwise.
+5. **Incremental PRs** — ship dual tools before document browse / adjacent expand.
 6. **Isolation unchanged** — only UI-selected, readable KBs; never invent KB/document ids.
 
 ---
@@ -62,16 +62,16 @@ P1 improves **how we choose retrieval and answer**:
 ```text
 P1a  Shared scope + keyword_search     ← do first (highest ROI)
 P1b  list_document_chunks              ← depends on P1a helper
-P1c  Fast RAG path (mode=fast|agent)   ← larger surface; second wave
+P1c  Fast RAG path                     ← REMOVED (not needed; agent-only)
 P1d  Adjacent-chunk expand             ← optional; skip if API weak
 ```
 
-| Slice | Effort (rough) | Risk |
-|-------|----------------|------|
-| P1a | 0.5–1.5 days | Low |
-| P1b | 0.5–1 day | Low |
-| P1c | 1–2 days (+0.5 if UI toggle) | Medium |
-| P1d | ~0.5 day or cut | Low |
+| Slice | Effort (rough) | Risk | Status |
+|-------|----------------|------|--------|
+| P1a | 0.5–1.5 days | Low | Shipped |
+| P1b | 0.5–1 day | Low | Shipped |
+| P1c | — | — | **Removed** |
+| P1d | ~0.5 day or cut | Low | Shipped |
 
 **Minimum valuable P1** = **P1a only** (semantic + keyword dual tools).
 
@@ -226,57 +226,12 @@ Use only when document id is known (prior sources / user naming). Do not invent 
 
 ---
 
-## 7. P1c — Fast RAG path
+## 7. P1c — Fast RAG path (**removed**)
 
-### Purpose
+> **Decision:** Product does not need a non-agent Fast RAG path. Chat is agent-only.
+> Removed: `FastRagService`, `PostMessageDto.mode`, UI “智能体 / 快速问答” toggle, and chat branching.
 
-Simple factual QA with selected KBs: **lower latency**, **no tool-call reliability issue**.
-
-### Pipeline
-
-```text
-knowledgeBaseIds empty?
-  yes → existing pure chat behavior (no retrieve)
-  no  → rewriteQueryForRetrieval(history, message)
-      → RagflowService.retrieve (P0 hybrid defaults)
-      → formatEvidenceForModel
-      → system: answer ONLY from evidence; cite [n]
-      → stream LLM (OpenAI-compatible; may reuse pi-ai stream or thin fetch)
-      → SSE: sources + text_delta + done
-```
-
-No `pi-agent-core` tool loop on this path.
-
-### API
-
-```ts
-// PostMessageDto (chat)
-mode?: 'agent' | 'fast'   // default: 'agent' (backward compatible)
-```
-
-Pass through `ChatService.streamMessage` → branch:
-
-- `fast` → `FastRagService` (new)
-- `agent` → existing `AgentService.run`
-
-### Product / UI
-
-- API: `mode?: 'agent' | 'fast'` (default `agent`)
-- UI: composer toggle “智能体 / 快速问答” (persisted in `localStorage`)
-- Default remains **agent**
-
-### What fast does **not** do
-
-- Multi-step tool planning
-- Keyword vs semantic tool routing (optional: run one hybrid retrieve only; keyword dual-call can be a later enhancement)
-- MCP / extra tools
-
-### Acceptance (P1c)
-
-- [x] `mode=fast` returns answer + sources without requiring tool_start
-- [x] `mode=agent` unchanged default
-- [x] Empty/weak evidence → refuse / “don’t know from KB” per evidence helper
-- [x] History still used for rewrite
+Historical idea (not shipped / no longer in tree): rewrite → hybrid retrieve → stream LLM without the tool loop, via `mode=fast`.
 
 ---
 
@@ -291,7 +246,7 @@ On a hit, attach chunk i−1 / i+1 when ordering is available, for continuity wi
 - Module: `apps/api/src/rag/expand-hits.ts`
 - Uses `listChunks` **document list order** (not PDF position geometry)
 - Top N hits (`RAG_ADJACENT_EXPAND_MAX_HITS`, default 3); fail-open per document
-- Shared by `retrieve_chunks`, `keyword_search`, and fast RAG
+- Shared by `retrieve_chunks` and `keyword_search`
 - Toggle: `RAG_ADJACENT_EXPAND=true` (default on)
 
 ---
@@ -305,11 +260,7 @@ On a hit, attach chunk i−1 / i+1 when ordering is available, for continuity wi
 | `apps/api/src/rag/rag-config.ts` | P1a | Keyword weight/threshold env |
 | `apps/api/src/ragflow/ragflow.service.ts` | P1a | Ensure retrieve accepts weight overrides (already does via options) |
 | `apps/api/src/agent/agent.tools.ts` | P1a–b | Add tools; call resolve-scope; prompt |
-| `apps/api/src/agent/agent.service.ts` | P1a–c | Multi-tool sources harvest; optional branch |
-| `apps/api/src/rag/fast-rag.service.ts` | P1c | **New** — rewrite → retrieve → stream |
-| `apps/api/src/chat/chat.dto.ts` | P1c | `mode?` |
-| `apps/api/src/chat/chat.service.ts` | P1c | Branch on mode |
-| `apps/web/...` | P1c | Optional mode toggle |
+| `apps/api/src/agent/agent.service.ts` | P1a | Multi-tool sources harvest |
 | `.env.example` | P1a | Keyword-related env |
 
 ---
@@ -320,7 +271,7 @@ On a hit, attach chunk i−1 / i+1 when ordering is available, for continuity wi
 |----|---------|
 | **PR-P1a** | `resolve-scope` + `keyword_search` + prompt + multi-tool sources |
 | **PR-P1b** | `list_document_chunks` |
-| **PR-P1c** | `mode=fast` pipeline + DTO (+ optional UI) |
+| **PR-P1c** | ~~`mode=fast`~~ — **cancelled / removed** |
 | **PR-P1d** | Adjacent expand (or skip with note) |
 
 Suggested branch naming: `feat/rag-quality-p1a`, or single `feat/rag-quality-p1` with stacked commits.
@@ -339,10 +290,9 @@ Suggested branch naming: `feat/rag-quality-p1a`, or single `feat/rag-quality-p1`
 
 | Case | Expected |
 |------|----------|
-| Conceptual question + selected KB | `retrieve_chunks` (agent) or hybrid (fast) |
+| Conceptual question + selected KB | `retrieve_chunks` |
 | Exact code / phrase | `keyword_search` hits more reliably than semantic-only |
 | list by `appDocumentId` | Chunks + sources; foreign id fails closed |
-| fast mode | No tool loop; sources present when hits exist |
 | No KB selected | No invent; ask to select / pure chat |
 
 ---
@@ -352,9 +302,8 @@ Suggested branch naming: `feat/rag-quality-p1a`, or single `feat/rag-quality-p1`
 | Risk | Mitigation |
 |------|------------|
 | RAGFlow keyword weight behaves differently by version | Env knobs; log retrieve params; test on target deploy |
-| Agent ignores keyword tool | Clear tool descriptions; optional later: server-side dual retrieve in fast path |
+| Agent ignores keyword tool | Clear tool descriptions; optional later: stronger tool-use prompting |
 | Multi-tool citation index collision | Merge + re-number before final `sources` event |
-| Fast path duplicates stream code | Thin shared “stream chat completions” helper with agent LLM config |
 | Scope helper regression | Same tests as current retrieve ownership |
 
 ---
@@ -362,7 +311,8 @@ Suggested branch naming: `feat/rag-quality-p1a`, or single `feat/rag-quality-p1`
 ## 13. Explicit non-goals (P1)
 
 - Replacing RAGFlow
-- Full intent taxonomy (chitchat / follow_up / …) — optional later; mode toggle is enough
+- Fast RAG / dual chat modes (removed)
+- Full intent taxonomy (chitchat / follow_up / …)
 - Chunk/parser presets (P2)
 - Golden set + admin retrieval debug (P3)
 - Changing multi-tenant / share model
@@ -373,12 +323,11 @@ Suggested branch naming: `feat/rag-quality-p1a`, or single `feat/rag-quality-p1`
 
 1. Exact-term questions improve with `keyword_search` available.
 2. Agent can open a known document via `list_document_chunks` without leaving the chat.
-3. Optional fast path answers simple KB questions without tool-call failures.
-4. All paths still respect UI KB selection and Nest ownership.
-5. P0 evidence / rewrite modules remain the single source of truth for formatting and thresholds.
+3. All paths still respect UI KB selection and Nest ownership.
+4. P0 evidence / rewrite modules remain the single source of truth for formatting and thresholds.
 
 ---
 
 ## 15. One-line decision
 
-> **P1 first builds a routable retrieval tool surface (shared scope + keyword, then list-doc); fast RAG is an optional acceleration with default still agent — ship tools before mode switch.**
+> **P1 builds a routable retrieval tool surface (shared scope + keyword, then list-doc + adjacent expand); chat stays agent-only — no Fast RAG mode.**

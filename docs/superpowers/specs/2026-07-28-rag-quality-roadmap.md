@@ -44,7 +44,7 @@ Browser → NestJS (auth, ownership) → RAGFlow (parse / chunk / embed / retrie
 | RRF / multi-retriever | Multi-query merge; keyword tool as second path |
 | Structured context template | Evidence formatter with `[n]` citations |
 | Parent-child / expand | Optional adjacent-chunk expand if API allows |
-| Classic RAG + Agent dual mode | Fast path vs agent path |
+| Classic RAG + Agent dual mode | **Not adopted** — agent-only chat |
 | Metric suite | Minimal golden set + Recall@K |
 
 **Do not port:** multi-engine vector stores, Wiki auto-generation, full GraphRAG, heavy RBAC.
@@ -66,7 +66,7 @@ Browser → NestJS (auth, ownership) → RAGFlow (parse / chunk / embed / retrie
 | Phase | Theme | Status |
 |-------|--------|--------|
 | **P0** | Retrieval params, evidence format, threshold, multi-query, rewrite | **Done** (`feat/rag-quality-p0`) |
-| **P1** | Tool split (keyword/list), stronger orchestration, optional fast RAG | Planned |
+| **P1** | Tool split (keyword/list), stronger orchestration; **no Fast RAG** | In progress / agent-only |
 | **P2** | Ingest quality (chunk presets, parse health) | Planned |
 | **P3** | Eval set, retrieval debug, observability | Planned |
 
@@ -74,7 +74,7 @@ Suggested cadence (flexible):
 
 ```text
 P0  (done)   hybrid + evidence + rewrite
-P1  (~1–2w)  tools + fast path
+P1  (~1–2w)  tools (keyword/list/expand); agent-only
 P2  (~1w)    chunk presets + parse health
 P3  (~1w)    golden set + debug panel
 ```
@@ -134,7 +134,7 @@ P3  (~1w)    golden set + debug panel
 
 ### Goals
 
-Make retrieval **multi-legged** and optionally bypass ReAct for simple QA.
+Make retrieval **multi-legged** (semantic + keyword + document browse). Chat remains agent-only.
 
 ### Recommended slice order
 
@@ -142,7 +142,7 @@ Make retrieval **multi-legged** and optionally bypass ReAct for simple QA.
 |-------|---------|----------|
 | **P1a** | Shared `resolveRetrievalScope` + `keyword_search` | **First** (highest ROI) |
 | **P1b** | `list_document_chunks` | After P1a |
-| **P1c** | Fast RAG `mode=fast\|agent` | Second wave |
+| **P1c** | Fast RAG `mode=fast\|agent` | **Removed** (not needed) |
 | **P1d** | Adjacent-chunk expand | Optional; skip if API weak |
 
 ### 5.1 Tool split
@@ -155,19 +155,9 @@ Make retrieval **multi-legged** and optionally bypass ReAct for simple QA.
 
 Agent prompt: conceptual Q → retrieve; exact entity/code → keyword; known doc → list.
 
-### 5.2 Classic fast RAG path (optional mode)
+### 5.2 Classic fast RAG path — **removed**
 
-```text
-mode=fast:
-  rewrite → retrieve(hybrid + rerank) → evidence template → stream LLM
-  (no tool loop)
-
-mode=agent:  (current default)
-  tools + multi-step
-```
-
-- API flag first; UI toggle optional later.
-- Reuse `evidence.ts` + `query-rewrite.ts` + `RagflowService.retrieve`.
+Product decision: no `mode=fast` / dual chat mode. All QA uses the agent tool loop.
 
 ### 5.3 Context / citation hardening
 
@@ -183,7 +173,7 @@ mode=agent:  (current default)
 - [ ] At least one non-semantic retrieval tool usable by agent (P1a)
 - [ ] Shared scope helper (no duplicated ownership) (P1a)
 - [ ] List-doc tool with char budget (P1b)
-- [ ] Fast path returns answer + sources without tool loop (P1c)
+- [ ] ~~Fast path~~ removed — agent-only chat
 - [ ] Prompt documents when to use which tool
 - [ ] Build passes; manual smoke on mock + real RAGFlow
 
@@ -332,7 +322,7 @@ Hook `RagflowService.retrieve` (+ agent tool counts):
 | [`2026-07-23-pi-rag-design.md`](./2026-07-23-pi-rag-design.md) | Product MVP architecture |
 | [`2026-07-24-pi-agent-pool-design.md`](./2026-07-24-pi-agent-pool-design.md) | Agent pool |
 | [`2026-07-28-rag-quality-p0.md`](./2026-07-28-rag-quality-p0.md) | P0 shipped detail |
-| [`2026-07-28-rag-quality-p1-design.md`](./2026-07-28-rag-quality-p1-design.md) | P1 tools + fast path design |
+| [`2026-07-28-rag-quality-p1-design.md`](./2026-07-28-rag-quality-p1-design.md) | P1 tools design (agent-only; no Fast RAG) |
 | [`2026-07-28-rag-quality-p2-design.md`](./2026-07-28-rag-quality-p2-design.md) | P2 ingest presets + parse health design |
 | [`2026-07-28-rag-quality-p3-design.md`](./2026-07-28-rag-quality-p3-design.md) | P3 eval + debug + observability design |
 | [`../plans/2026-07-28-rag-quality.md`](../plans/2026-07-28-rag-quality.md) | Task checklist for agents |

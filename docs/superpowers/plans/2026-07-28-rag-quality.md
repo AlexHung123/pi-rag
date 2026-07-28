@@ -4,7 +4,7 @@
 
 **Goal:** Improve knowledge-base answer quality in pi-rag by fully using RAGFlow retrieval, stronger Nest-side orchestration, better ingest defaults, and a minimal eval loop — without replacing RAGFlow or rewriting the product architecture.
 
-**Architecture:** NestJS owns auth/ownership and agent tools; RAGFlow owns parse/chunk/embed/retrieve; pi-agent-core runs tool-using chat. Optional later **fast RAG** path skips the tool loop for simple QA.
+**Architecture:** NestJS owns auth/ownership and agent tools; RAGFlow owns parse/chunk/embed/retrieve; pi-agent-core runs tool-using chat (agent-only; no Fast RAG mode).
 
 **Tech stack:** NestJS, Prisma, RAGFlow HTTP API, pi-agent-core / pi-ai, existing chat SSE + citations UI.
 
@@ -25,8 +25,8 @@
 | `apps/api/src/ragflow/ragflow.service.ts` | P0+ | Retrieval (+ later keyword helpers) |
 | `apps/api/src/ragflow/ragflow.types.ts` | P0 | `RetrieveOptions` |
 | `apps/api/src/agent/agent.tools.ts` | P0 / P1 | Tools + prompts |
-| `apps/api/src/agent/agent.service.ts` | P0 / P1 | Rewrite inject; fast path wiring |
-| `apps/api/src/chat/*` | P1 | Optional `mode=fast\|agent` |
+| `apps/api/src/agent/agent.service.ts` | P0 / P1 | Rewrite inject; multi-tool sources harvest |
+| `apps/api/src/chat/*` | — | Agent-only stream (no mode flag) |
 | `apps/api/src/knowledge/*` + web KB UI | P2 | Chunk presets |
 | `apps/api/scripts/eval-retrieve.mjs` | P3 | Golden set runner (new) |
 | Admin / debug API + UI | P3 | Retrieval debug |
@@ -68,7 +68,7 @@
 
 **Design (how to build):** [`../specs/2026-07-28-rag-quality-p1-design.md`](../specs/2026-07-28-rag-quality-p1-design.md)
 
-Ship order: **P1a → P1b → P1c → P1d(optional)**. Minimum valuable: P1a only.
+Ship order: **P1a → P1b → P1d(optional)**. **P1c Fast RAG removed.** Minimum valuable: P1a only.
 
 ### Task P1a: Shared scope + keyword_search
 
@@ -88,18 +88,14 @@ Ship order: **P1a → P1b → P1c → P1d(optional)**. Minimum valuable: P1a onl
 - [x] Prompt: only when document id known from sources / user
 - [x] Unauthorized doc fails closed (generic not found message)
 
-### Task P1c: Fast RAG path
+### Task P1c: Fast RAG path — **REMOVED**
 
-- [x] `apps/api/src/rag/fast-rag.service.ts`: rewrite → retrieve → evidence → stream LLM
-- [x] Chat DTO/API: optional `mode: 'fast' | 'agent'` (default `agent`)
-- [x] SSE: `sources` + text deltas without tool loop
-- [x] UI toggle「智能体 / 快速问答」(localStorage)
-- [x] Build passes
+- [x] ~~`fast-rag.service.ts` / `mode=fast` / UI toggle~~ — product decision: agent-only; code and docs updated to remove P1c
 
 ### Task P1d: Adjacent expand (optional)
 
 - [x] Spike: listChunks document order is stable enough for i−1/i+1
-- [x] `expand-hits.ts` shared by retrieve + keyword + fast path
+- [x] `expand-hits.ts` shared by retrieve + keyword
 - [x] Env: `RAG_ADJACENT_EXPAND`, `RAG_ADJACENT_EXPAND_MAX_HITS`
 
 ---
@@ -188,10 +184,9 @@ Can start P3a as soon as P0 retrieve exists (independent of P1/P2 UI).
 | PR | Content |
 |----|---------|
 | PR1 | P0 (this branch) — retrieval + evidence + rewrite |
-| PR2 | P1 tools (keyword + list) |
-| PR3 | P1 fast path |
-| PR4 | P2 presets + parse health |
-| PR5 | P3 eval + debug |
+| PR2 | P1 tools (keyword + list + adjacent expand) |
+| PR3 | P2 presets + parse health |
+| PR4 | P3 eval + debug |
 
 ---
 

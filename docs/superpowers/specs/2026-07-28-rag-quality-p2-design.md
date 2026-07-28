@@ -4,7 +4,7 @@
 **Status:** Design (not yet implemented)  
 **Product:** CSB Knowledge Base Portal (`pi-rag`)  
 **Depends on:** Product MVP + RAGFlow dataset create (not blocked on P1 code)  
-**Related:** P0 retrieval ([`2026-07-28-rag-quality-p0.md`](./2026-07-28-rag-quality-p0.md)), P1 tools/fast ([`2026-07-28-rag-quality-p1-design.md`](./2026-07-28-rag-quality-p1-design.md))  
+**Related:** P0 retrieval ([`2026-07-28-rag-quality-p0.md`](./2026-07-28-rag-quality-p0.md)), P1 tools ([`2026-07-28-rag-quality-p1-design.md`](./2026-07-28-rag-quality-p1-design.md))  
 **Next (eval/debug):** [`2026-07-28-rag-quality-p3-design.md`](./2026-07-28-rag-quality-p3-design.md)  
 **Roadmap:** [`2026-07-28-rag-quality-roadmap.md`](./2026-07-28-rag-quality-roadmap.md)  
 **Plan checklist:** [`../plans/2026-07-28-rag-quality.md`](../plans/2026-07-28-rag-quality.md)

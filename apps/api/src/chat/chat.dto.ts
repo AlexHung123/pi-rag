@@ -1,7 +1,6 @@
 import {
   ArrayMaxSize,
   IsArray,
-  IsIn,
   IsOptional,
   IsString,
   IsUUID,
@@ -25,13 +24,4 @@ export class PostMessageDto {
   @ArrayMaxSize(50)
   @IsUUID('4', { each: true })
   knowledgeBaseIds?: string[];
-
-  /**
-   * Chat mode:
-   * - agent (default): pi-agent-core + retrieval tools
-   * - fast: rewrite → hybrid retrieve → stream LLM (no tool loop)
-   */
-  @IsOptional()
-  @IsIn(['agent', 'fast'])
-  mode?: 'agent' | 'fast';
 }
