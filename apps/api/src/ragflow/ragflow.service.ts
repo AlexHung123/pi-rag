@@ -265,10 +265,13 @@ export class RagflowService {
     const vectorSimilarityWeight =
       input.vectorSimilarityWeight ?? defaults.vectorSimilarityWeight;
     const rerankId = input.rerankId ?? defaults.rerankId;
+    const keyword = input.keyword === true;
 
     if (this.useMock()) {
       return this.mock.retrieve(input.datasetIds, input.question, pageSize, {
         similarityThreshold,
+        keyword,
+        vectorSimilarityWeight,
       });
     }
 
@@ -287,9 +290,13 @@ export class RagflowService {
     if (rerankId) {
       body.rerank_id = rerankId;
     }
+    // RAGFlow ES keyword path: keyword=true enables term matching via ElasticSearch.
+    if (keyword) {
+      body.keyword = true;
+    }
 
     this.logger.debug(
-      `retrieve q="${input.question.slice(0, 80)}" datasets=${input.datasetIds.length} top_k=${topK} page_size=${pageSize} thr=${similarityThreshold} v_weight=${vectorSimilarityWeight}${rerankId ? ` rerank=${rerankId}` : ''}`,
+      `retrieve q="${input.question.slice(0, 80)}" datasets=${input.datasetIds.length} top_k=${topK} page_size=${pageSize} thr=${similarityThreshold} v_weight=${vectorSimilarityWeight}${keyword ? ' keyword=true' : ''}${rerankId ? ` rerank=${rerankId}` : ''}`,
     );
 
     const data = await this.request<{ chunks?: Array<Record<string, unknown>> }>(

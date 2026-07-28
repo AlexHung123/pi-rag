@@ -304,8 +304,12 @@ export default function App() {
       setAgentProcess(createInitialProcess(tempAssistant.id));
       setMessages((prev) => [...prev, tempUser, tempAssistant]);
 
-      const streamOpts =
-        selectedKbIds.length > 0 ? { knowledgeBaseIds: selectedKbIds } : undefined;
+      const streamOpts: {
+        knowledgeBaseIds?: string[];
+      } = {};
+      if (selectedKbIds.length > 0) {
+        streamOpts.knowledgeBaseIds = selectedKbIds;
+      }
 
       const runStream = async (id: string) => {
         let sawConversationMissing = false;

@@ -4,6 +4,12 @@
 **Date:** 2026-07-28  
 **Status:** Implemented (server defaults + agent path)
 
+**Full roadmap (P0–P3):** [`./2026-07-28-rag-quality-roadmap.md`](./2026-07-28-rag-quality-roadmap.md)  
+**P1 design:** [`./2026-07-28-rag-quality-p1-design.md`](./2026-07-28-rag-quality-p1-design.md)  
+**P2 design (ingest):** [`./2026-07-28-rag-quality-p2-design.md`](./2026-07-28-rag-quality-p2-design.md)  
+**P3 design (eval/debug):** [`./2026-07-28-rag-quality-p3-design.md`](./2026-07-28-rag-quality-p3-design.md)  
+**Implementation plan:** [`../plans/2026-07-28-rag-quality.md`](../plans/2026-07-28-rag-quality.md)
+
 ## Goals
 
 Lift retrieval quality without replacing RAGFlow, inspired by WeKnora patterns:
@@ -42,7 +48,9 @@ See root `.env.example`:
 
 ## Out of scope (later)
 
-- Classic fast RAG path (non-agent)
-- Keyword/grep tool
-- Eval golden set + debug UI
-- Chunking presets in product UI
+Tracked as **P1–P3** in the [roadmap](./2026-07-28-rag-quality-roadmap.md):
+
+- Keyword/grep + list-chunks tools — P1 (Fast RAG path not adopted)
+
+- Chunking presets in product UI — P2
+- Eval golden set + retrieval debug UI — P3

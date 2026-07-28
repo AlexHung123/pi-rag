@@ -72,4 +72,9 @@ export type RetrieveOptions = {
   documentIds?: string[];
   /** Optional RAGFlow rerank model id. */
   rerankId?: string;
+  /**
+   * When true, RAGFlow enables ElasticSearch keyword-based matching
+   * (`keyword: true` on POST /api/v1/retrieval).
+   */
+  keyword?: boolean;
 };
