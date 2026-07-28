@@ -73,7 +73,7 @@ export default function AdminDatasetsPanel({ onOpenDocuments }: Props) {
 
   const deleteIds = async (ids: string[]) => {
     if (!ids.length) return;
-    if (!window.confirm(`Delete ${ids.length} dataset(s)? This cannot be undone.`)) {
+    if (!window.confirm(`Delete ${ids.length} knowledge base(s)? This cannot be undone.`)) {
       return;
     }
     setBusy(true);
@@ -90,7 +90,7 @@ export default function AdminDatasetsPanel({ onOpenDocuments }: Props) {
 
   return (
     <AdminShell
-      title="Datasets"
+      title="Knowledge Bases"
       error={error}
       toolbar={
         <>
@@ -182,7 +182,7 @@ export default function AdminDatasetsPanel({ onOpenDocuments }: Props) {
             ) : items.length === 0 ? (
               <tr>
                 <td colSpan={9} className="admin-empty">
-                  No datasets found
+                  No knowledge bases found
                 </td>
               </tr>
             ) : (

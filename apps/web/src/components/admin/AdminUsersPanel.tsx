@@ -295,7 +295,7 @@ export default function AdminUsersPanel() {
                 />
               </th>
               <th>Username</th>
-              <th>Datasets</th>
+              <th>Knowledge Bases</th>
               <th>Documents</th>
               <th>Conversations</th>
               <th>Storage</th>

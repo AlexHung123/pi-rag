@@ -79,12 +79,12 @@ export default function AppSidebar({
     icon: React.ReactNode;
   }> = [
     { id: 'chat', label: 'Chat', icon: <MessageSquare size={20} /> },
-    { id: 'knowledge', label: 'Knowledge', icon: <BookOpen size={20} /> },
+    { id: 'knowledge', label: 'Knowledge Base', icon: <BookOpen size={20} /> },
     ...(isAdmin
       ? ([
           {
             id: 'admin-datasets',
-            label: 'Datasets',
+            label: 'Knowledge Bases',
             icon: <FolderOpen size={20} />,
           },
           {

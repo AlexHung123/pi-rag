@@ -1651,7 +1651,7 @@ button {
   }
 }
 
-/* ── Knowledge / Dataset full page ── */
+/* ── Knowledge Base full page ── */
 .kb-page {
   height: 100%;
   display: flex;
@@ -2143,6 +2143,12 @@ button {
 
 .kb-storage-bar-modal {
   margin-bottom: 14px;
+}
+
+/* All Knowledge Bases list: full-width bar under the page toolbar */
+.kb-storage-bar-list {
+  margin: 0 0 16px;
+  max-width: 100%;
 }
 
 .kb-storage-bar-head {

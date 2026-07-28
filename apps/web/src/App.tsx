@@ -652,7 +652,7 @@ export default function App() {
                     </div>
                     {knowledgeBases.length === 0 ? (
                       <p className="kb-select-empty">
-                        No knowledge bases yet. Create one in the Knowledge workspace.
+                        No knowledge bases yet. Create one in the Knowledge Base workspace.
                       </p>
                     ) : (
                       <ul className="kb-select-options">

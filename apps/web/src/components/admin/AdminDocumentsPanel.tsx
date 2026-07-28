@@ -90,9 +90,9 @@ export default function AdminDocumentsPanel({ dataset, onBack }: Props) {
     return (
       <AdminShell title="Documents">
         <div className="admin-empty-state">
-          <p>Select a dataset from the Datasets tab to view its documents.</p>
+          <p>Select a knowledge base from the Knowledge Bases tab to view its documents.</p>
           <button type="button" className="admin-btn primary" onClick={onBack}>
-            Go to Datasets
+            Go to Knowledge Bases
           </button>
         </div>
       </AdminShell>
@@ -158,7 +158,7 @@ export default function AdminDocumentsPanel({ dataset, onBack }: Props) {
             type="button"
             className="admin-icon-btn"
             onClick={onBack}
-            aria-label="Back to Datasets"
+            aria-label="Back to Knowledge Bases"
           >
             <ArrowLeft size={18} />
           </button>

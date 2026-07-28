@@ -533,7 +533,45 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     }
   }
 
-  /* ── Dataset list (full page) ── */
+  /** Account-level total storage bar (shared by list + detail views). */
+  const renderStorageBar = (className = '') => {
+    if (!storage) return null
+    const tone =
+      storageWarning?.level === 'full' || storageWarning?.level === 'critical'
+        ? ' kb-storage-bar-critical'
+        : storageWarning?.level === 'warn'
+          ? ' kb-storage-bar-warn'
+          : ''
+    return (
+      <div
+        className={`kb-storage-bar${tone}${className ? ` ${className}` : ''}`}
+        title="Total size of all files you have uploaded (not per file)."
+      >
+        <div className="kb-storage-bar-head">
+          <span className="kb-storage-bar-label">Storage</span>
+          <span className="kb-storage-bar-values">
+            {formatBytes(storage.usedBytes)} / {formatBytes(storage.quotaBytes)}
+            <span className="kb-storage-bar-remaining">
+              · {formatBytes(storage.remainingBytes)} free
+            </span>
+          </span>
+        </div>
+        <div className="kb-storage-track" aria-hidden>
+          <div
+            className="kb-storage-fill"
+            style={{ width: `${Math.min(100, Math.round(storage.usageRatio * 100))}%` }}
+          />
+        </div>
+        <p className="kb-storage-hint">
+          {storageWarning
+            ? storageWarning.text
+            : 'Quota is the total for all your uploaded files combined, not a single-file limit.'}
+        </p>
+      </div>
+    )
+  }
+
+  /* ── Knowledge Base list (full page) ── */
   if (!selectedId) {
     return (
       <div className="kb-page">
@@ -547,7 +585,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 Chat
               </button>
               <button type="button" className="kb-top-nav-item active">
-                Dataset
+                Knowledge Base
               </button>
             </nav>
           </div>
@@ -559,7 +597,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               <span className="kb-page-title-icon" aria-hidden>
                 ⬡
               </span>
-              Dataset
+              Knowledge Base
             </h1>
             <div className="kb-page-toolbar-actions">
               <input
@@ -570,15 +608,17 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 onChange={e => setSearch(e.target.value)}
               />
               <button className="btn" type="button" onClick={openCreateModal}>
-                + Create dataset
+                + Create knowledge base
               </button>
             </div>
           </div>
 
+          {renderStorageBar('kb-storage-bar-list')}
+
           {error && <p className="error-text">{error}</p>}
 
           {kbsLoading ? (
-            <div className="kb-dataset-grid" aria-busy="true" aria-label="Loading datasets">
+            <div className="kb-dataset-grid" aria-busy="true" aria-label="Loading knowledge bases">
               {Array.from({ length: 6 }, (_, i) => (
                 <div key={i} className="kb-dataset-card kb-dataset-card-skeleton" aria-hidden>
                   <div className="kb-dataset-card-main">
@@ -595,11 +635,13 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           ) : filteredKbs.length === 0 ? (
             <div className="kb-empty-state">
               <p className="empty-hint">
-                {kbs.length === 0 ? 'No datasets yet. Create one to upload documents.' : 'No datasets match your search.'}
+                {kbs.length === 0
+                  ? 'No knowledge bases yet. Create one to upload documents.'
+                  : 'No knowledge bases match your search.'}
               </p>
               {kbs.length === 0 && (
                 <button className="btn" type="button" onClick={openCreateModal}>
-                  + Create dataset
+                  + Create knowledge base
                 </button>
               )}
             </div>
@@ -646,7 +688,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                       className="kb-dataset-card-delete"
                       role="button"
                       tabIndex={0}
-                      title="Delete dataset"
+                      title="Delete knowledge base"
                       onClick={e => {
                         e.stopPropagation()
                         void onDeleteKb(kb.id)
@@ -671,7 +713,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
         {createOpen && (
           <div className="kb-modal-backdrop" role="presentation" onClick={closeCreateModal}>
             <div className="kb-modal" role="dialog" aria-labelledby="create-dataset-title" onClick={e => e.stopPropagation()}>
-              <h2 id="create-dataset-title">Create dataset</h2>
+              <h2 id="create-dataset-title">Create knowledge base</h2>
               {error && <p className="error-text">{error}</p>}
               <div className="field">
                 <label htmlFor="kb-new-name">Name</label>
@@ -772,7 +814,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     return <DocumentPreviewPage kbId={selectedId} document={previewDoc} onBack={() => setPreviewDoc(null)} />
   }
 
-  /* ── Dataset detail: files table (full page) ── */
+  /* ── Knowledge Base detail: files table (full page) ── */
   return (
     <div className="kb-page">
       <header className="kb-topbar">
@@ -785,7 +827,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               Chat
             </button>
             <button type="button" className="kb-top-nav-item active" onClick={() => setSelectedId(null)}>
-              Dataset
+              Knowledge Base
             </button>
           </nav>
         </div>
@@ -793,13 +835,13 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
       <div className="kb-detail-layout">
         <aside className="kb-detail-rail">
-          <button type="button" className="kb-detail-kb-card" onClick={() => setSelectedId(null)} title="Back to datasets">
+          <button type="button" className="kb-detail-kb-card" onClick={() => setSelectedId(null)} title="Back to knowledge bases">
             <div className="kb-dataset-avatar kb-dataset-avatar-lg" style={{ background: avatarColor(selectedKb?.name || '') }}>
               {initial(selectedKb?.name || '')}
             </div>
             <div className="kb-detail-kb-info">
               <div className="kb-detail-kb-name" title={selectedKb?.name}>
-                {selectedKb?.name || 'Dataset'}
+                {selectedKb?.name || 'Knowledge Base'}
               </div>
               <div className="kb-detail-kb-meta">
                 {selectedKb?.documentCount ?? docs.length} {(selectedKb?.documentCount ?? docs.length) === 1 ? 'file' : 'files'}
@@ -843,8 +885,8 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               </button>
               <p className="field-hint">
                 {selectedKb.visibility === 'public'
-                  ? 'Any logged-in user can use this dataset in chat and view files.'
-                  : 'Only you and people you share with can access this dataset.'}
+                  ? 'Any logged-in user can use this knowledge base in chat and view files.'
+                  : 'Only you and people you share with can access this knowledge base.'}
               </p>
 
               <div className="kb-detail-visibility-label" style={{ marginTop: 8 }}>
@@ -934,7 +976,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
           <div className="kb-detail-rail-footer">
             <button type="button" className="btn btn-ghost" onClick={() => setSelectedId(null)}>
-              ← All datasets
+              ← All knowledge bases
             </button>
           </div>
         </aside>
@@ -975,39 +1017,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
             </div>
           </div>
 
-          {storage && canEditContent ? (
-            <div
-              className={`kb-storage-bar${
-                storageWarning?.level === 'full' || storageWarning?.level === 'critical'
-                  ? ' kb-storage-bar-critical'
-                  : storageWarning?.level === 'warn'
-                    ? ' kb-storage-bar-warn'
-                    : ''
-              }`}
-              title="Total size of all files you have uploaded (not per file)."
-            >
-              <div className="kb-storage-bar-head">
-                <span className="kb-storage-bar-label">Storage</span>
-                <span className="kb-storage-bar-values">
-                  {formatBytes(storage.usedBytes)} / {formatBytes(storage.quotaBytes)}
-                  <span className="kb-storage-bar-remaining">
-                    · {formatBytes(storage.remainingBytes)} free
-                  </span>
-                </span>
-              </div>
-              <div className="kb-storage-track" aria-hidden>
-                <div
-                  className="kb-storage-fill"
-                  style={{ width: `${Math.min(100, Math.round(storage.usageRatio * 100))}%` }}
-                />
-              </div>
-              <p className="kb-storage-hint">
-                {storageWarning
-                  ? storageWarning.text
-                  : 'Quota is the total for all your uploaded files combined, not a single-file limit.'}
-              </p>
-            </div>
-          ) : null}
+          {canEditContent ? renderStorageBar() : null}
 
           {error && !uploadOpen && <p className="error-text">{error}</p>}
 

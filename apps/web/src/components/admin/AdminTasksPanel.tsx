@@ -202,7 +202,7 @@ export default function AdminTasksPanel() {
             <label className="admin-field">
               <Search size={14} />
               <input
-                placeholder="Search dataset"
+                placeholder="Search knowledge base"
                 value={datasetName}
                 onChange={(e) => setDatasetName(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && onSearch()}
@@ -298,7 +298,7 @@ export default function AdminTasksPanel() {
                   />
                 </th>
                 <th>Document</th>
-                <th>Dataset</th>
+                <th>Knowledge Base</th>
                 <th>Size</th>
                 <th>Progress</th>
                 <th>Status</th>
