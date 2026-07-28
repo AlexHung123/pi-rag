@@ -4,6 +4,7 @@ import {
   DocumentSourceType,
   TranscriptionJob,
 } from '@prisma/client';
+import * as fs from 'fs';
 import { PrismaService } from '../prisma/prisma.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
@@ -16,9 +17,21 @@ import { isAudioUpload, extensionOf } from '../transcription/audio-formats';
 import { MediaStorage } from '../transcription/media-storage';
 import { SttClient } from '../transcription/stt.client';
 import { TranscriptionService } from '../transcription/transcription.service';
+import { probeDurationSeconds } from '../transcription/duration-probe';
 
 type DocWithJob = Document & {
   transcriptionJobs?: TranscriptionJob[];
+};
+
+/** Upload payload: disk path preferred (P1); buffer supported for tests/admin. */
+export type UploadFileInput = {
+  originalname: string;
+  size: number;
+  mimetype?: string;
+  /** Absolute path from multer diskStorage */
+  path?: string;
+  /** In-memory bytes (legacy / tests) */
+  buffer?: Buffer;
 };
 
 @Injectable()
@@ -127,75 +140,96 @@ export class DocumentsService {
     return Number(process.env.MAX_AUDIO_UPLOAD_BYTES || 524288000);
   }
 
+  private resolveUploadBytes(file: UploadFileInput): {
+    size: number;
+    hasPayload: boolean;
+  } {
+    if (file.path && fs.existsSync(file.path)) {
+      const st = fs.statSync(file.path);
+      return { size: st.size || file.size || 0, hasPayload: st.size > 0 };
+    }
+    if (file.buffer?.length) {
+      return { size: file.buffer.length, hasPayload: true };
+    }
+    return { size: file.size || 0, hasPayload: false };
+  }
+
   async upload(
     userId: string,
     knowledgeBaseId: string,
-    file: {
-      originalname: string;
-      buffer: Buffer;
-      size: number;
-      mimetype?: string;
-    },
+    file: UploadFileInput,
     opts?: { language?: string | null },
   ) {
     const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
-    if (!file?.buffer?.length) throw badRequest('file is required');
+    const { size, hasPayload } = this.resolveUploadBytes(file);
+    if (!hasPayload) {
+      this.media.removeTempFile(file.path);
+      throw badRequest('file is required');
+    }
 
     const audio = isAudioUpload(file.originalname, file.mimetype);
     if (audio) {
-      return this.uploadAudio(userId, kb, file, opts);
+      return this.uploadAudio(userId, kb, { ...file, size }, opts);
     }
 
     const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
-    if (file.size > maxBytes) throw badRequest(`file exceeds max size ${maxBytes}`);
+    if (size > maxBytes) {
+      this.media.removeTempFile(file.path);
+      throw badRequest(`file exceeds max size ${maxBytes}`);
+    }
 
     // Lock + re-check quota around remote upload + insert (TOCTOU).
-    return withUserStorageLock(this.prisma, userId, async () => {
-      await assertWithinStorageQuota(this.prisma, userId, file.size);
+    try {
+      return await withUserStorageLock(this.prisma, userId, async () => {
+        await assertWithinStorageQuota(this.prisma, userId, size);
 
-      const safeName =
-        file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
-      const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [
-        {
-          filename: safeName,
-          buffer: file.buffer,
-          mimetype: file.mimetype,
-        },
-      ]);
-      const rfDoc = uploaded[0];
-      if (!rfDoc?.id) throw badRequest('RAGFlow upload failed');
+        const safeName =
+          file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
+        // Small docs: load into memory once for RAGFlow multipart
+        const buffer =
+          file.buffer?.length
+            ? file.buffer
+            : fs.readFileSync(file.path!);
+        const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [
+          {
+            filename: safeName,
+            buffer,
+            mimetype: file.mimetype,
+          },
+        ]);
+        const rfDoc = uploaded[0];
+        if (!rfDoc?.id) throw badRequest('RAGFlow upload failed');
 
-      const doc = await this.prisma.document.create({
-        data: {
-          knowledgeBaseId: kb.id,
-          ownerUserId: userId,
-          ragflowDocumentId: rfDoc.id,
-          name: rfDoc.name || safeName,
-          sizeBytes: BigInt(rfDoc.size ?? file.size),
-          status: 'unstart',
-          progress: 0,
-          sourceType: 'file',
-        },
+        const doc = await this.prisma.document.create({
+          data: {
+            knowledgeBaseId: kb.id,
+            ownerUserId: userId,
+            ragflowDocumentId: rfDoc.id,
+            name: rfDoc.name || safeName,
+            sizeBytes: BigInt(rfDoc.size ?? size),
+            status: 'unstart',
+            progress: 0,
+            sourceType: 'file',
+          },
+        });
+        return this.serialize(doc, null);
       });
-      return this.serialize(doc, null);
-    });
+    } finally {
+      this.media.removeTempFile(file.path);
+    }
   }
 
   private async uploadAudio(
     userId: string,
     kb: { id: string; ragflowDatasetId: string },
-    file: {
-      originalname: string;
-      buffer: Buffer;
-      size: number;
-      mimetype?: string;
-    },
+    file: UploadFileInput,
     opts?: { language?: string | null },
   ) {
     this.stt.assertConfigured();
 
     const limit = this.maxAudioBytes();
     if (file.size > limit) {
+      this.media.removeTempFile(file.path);
       throw badRequest(`audio file exceeds max size ${limit} bytes`);
     }
 
@@ -228,15 +262,36 @@ export class DocumentsService {
       });
 
       try {
-        const { relativePath } = this.media.writeSourceAudio(
-          userId,
-          doc.id,
-          ext,
-          file.buffer,
-        );
+        let relativePath: string;
+        let absolutePath: string;
+        if (file.path && fs.existsSync(file.path)) {
+          // P1: rename/move from multer temp into final media path (no second full RAM copy)
+          ({ relativePath, absolutePath } = this.media.placeSourceFromTemp(
+            userId,
+            doc.id,
+            ext,
+            file.path,
+          ));
+        } else if (file.buffer?.length) {
+          ({ relativePath, absolutePath } = this.media.writeSourceAudio(
+            userId,
+            doc.id,
+            ext,
+            file.buffer,
+          ));
+        } else {
+          throw badRequest('file is required');
+        }
+
+        // Best-effort early duration (non-blocking for queue; failure is fine)
+        const duration = await probeDurationSeconds(absolutePath);
+
         const updated = await this.prisma.document.update({
           where: { id: doc.id },
-          data: { mediaPath: relativePath },
+          data: {
+            mediaPath: relativePath,
+            ...(duration != null ? { durationSeconds: duration } : {}),
+          },
         });
         const job = await this.transcription.enqueueForDocument(updated, {
           language,
@@ -246,7 +301,8 @@ export class DocumentsService {
         });
         return this.serialize(finalDoc, job);
       } catch (e) {
-        // Cleanup on failure
+        // Cleanup on failure (temp may already be moved)
+        this.media.removeTempFile(file.path);
         this.media.removeDocDir(userId, doc.id);
         await this.prisma.document.delete({ where: { id: doc.id } }).catch(() => null);
         throw e;

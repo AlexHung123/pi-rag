@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 
 @Injectable()
 export class MediaStorage {
@@ -12,6 +13,13 @@ export class MediaStorage {
     return path.isAbsolute(configured)
       ? configured
       : path.resolve(process.cwd(), configured);
+  }
+
+  /** Incoming multer disk dir (under MEDIA_ROOT). */
+  incomingDir(): string {
+    const abs = path.join(this.root(), '_incoming');
+    fs.mkdirSync(abs, { recursive: true });
+    return abs;
   }
 
   /** Resolve a relative path under MEDIA_ROOT; rejects absolute / traversal. */
@@ -72,6 +80,23 @@ export class MediaStorage {
     return { relativePath, absolutePath };
   }
 
+  /**
+   * Move an uploaded temp file into the document's source path (no full buffer copy).
+   * Falls back to copy+unlink when rename crosses devices.
+   */
+  placeSourceFromTemp(
+    userId: string,
+    documentId: string,
+    ext: string,
+    tempAbsolutePath: string,
+  ): { relativePath: string; absolutePath: string } {
+    this.ensureDocDir(userId, documentId);
+    const relativePath = this.sourceRelativePath(userId, documentId, ext);
+    const absolutePath = this.resolveSafe(relativePath);
+    this.moveFile(tempAbsolutePath, absolutePath);
+    return { relativePath, absolutePath };
+  }
+
   writeTranscript(
     userId: string,
     documentId: string,
@@ -94,6 +119,14 @@ export class MediaStorage {
     }
   }
 
+  hasTranscript(userId: string, documentId: string): boolean {
+    try {
+      return fs.existsSync(this.transcriptPath(userId, documentId));
+    } catch {
+      return false;
+    }
+  }
+
   absoluteFromRelative(relativePath: string): string {
     return this.resolveSafe(relativePath);
   }
@@ -103,6 +136,18 @@ export class MediaStorage {
       return fs.existsSync(this.resolveSafe(relativePath));
     } catch {
       return false;
+    }
+  }
+
+  /** Best-effort delete of a single temp upload file. */
+  removeTempFile(absolutePath: string | undefined | null): void {
+    if (!absolutePath) return;
+    try {
+      if (fs.existsSync(absolutePath)) fs.unlinkSync(absolutePath);
+    } catch (e) {
+      this.logger.warn(
+        `removeTempFile failed: ${e instanceof Error ? e.message : String(e)}`,
+      );
     }
   }
 
@@ -116,6 +161,25 @@ export class MediaStorage {
       this.logger.warn(
         `removeDocDir failed for ${documentId}: ${e instanceof Error ? e.message : String(e)}`,
       );
+    }
+  }
+
+  /** Generate a unique incoming filename for multer. */
+  makeIncomingFilename(originalname: string): string {
+    const ext = path.extname(originalname || '').slice(0, 20).replace(/[^\w.]/g, '');
+    return `${randomUUID()}${ext || '.bin'}`;
+  }
+
+  private moveFile(from: string, to: string) {
+    try {
+      fs.renameSync(from, to);
+    } catch {
+      fs.copyFileSync(from, to);
+      try {
+        fs.unlinkSync(from);
+      } catch {
+        // ignore
+      }
     }
   }
 

@@ -148,6 +148,35 @@ export type AdminTaskStats = {
   cancel: number;
 };
 
+export type AdminTranscriptionJob = {
+  id: string;
+  documentId: string;
+  documentName: string | null;
+  knowledgeBaseId: string;
+  ownerUserId: string;
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+  stage: string;
+  progress: number;
+  progressMsg: string | null;
+  language: string | null;
+  attempts: number;
+  maxAttempts: number;
+  errorMessage: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type AdminTranscriptionJobStats = {
+  total: number;
+  queued: number;
+  running: number;
+  done: number;
+  failed: number;
+  cancelled: number;
+};
+
 export type AdminUser = {
   id: string;
   username: string;
@@ -549,6 +578,16 @@ export const adminApi = {
       '/api/admin/tasks/retry-failed',
       { method: 'POST', body: JSON.stringify({}) },
     ),
+  listTranscriptionJobs: (params?: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+  }) =>
+    apiFetch<Paged<AdminTranscriptionJob>>(
+      `/api/admin/transcription-jobs${qs(params || {})}`,
+    ),
+  transcriptionJobStats: () =>
+    apiFetch<AdminTranscriptionJobStats>('/api/admin/transcription-jobs/stats'),
   listUsers: (params?: {
     page?: number;
     pageSize?: number;

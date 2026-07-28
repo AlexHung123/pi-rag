@@ -175,31 +175,31 @@
 
 ## Phase P1 — Hardening
 
-**Status:** Not started  
+**Status:** Implemented  
 **Depends on:** P0 exit criteria
 
 ### Task P1.1: Smart retry
 
-- [ ] If `transcript.md` exists and failure was post-STT, retry from upload/parse only
+- [x] If `transcript.md` exists and failure was post-STT, retry from upload/parse only
 
 ### Task P1.2: Duration probe
 
-- [ ] Optional ffprobe/music-metadata at enqueue or first worker stage; set `durationSeconds` early
+- [x] Optional ffprobe/music-metadata at enqueue or first worker stage; set `durationSeconds` early
 
 ### Task P1.3: Upload memory
 
-- [ ] Switch audio uploads to multer `diskStorage` into final media path (or temp then rename)
-- [ ] Keep small text/pdf path as today if desired
+- [x] Switch audio uploads to multer `diskStorage` into final media path (or temp then rename)
+- [x] Keep small text/pdf path as today if desired
 
 ### Task P1.4: Observability
 
-- [ ] Structured logs with `jobId` / `documentId` / stage / attempt (no full transcript at info)
-- [ ] Optional admin list of STT jobs (only if cheap to add beside existing admin tasks)
+- [x] Structured logs with `jobId` / `documentId` / stage / attempt (no full transcript at info)
+- [x] Optional admin list of STT jobs (only if cheap to add beside existing admin tasks)
 
 ### Task P1.5: Verify
 
-- [ ] Large-file smoke (~100MB+) without API OOM
-- [ ] Stale job recovery after killing API mid-job
+- [x] Large-file smoke (~100MB+) without API OOM
+- [x] Stale job recovery after killing API mid-job
 
 ---
 

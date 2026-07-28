@@ -4,6 +4,7 @@ import * as bcrypt from 'bcrypt';
 import { PrismaService } from '../prisma/prisma.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { AgentSessionPool } from '../agent/agent-session.pool';
+import { TranscriptionService } from '../transcription/transcription.service';
 import { badRequest, notFound } from '../common/errors';
 import {
   assertWithinStorageQuota,
@@ -26,6 +27,7 @@ export class AdminService {
     private readonly prisma: PrismaService,
     private readonly ragflow: RagflowService,
     private readonly agentPool: AgentSessionPool,
+    private readonly transcription: TranscriptionService,
   ) {}
 
   // ── Datasets (knowledge bases) ──────────────────────────────────────────
@@ -506,6 +508,20 @@ export class AdminService {
       count += res.count;
     }
     return { ok: true, retried: count };
+  }
+
+  // ── Transcription jobs (STT queue) ─────────────────────────────────────
+
+  listTranscriptionJobs(query: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+  }) {
+    return this.transcription.listJobsForAdmin(query);
+  }
+
+  transcriptionJobStats() {
+    return this.transcription.jobStatsForAdmin();
   }
 
   // ── Users ───────────────────────────────────────────────────────────────

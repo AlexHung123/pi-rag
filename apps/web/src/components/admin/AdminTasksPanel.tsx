@@ -13,6 +13,8 @@ import {
   adminApi,
   type AdminDocument,
   type AdminTaskStats,
+  type AdminTranscriptionJob,
+  type AdminTranscriptionJobStats,
 } from '../../services/api';
 import {
   AdminPagination,
@@ -59,11 +61,18 @@ export default function AdminTasksPanel() {
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // STT jobs (P1 observability)
+  const [sttJobs, setSttJobs] = useState<AdminTranscriptionJob[]>([]);
+  const [sttStats, setSttStats] = useState<AdminTranscriptionJobStats | null>(null);
+  const [sttTotal, setSttTotal] = useState(0);
+  const [sttPage, setSttPage] = useState(1);
+  const [sttStatus, setSttStatus] = useState('');
+
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const [listRes, statsRes] = await Promise.all([
+      const [listRes, statsRes, sttList, sttStatsRes] = await Promise.all([
         adminApi.listTasks({
           page,
           pageSize,
@@ -73,16 +82,25 @@ export default function AdminTasksPanel() {
           status: applied.status || undefined,
         }),
         adminApi.taskStats(),
+        adminApi.listTranscriptionJobs({
+          page: sttPage,
+          pageSize: 10,
+          status: sttStatus || undefined,
+        }),
+        adminApi.transcriptionJobStats(),
       ]);
       setItems(listRes.items);
       setTotal(listRes.total);
       setStats(statsRes);
+      setSttJobs(sttList.items);
+      setSttTotal(sttList.total);
+      setSttStats(sttStatsRes);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setLoading(false);
     }
-  }, [page, pageSize, applied]);
+  }, [page, pageSize, applied, sttPage, sttStatus]);
 
   useEffect(() => {
     void load();
@@ -93,13 +111,14 @@ export default function AdminTasksPanel() {
       clearInterval(pollRef.current);
       pollRef.current = null;
     }
-    if (items.some((t) => t.status === 'running')) {
+    const sttActive = sttJobs.some((j) => j.status === 'queued' || j.status === 'running');
+    if (items.some((t) => t.status === 'running') || sttActive) {
       pollRef.current = setInterval(() => void load(), 3000);
     }
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [items, load]);
+  }, [items, sttJobs, load]);
 
   const onSearch = () => {
     setPage(1);
@@ -368,6 +387,123 @@ export default function AdminTasksPanel() {
           onChange={(p, ps) => {
             setPage(p);
             setPageSize(ps);
+          }}
+        />
+      </div>
+
+      {/* STT transcription queue (P1) */}
+      <header className="admin-page-header" style={{ marginTop: 28 }}>
+        <h2 className="admin-page-title" style={{ fontSize: '1.15rem' }}>
+          Audio transcription jobs
+        </h2>
+        <p className="admin-page-hint">
+          Local STT queue (queued → running → done). Parse status is tracked above after transcript ingest.
+        </p>
+      </header>
+
+      {sttStats ? (
+        <div className="admin-stats-row">
+          <div className="admin-stat-card">
+            <span className="admin-stat-label">STT total</span>
+            <span className="admin-stat-value info">{sttStats.total}</span>
+          </div>
+          <div className="admin-stat-card">
+            <span className="admin-stat-label">Queued</span>
+            <span className="admin-stat-value muted">{sttStats.queued}</span>
+          </div>
+          <div className="admin-stat-card">
+            <span className="admin-stat-label">Running</span>
+            <span className="admin-stat-value info">{sttStats.running}</span>
+          </div>
+          <div className="admin-stat-card">
+            <span className="admin-stat-label">Done</span>
+            <span className="admin-stat-value success">{sttStats.done}</span>
+          </div>
+          <div className="admin-stat-card">
+            <span className="admin-stat-label">Failed</span>
+            <span className="admin-stat-value danger">{sttStats.failed}</span>
+          </div>
+          <div className="admin-stat-card">
+            <span className="admin-stat-label">Cancelled</span>
+            <span className="admin-stat-value warning">{sttStats.cancelled}</span>
+          </div>
+        </div>
+      ) : null}
+
+      <div className="admin-card">
+        <div className="admin-toolbar">
+          <div className="admin-toolbar-left">
+            <select
+              className="admin-select"
+              value={sttStatus}
+              onChange={(e) => {
+                setSttStatus(e.target.value);
+                setSttPage(1);
+              }}
+            >
+              <option value="">All STT statuses</option>
+              <option value="queued">Queued</option>
+              <option value="running">Running</option>
+              <option value="done">Done</option>
+              <option value="failed">Failed</option>
+              <option value="cancelled">Cancelled</option>
+            </select>
+          </div>
+        </div>
+        <div className="admin-table-wrap">
+          <table className="admin-table">
+            <thead>
+              <tr>
+                <th>Document</th>
+                <th>Status</th>
+                <th>Stage</th>
+                <th>Progress</th>
+                <th>Attempts</th>
+                <th>Message</th>
+                <th>Updated</th>
+              </tr>
+            </thead>
+            <tbody>
+              {sttJobs.length === 0 ? (
+                <tr>
+                  <td colSpan={7} className="admin-empty">
+                    No transcription jobs yet
+                  </td>
+                </tr>
+              ) : (
+                sttJobs.map((j) => (
+                  <tr key={j.id}>
+                    <td className="admin-cell-name" title={j.documentName || j.documentId}>
+                      {j.documentName || j.documentId.slice(0, 8)}
+                    </td>
+                    <td>
+                      <span className={`badge ${j.status === 'failed' ? 'fail' : j.status === 'running' ? 'running' : j.status === 'done' ? 'done' : 'unstart'}`}>
+                        {j.status}
+                      </span>
+                    </td>
+                    <td className="admin-cell-muted">{j.stage}</td>
+                    <td>
+                      <ProgressBar progress={j.progress} status={j.status === 'failed' ? 'fail' : j.status === 'done' ? 'done' : 'running'} />
+                    </td>
+                    <td className="admin-cell-mono">
+                      {j.attempts}/{j.maxAttempts}
+                    </td>
+                    <td className="admin-cell-muted" title={j.errorMessage || j.progressMsg || ''}>
+                      {j.errorMessage || j.progressMsg || '—'}
+                    </td>
+                    <td className="admin-cell-mono">{formatDateTime(j.updatedAt)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
+        <AdminPagination
+          page={sttPage}
+          pageSize={10}
+          total={sttTotal}
+          onChange={(p) => {
+            setSttPage(p);
           }}
         />
       </div>

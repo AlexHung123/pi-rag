@@ -164,6 +164,26 @@ export class AdminController {
     return this.admin.retryFailedTasks();
   }
 
+  // ── Transcription (STT) jobs ────────────────────────────────────────────
+
+  @Get('transcription-jobs')
+  listTranscriptionJobs(
+    @Query('page') page?: string,
+    @Query('pageSize') pageSize?: string,
+    @Query('status') status?: string,
+  ) {
+    return this.admin.listTranscriptionJobs({
+      page: page ? Number(page) : undefined,
+      pageSize: pageSize ? Number(pageSize) : undefined,
+      status,
+    });
+  }
+
+  @Get('transcription-jobs/stats')
+  transcriptionJobStats() {
+    return this.admin.transcriptionJobStats();
+  }
+
   // ── Users ───────────────────────────────────────────────────────────────
 
   @Get('users')

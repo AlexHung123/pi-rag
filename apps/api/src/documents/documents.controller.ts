@@ -12,18 +12,36 @@ import {
   UseInterceptors,
 } from '@nestjs/common';
 import { FileInterceptor } from '@nestjs/platform-express';
-import { memoryStorage } from 'multer';
+import { diskStorage } from 'multer';
 import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthPrincipal } from '../auth/auth.types';
 import { DocumentsService } from './documents.service';
 import { badRequest } from '../common/errors';
+import { MediaStorage } from '../transcription/media-storage';
 
 /** Max of document + audio caps so multer does not reject large audio early. */
 function multerMaxBytes(): number {
   const docMax = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
   const audioMax = Number(process.env.MAX_AUDIO_UPLOAD_BYTES || 524288000);
   return Math.max(docMax, audioMax);
+}
+
+function uploadDiskStorage() {
+  // Resolve MEDIA_ROOT the same way MediaStorage does (lazy at request time).
+  const media = new MediaStorage();
+  return diskStorage({
+    destination: (_req, _file, cb) => {
+      try {
+        cb(null, media.incomingDir());
+      } catch (e) {
+        cb(e as Error, '');
+      }
+    },
+    filename: (_req, file, cb) => {
+      cb(null, media.makeIncomingFilename(file.originalname || 'upload.bin'));
+    },
+  });
 }
 
 @Controller('api/knowledge-bases/:kbId/documents')
@@ -39,7 +57,7 @@ export class DocumentsController {
   @Post()
   @UseInterceptors(
     FileInterceptor('file', {
-      storage: memoryStorage(),
+      storage: uploadDiskStorage(),
       limits: { fileSize: multerMaxBytes() },
     }),
   )
@@ -50,15 +68,17 @@ export class DocumentsController {
     @Body('language') language?: string,
   ) {
     if (!file) throw badRequest('file is required');
-    // Multer already enforced size; service re-checks per type
+    // Disk storage: path is set; buffer may be empty
     return this.documents.upload(
       user.userId,
       kbId,
       {
         originalname: file.originalname,
-        buffer: file.buffer,
         size: file.size,
         mimetype: file.mimetype,
+        path: file.path,
+        // memory fallback if someone reconfigures storage
+        buffer: file.buffer,
       },
       { language: language?.trim() || null },
     );

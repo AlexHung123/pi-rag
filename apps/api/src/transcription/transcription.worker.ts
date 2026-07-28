@@ -9,6 +9,8 @@ import {
   buildTranscriptMarkdown,
   transcriptRagflowFilename,
 } from './transcript-format';
+import { probeDurationSeconds } from './duration-probe';
+import { transcriptionLogFields } from './transcription-log';
 
 @Injectable()
 export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
@@ -27,18 +29,33 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
 
   onModuleInit() {
     void this.recoverStaleJobs().catch((e) =>
-      this.logger.warn(`stale recovery: ${e instanceof Error ? e.message : e}`),
+      this.logger.warn(
+        transcriptionLogFields({
+          event: 'stale_recovery_error',
+          error: e instanceof Error ? e.message : String(e),
+        }),
+      ),
     );
     const interval = Math.max(500, Number(process.env.STT_POLL_INTERVAL_MS || 2000));
     this.timer = setInterval(() => {
       void this.tick().catch((e) =>
-        this.logger.error(`tick error: ${e instanceof Error ? e.message : e}`),
+        this.logger.error(
+          transcriptionLogFields({
+            event: 'tick_error',
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        ),
       );
     }, interval);
     // unref so tests / short-lived processes can exit
     if (typeof this.timer.unref === 'function') this.timer.unref();
     this.logger.log(
-      `Transcription worker started (instance=${this.instanceId}, poll=${interval}ms, concurrency=${this.concurrency()})`,
+      transcriptionLogFields({
+        event: 'worker_start',
+        instance: this.instanceId,
+        pollMs: interval,
+        concurrency: this.concurrency(),
+      }),
     );
   }
 
@@ -74,6 +91,14 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
     for (const job of stale) {
       if (job.attempts >= job.maxAttempts) {
         await this.failJob(job.id, job.documentId, 'Stale running job exceeded max attempts');
+        this.logger.warn(
+          transcriptionLogFields({
+            event: 'stale_fail',
+            jobId: job.id,
+            documentId: job.documentId,
+            attempt: job.attempts,
+          }),
+        );
       } else {
         await this.prisma.transcriptionJob.update({
           where: { id: job.id },
@@ -93,7 +118,14 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
             errorMessage: null,
           },
         });
-        this.logger.warn(`Requeued stale job ${job.id}`);
+        this.logger.warn(
+          transcriptionLogFields({
+            event: 'stale_requeue',
+            jobId: job.id,
+            documentId: job.documentId,
+            attempt: job.attempts,
+          }),
+        );
       }
     }
   }
@@ -110,7 +142,12 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
       void this.processJob(job)
         .catch((e) =>
           this.logger.error(
-            `job ${job.id} unhandled: ${e instanceof Error ? e.message : e}`,
+            transcriptionLogFields({
+              event: 'job_unhandled',
+              jobId: job.id,
+              documentId: job.documentId,
+              error: e instanceof Error ? e.message : String(e),
+            }),
           ),
         )
         .finally(() => {
@@ -141,9 +178,9 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
             where: { id: row.id },
             data: {
               status: 'running',
-              stage: 'transcribing',
-              progress: 0.05,
-              progressMsg: 'Transcribing…',
+              stage: 'probing',
+              progress: 0.02,
+              progressMsg: 'Starting…',
               lockedBy: this.instanceId,
               startedAt: new Date(),
               attempts: { increment: 1 },
@@ -154,8 +191,8 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
             where: { id: job.documentId },
             data: {
               status: 'running',
-              progress: 0.05,
-              progressMsg: 'Transcribing…',
+              progress: 0.02,
+              progressMsg: 'Starting…',
               errorMessage: null,
             },
           });
@@ -164,9 +201,11 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
         return claimed;
       });
     } catch (e) {
-      // e.g. table not migrated yet in tests without DB
       this.logger.debug?.(
-        `claimJobs failed: ${e instanceof Error ? e.message : e}`,
+        transcriptionLogFields({
+          event: 'claim_failed',
+          error: e instanceof Error ? e.message : String(e),
+        }),
       );
       return [];
     }
@@ -181,7 +220,12 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
   }
 
   private async processJob(job: TranscriptionJob) {
-    const logCtx = `job=${job.id} doc=${job.documentId}`;
+    const started = Date.now();
+    const baseLog = {
+      jobId: job.id,
+      documentId: job.documentId,
+      attempt: job.attempts,
+    };
     try {
       const doc = await this.prisma.document.findUnique({
         where: { id: job.documentId },
@@ -197,6 +241,9 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
             lockedBy: null,
           },
         });
+        this.logger.log(
+          transcriptionLogFields({ ...baseLog, event: 'job_doc_missing' }),
+        );
         return;
       }
 
@@ -207,74 +254,163 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
       }
       const audioAbs = this.media.absoluteFromRelative(doc.mediaPath);
 
-      // ── Stage: transcribing ──
+      // ── Stage: probing (optional duration) ──
       await this.setStage(job.id, doc.id, {
-        stage: 'transcribing',
-        progress: 0.1,
-        progressMsg: 'Transcribing…',
+        stage: 'probing',
+        progress: 0.03,
+        progressMsg: 'Probing audio…',
       });
+      this.logger.log(
+        transcriptionLogFields({ ...baseLog, event: 'stage', stage: 'probing' }),
+      );
 
-      const sttResult = await this.stt.transcribeFile(audioAbs, {
-        language: job.language || doc.transcriptLanguage,
-      });
+      let durationSeconds = doc.durationSeconds ?? null;
+      if (durationSeconds == null) {
+        durationSeconds = await probeDurationSeconds(audioAbs);
+        if (durationSeconds != null) {
+          await this.prisma.document.update({
+            where: { id: doc.id },
+            data: { durationSeconds },
+          });
+        }
+      }
 
       if (await this.isCancelled(job.id)) return;
 
-      // ── Stage: writing ──
-      await this.setStage(job.id, doc.id, {
-        stage: 'writing',
-        progress: 0.7,
-        progressMsg: 'Writing transcript…',
-      });
+      // ── Smart skip: reuse existing transcript.md (post-STT failure recovery) ──
+      let markdown = this.media.readTranscriptIfExists(doc.ownerUserId, doc.id);
+      const skippedStt = Boolean(markdown?.trim());
 
-      const title = doc.name.replace(/\.[^.]+$/, '') || doc.name;
-      const markdown = buildTranscriptMarkdown({
-        title,
-        originalFilename: doc.name,
-        language: sttResult.language || job.language,
-        durationSeconds: sttResult.duration,
-        segments: sttResult.segments,
-      });
-      this.media.writeTranscript(doc.ownerUserId, doc.id, markdown);
+      if (skippedStt) {
+        this.logger.log(
+          transcriptionLogFields({
+            ...baseLog,
+            event: 'skip_stt',
+            stage: 'writing',
+            reason: 'transcript_exists',
+          }),
+        );
+        await this.setStage(job.id, doc.id, {
+          stage: 'writing',
+          progress: 0.7,
+          progressMsg: 'Reusing existing transcript…',
+        });
+      } else {
+        // ── Stage: transcribing ──
+        await this.setStage(job.id, doc.id, {
+          stage: 'transcribing',
+          progress: 0.1,
+          progressMsg: 'Transcribing…',
+        });
+        this.logger.log(
+          transcriptionLogFields({
+            ...baseLog,
+            event: 'stage',
+            stage: 'transcribing',
+          }),
+        );
 
-      await this.prisma.document.update({
-        where: { id: doc.id },
-        data: {
-          durationSeconds: sttResult.duration ?? doc.durationSeconds,
-          transcriptLanguage: sttResult.language || doc.transcriptLanguage || job.language,
-        },
-      });
+        const sttResult = await this.stt.transcribeFile(audioAbs, {
+          language: job.language || doc.transcriptLanguage,
+        });
+
+        if (await this.isCancelled(job.id)) return;
+
+        // ── Stage: writing ──
+        await this.setStage(job.id, doc.id, {
+          stage: 'writing',
+          progress: 0.7,
+          progressMsg: 'Writing transcript…',
+        });
+        this.logger.log(
+          transcriptionLogFields({
+            ...baseLog,
+            event: 'stage',
+            stage: 'writing',
+            segments: sttResult.segments.length,
+          }),
+        );
+
+        const title = doc.name.replace(/\.[^.]+$/, '') || doc.name;
+        markdown = buildTranscriptMarkdown({
+          title,
+          originalFilename: doc.name,
+          language: sttResult.language || job.language,
+          durationSeconds: sttResult.duration ?? durationSeconds,
+          segments: sttResult.segments,
+        });
+        this.media.writeTranscript(doc.ownerUserId, doc.id, markdown);
+
+        await this.prisma.document.update({
+          where: { id: doc.id },
+          data: {
+            durationSeconds:
+              sttResult.duration ?? durationSeconds ?? doc.durationSeconds,
+            transcriptLanguage:
+              sttResult.language || doc.transcriptLanguage || job.language,
+          },
+        });
+      }
+
+      if (!markdown?.trim()) {
+        throw new Error('empty transcript');
+      }
 
       if (await this.isCancelled(job.id)) return;
 
-      // ── Stage: uploading ──
-      await this.setStage(job.id, doc.id, {
-        stage: 'uploading',
-        progress: 0.8,
-        progressMsg: 'Uploading transcript…',
-      });
+      // If already in RAGFlow with id, only re-trigger parse if needed
+      let rfDocId = doc.ragflowDocumentId;
 
-      const rfName = transcriptRagflowFilename(doc.name);
-      const buffer = Buffer.from(markdown, 'utf8');
-      const uploaded = await this.ragflow.uploadDocuments(doc.knowledgeBase.ragflowDatasetId, [
-        {
-          filename: rfName,
-          buffer,
-          mimetype: 'text/markdown',
-        },
-      ]);
-      const rfDoc = uploaded[0];
-      if (!rfDoc?.id) throw new Error('RAGFlow upload failed for transcript');
+      if (!rfDocId) {
+        // ── Stage: uploading ──
+        await this.setStage(job.id, doc.id, {
+          stage: 'uploading',
+          progress: 0.8,
+          progressMsg: 'Uploading transcript…',
+        });
+        this.logger.log(
+          transcriptionLogFields({
+            ...baseLog,
+            event: 'stage',
+            stage: 'uploading',
+            skipStt: skippedStt,
+          }),
+        );
 
-      await this.prisma.document.update({
-        where: { id: doc.id },
-        data: {
-          ragflowDocumentId: rfDoc.id,
-          // Keep portal name as original audio base title
-          progress: 0.85,
-          progressMsg: 'Transcript uploaded',
-        },
-      });
+        const rfName = transcriptRagflowFilename(doc.name);
+        const buffer = Buffer.from(markdown, 'utf8');
+        const uploaded = await this.ragflow.uploadDocuments(
+          doc.knowledgeBase.ragflowDatasetId,
+          [
+            {
+              filename: rfName,
+              buffer,
+              mimetype: 'text/markdown',
+            },
+          ],
+        );
+        const rfDoc = uploaded[0];
+        if (!rfDoc?.id) throw new Error('RAGFlow upload failed for transcript');
+        rfDocId = rfDoc.id;
+
+        await this.prisma.document.update({
+          where: { id: doc.id },
+          data: {
+            ragflowDocumentId: rfDocId,
+            progress: 0.85,
+            progressMsg: 'Transcript uploaded',
+          },
+        });
+      } else {
+        this.logger.log(
+          transcriptionLogFields({
+            ...baseLog,
+            event: 'skip_upload',
+            stage: 'parsing',
+            reason: 'ragflow_id_present',
+          }),
+        );
+      }
 
       if (await this.isCancelled(job.id)) return;
 
@@ -285,7 +421,16 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
           progress: 0.9,
           progressMsg: 'Parse started',
         });
-        await this.ragflow.parseDocuments(doc.knowledgeBase.ragflowDatasetId, [rfDoc.id]);
+        this.logger.log(
+          transcriptionLogFields({
+            ...baseLog,
+            event: 'stage',
+            stage: 'parsing',
+          }),
+        );
+        await this.ragflow.parseDocuments(doc.knowledgeBase.ragflowDatasetId, [
+          rfDocId,
+        ]);
         await this.prisma.document.update({
           where: { id: doc.id },
           data: {
@@ -313,23 +458,42 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
           status: 'done',
           stage: 'done',
           progress: 1,
-          progressMsg: this.autoParse() ? 'Transcription done; parse running' : 'Transcription done',
+          progressMsg: this.autoParse()
+            ? 'Transcription done; parse running'
+            : 'Transcription done',
           finishedAt: new Date(),
           lockedBy: null,
           sttModel: (process.env.STT_MODEL || '').trim() || null,
         },
       });
 
-      this.logger.log(`${logCtx} done`);
+      this.logger.log(
+        transcriptionLogFields({
+          ...baseLog,
+          event: 'job_done',
+          stage: 'done',
+          skipStt: skippedStt,
+          ms: Date.now() - started,
+        }),
+      );
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      this.logger.error(`${logCtx} failed: ${msg}`);
+      this.logger.error(
+        transcriptionLogFields({
+          ...baseLog,
+          event: 'job_failed',
+          error: msg.slice(0, 300),
+          ms: Date.now() - started,
+        }),
+      );
       await this.handleFailure(job, msg);
     }
   }
 
   private async handleFailure(job: TranscriptionJob, message: string) {
-    const fresh = await this.prisma.transcriptionJob.findUnique({ where: { id: job.id } });
+    const fresh = await this.prisma.transcriptionJob.findUnique({
+      where: { id: job.id },
+    });
     if (!fresh || fresh.status === 'cancelled') return;
 
     if (fresh.attempts < fresh.maxAttempts) {
@@ -354,6 +518,15 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
           errorMessage: message.slice(0, 2000),
         },
       });
+      this.logger.warn(
+        transcriptionLogFields({
+          jobId: job.id,
+          documentId: job.documentId,
+          event: 'job_requeue',
+          attempt: fresh.attempts,
+          maxAttempts: fresh.maxAttempts,
+        }),
+      );
       return;
     }
 

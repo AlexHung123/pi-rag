@@ -145,6 +145,12 @@ export class TranscriptionService {
       }
     }
 
+    // P1 smart retry: if transcript already on disk, worker will skip STT
+    const hasTranscript = this.media.hasTranscript(doc.ownerUserId, doc.id);
+    const progressMsg = hasTranscript
+      ? 'Queued for re-ingest (transcript exists)'
+      : 'Queued for transcription (retry)';
+
     const job = await this.prisma.transcriptionJob.create({
       data: {
         documentId: doc.id,
@@ -153,7 +159,7 @@ export class TranscriptionService {
         status: 'queued',
         stage: 'queued',
         progress: 0,
-        progressMsg: 'Queued for transcription (retry)',
+        progressMsg,
         language: doc.transcriptLanguage,
         maxAttempts: this.maxAttempts(),
         attempts: 0,
@@ -165,12 +171,98 @@ export class TranscriptionService {
       data: {
         status: 'unstart',
         progress: 0,
-        progressMsg: 'Queued for transcription (retry)',
+        progressMsg,
         errorMessage: null,
       },
     });
 
+    this.logger.log(
+      `retry enqueued doc=${doc.id} job=${job.id} skipStt=${hasTranscript}`,
+    );
+
     return job;
+  }
+
+  /**
+   * Admin listing of recent transcription jobs (P1 observability).
+   */
+  async listJobsForAdmin(query: {
+    page?: number;
+    pageSize?: number;
+    status?: string;
+    ownerUserId?: string;
+  }) {
+    const page = Math.max(1, query.page || 1);
+    const pageSize = Math.min(100, Math.max(1, query.pageSize || 20));
+    const where: {
+      status?: TranscriptionJobStatus;
+      ownerUserId?: string;
+    } = {};
+    if (query.status?.trim()) {
+      where.status = query.status.trim() as TranscriptionJobStatus;
+    }
+    if (query.ownerUserId?.trim()) {
+      where.ownerUserId = query.ownerUserId.trim();
+    }
+
+    const [total, rows] = await Promise.all([
+      this.prisma.transcriptionJob.count({ where }),
+      this.prisma.transcriptionJob.findMany({
+        where,
+        skip: (page - 1) * pageSize,
+        take: pageSize,
+        orderBy: { createdAt: 'desc' },
+        include: {
+          document: { select: { id: true, name: true, sourceType: true } },
+        },
+      }),
+    ]);
+
+    return {
+      items: rows.map((j) => ({
+        id: j.id,
+        documentId: j.documentId,
+        documentName: j.document?.name || null,
+        knowledgeBaseId: j.knowledgeBaseId,
+        ownerUserId: j.ownerUserId,
+        status: j.status,
+        stage: j.stage,
+        progress: j.progress,
+        progressMsg: j.progressMsg,
+        language: j.language,
+        attempts: j.attempts,
+        maxAttempts: j.maxAttempts,
+        errorMessage: j.errorMessage,
+        startedAt: j.startedAt?.toISOString() ?? null,
+        finishedAt: j.finishedAt?.toISOString() ?? null,
+        createdAt: j.createdAt.toISOString(),
+        updatedAt: j.updatedAt.toISOString(),
+      })),
+      total,
+      page,
+      pageSize,
+    };
+  }
+
+  async jobStatsForAdmin() {
+    const groups = await this.prisma.transcriptionJob.groupBy({
+      by: ['status'],
+      _count: { _all: true },
+    });
+    const counts: Record<string, number> = {
+      total: 0,
+      queued: 0,
+      running: 0,
+      done: 0,
+      failed: 0,
+      cancelled: 0,
+    };
+    for (const g of groups) {
+      const n = g._count._all;
+      counts.total += n;
+      if (g.status in counts) counts[g.status] = n;
+    }
+    return counts;
   }
 
   async latestJob(documentId: string): Promise<TranscriptionJob | null> {

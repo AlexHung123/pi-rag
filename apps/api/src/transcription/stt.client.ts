@@ -55,13 +55,26 @@ export class SttClient {
     }
 
     const filename = path.basename(filePath);
-    const buf = fs.readFileSync(filePath);
+    // Prefer file-backed Blob (Node 19.8+) to avoid an extra full-buffer copy when possible.
+    let fileBlob: Blob;
+    try {
+      const openAsBlob = (fs as unknown as {
+        openAsBlob?: (p: string) => Promise<Blob>;
+      }).openAsBlob;
+      if (typeof openAsBlob === 'function') {
+        fileBlob = await openAsBlob(filePath);
+      } else {
+        fileBlob = new Blob([fs.readFileSync(filePath)], {
+          type: 'application/octet-stream',
+        });
+      }
+    } catch {
+      fileBlob = new Blob([fs.readFileSync(filePath)], {
+        type: 'application/octet-stream',
+      });
+    }
     const form = new FormData();
-    form.append(
-      'file',
-      new Blob([buf], { type: 'application/octet-stream' }),
-      filename,
-    );
+    form.append('file', fileBlob, filename);
     form.append('response_format', 'verbose_json');
     if (model) form.append('model', model);
     if (language) form.append('language', language);
