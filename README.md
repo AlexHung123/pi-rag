@@ -52,6 +52,24 @@ npm run dev:web
 
 Sign in (create the first admin via `ADMIN_USERNAME` / `ADMIN_PASSWORD` on empty DB, or use Admin → Users). Open **Knowledge**, create a KB, upload a `.txt`/`.md` file, **Parse**, **Preview**, then chat.
 
+### Audio upload → transcription → ingest
+
+You can upload meeting recordings (mp3, m4a, wav, …) into a knowledge base. The API stores the audio locally, transcribes it via an **OpenAI-compatible STT service** (or mock), writes a timestamped Markdown transcript, then uploads that transcript to RAGFlow and auto-parses it. Chat/RAG only sees the transcript — never raw audio.
+
+```bash
+# apps/api/.env — local dev without Whisper
+STT_MOCK=true
+RAGFLOW_MOCK=true   # or real RAGFlow
+
+# Real STT (example: local Whisper HTTP on M3 Ultra)
+STT_MOCK=false
+STT_BASE_URL=http://127.0.0.1:8080
+STT_DEFAULT_LANGUAGE=zh
+STT_WORKER_CONCURRENCY=1
+```
+
+If `STT_BASE_URL` is empty and `STT_MOCK` is false, **audio** uploads fail with a clear error; normal document uploads still work. See design: [`docs/superpowers/specs/2026-07-28-audio-transcription-ingest-design.md`](docs/superpowers/specs/2026-07-28-audio-transcription-ingest-design.md).
+
 ## Configuration
 
 See [`.env.example`](.env.example).
@@ -61,6 +79,9 @@ See [`.env.example`](.env.example).
 | `DATABASE_URL` | Postgres connection string |
 | `RAGFLOW_BASE_URL` / `RAGFLOW_API_KEY` | Real RAGFlow instance |
 | `RAGFLOW_MOCK` | `true` = in-memory mock (no RAGFlow). Production requires API key unless this is explicitly `true` |
+| `STT_BASE_URL` / `STT_MOCK` | Local STT HTTP endpoint, or mock for dev |
+| `MEDIA_ROOT` | Local disk root for original audio (default `data/media`) |
+| `MAX_AUDIO_UPLOAD_BYTES` | Audio upload cap (default 500 MiB) |
 | `LLM_DEBUG` | `true` = dump full LLM request payloads to `apps/api/data/llm-debug/` (default off) |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Bootstrap first admin when the users table is empty |
 | `OPENAI_API_KEY` | API key for OpenAI-compatible LLM (optional for local servers) |

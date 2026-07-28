@@ -19,6 +19,13 @@ import { AuthPrincipal } from '../auth/auth.types';
 import { DocumentsService } from './documents.service';
 import { badRequest } from '../common/errors';
 
+/** Max of document + audio caps so multer does not reject large audio early. */
+function multerMaxBytes(): number {
+  const docMax = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
+  const audioMax = Number(process.env.MAX_AUDIO_UPLOAD_BYTES || 524288000);
+  return Math.max(docMax, audioMax);
+}
+
 @Controller('api/knowledge-bases/:kbId/documents')
 @UseGuards(AuthGuard)
 export class DocumentsController {
@@ -33,21 +40,28 @@ export class DocumentsController {
   @UseInterceptors(
     FileInterceptor('file', {
       storage: memoryStorage(),
-      limits: { fileSize: Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024) },
+      limits: { fileSize: multerMaxBytes() },
     }),
   )
   async upload(
     @CurrentUser() user: AuthPrincipal,
     @Param('kbId') kbId: string,
     @UploadedFile() file?: Express.Multer.File,
+    @Body('language') language?: string,
   ) {
     if (!file) throw badRequest('file is required');
-    return this.documents.upload(user.userId, kbId, {
-      originalname: file.originalname,
-      buffer: file.buffer,
-      size: file.size,
-      mimetype: file.mimetype,
-    });
+    // Multer already enforced size; service re-checks per type
+    return this.documents.upload(
+      user.userId,
+      kbId,
+      {
+        originalname: file.originalname,
+        buffer: file.buffer,
+        size: file.size,
+        mimetype: file.mimetype,
+      },
+      { language: language?.trim() || null },
+    );
   }
 
   /** Batch parse — static path must be registered before :docId routes. */
@@ -96,6 +110,24 @@ export class DocumentsController {
     @Param('docId') docId: string,
   ) {
     return this.documents.stopParse(user.userId, kbId, docId);
+  }
+
+  @Post(':docId/cancel-transcription')
+  async cancelTranscription(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+  ) {
+    return this.documents.cancelTranscription(user.userId, kbId, docId);
+  }
+
+  @Post(':docId/retry-transcription')
+  async retryTranscription(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+  ) {
+    return this.documents.retryTranscription(user.userId, kbId, docId);
   }
 
   @Get(':docId/chunks')

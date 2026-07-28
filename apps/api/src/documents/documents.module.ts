@@ -3,9 +3,10 @@ import { DocumentsService } from './documents.service';
 import { DocumentsController } from './documents.controller';
 import { KnowledgeModule } from '../knowledge/knowledge.module';
 import { AuthModule } from '../auth/auth.module';
+import { TranscriptionModule } from '../transcription/transcription.module';
 
 @Module({
-  imports: [AuthModule, KnowledgeModule],
+  imports: [AuthModule, KnowledgeModule, TranscriptionModule],
   providers: [DocumentsService],
   controllers: [DocumentsController],
   exports: [DocumentsService],

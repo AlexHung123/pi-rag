@@ -14,6 +14,12 @@ export type ScopedDocument = {
   name: string;
 };
 
+function hasRagflowId(
+  d: { id: string; ragflowDocumentId: string | null; name: string },
+): d is { id: string; ragflowDocumentId: string; name: string } {
+  return Boolean(d.ragflowDocumentId);
+}
+
 export type ScopedKnowledgeBase = {
   id: string;
   name: string;
@@ -111,11 +117,12 @@ export async function resolveRetrievalScope(
     };
   }
 
+  // Skip audio docs still awaiting transcript (null ragflowDocumentId)
   const accessible: ScopedKnowledgeBase[] = rows.map((k) => ({
     id: k.id,
     name: k.name,
     ragflowDatasetId: k.ragflowDatasetId,
-    documents: k.documents.map((d) => ({
+    documents: k.documents.filter(hasRagflowId).map((d) => ({
       id: d.id,
       ragflowDocumentId: d.ragflowDocumentId,
       name: d.name,
@@ -201,6 +208,14 @@ export async function resolveDocumentScope(
     return {
       ok: false,
       message: 'Document not found or not accessible.',
+    };
+  }
+
+  if (!doc.ragflowDocumentId) {
+    return {
+      ok: false,
+      message:
+        'Document is not indexed yet (e.g. audio still transcribing). Try again after parse completes.',
     };
   }
 

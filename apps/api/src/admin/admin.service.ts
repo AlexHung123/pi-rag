@@ -255,10 +255,14 @@ export class AdminService {
     });
     if (!docs.length) throw notFound('document not found');
 
-    const rfIds = docs.map((d) => d.ragflowDocumentId);
+    const withRf = docs.filter((d) => d.ragflowDocumentId);
+    if (!withRf.length) {
+      return { ok: true, count: 0 };
+    }
+    const rfIds = withRf.map((d) => d.ragflowDocumentId!);
     await this.ragflow.parseDocuments(kb.ragflowDatasetId, rfIds);
     await this.prisma.document.updateMany({
-      where: { id: { in: docs.map((d) => d.id) } },
+      where: { id: { in: withRf.map((d) => d.id) } },
       data: {
         status: 'running',
         progress: 0.05,
@@ -266,7 +270,7 @@ export class AdminService {
         errorMessage: null,
       },
     });
-    return { ok: true, count: docs.length };
+    return { ok: true, count: withRf.length };
   }
 
   async stopParseDocuments(kbId: string, documentIds: string[]) {
@@ -277,20 +281,23 @@ export class AdminService {
     });
     if (!docs.length) throw notFound('document not found');
 
-    await this.ragflow.stopParseDocuments(
-      kb.ragflowDatasetId,
-      docs.map((d) => d.ragflowDocumentId),
-    );
-    await this.prisma.document.updateMany({
-      where: { id: { in: docs.map((d) => d.id) } },
-      data: {
-        status: 'unstart',
-        progress: 0,
-        progressMsg: 'Parse stopped',
-        errorMessage: null,
-      },
-    });
-    return { ok: true, count: docs.length };
+    const withRf = docs.filter((d) => d.ragflowDocumentId);
+    if (withRf.length) {
+      await this.ragflow.stopParseDocuments(
+        kb.ragflowDatasetId,
+        withRf.map((d) => d.ragflowDocumentId!),
+      );
+      await this.prisma.document.updateMany({
+        where: { id: { in: withRf.map((d) => d.id) } },
+        data: {
+          status: 'unstart',
+          progress: 0,
+          progressMsg: 'Parse stopped',
+          errorMessage: null,
+        },
+      });
+    }
+    return { ok: true, count: withRf.length };
   }
 
   async batchDeleteDocuments(kbId: string, ids: string[]) {
@@ -300,13 +307,13 @@ export class AdminService {
       where: { knowledgeBaseId: kbId, id: { in: ids } },
     });
     if (docs.length) {
-      try {
-        await this.ragflow.deleteDocuments(
-          kb.ragflowDatasetId,
-          docs.map((d) => d.ragflowDocumentId),
-        );
-      } catch {
-        // continue
+      const rfIds = docs.map((d) => d.ragflowDocumentId).filter(Boolean) as string[];
+      if (rfIds.length) {
+        try {
+          await this.ragflow.deleteDocuments(kb.ragflowDatasetId, rfIds);
+        } catch {
+          // continue
+        }
       }
     }
     const result = await this.prisma.document.deleteMany({
@@ -321,6 +328,7 @@ export class AdminService {
       include: { knowledgeBase: true },
     });
     if (!doc) return null;
+    if (!doc.ragflowDocumentId) return doc;
     const kb = doc.knowledgeBase;
     const rf = await this.ragflow.getDocument(
       kb.ragflowDatasetId,

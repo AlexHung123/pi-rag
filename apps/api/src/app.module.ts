@@ -8,6 +8,7 @@ import { ChatModule } from './chat/chat.module';
 import { RagflowModule } from './ragflow/ragflow.module';
 import { AgentModule } from './agent/agent.module';
 import { AdminModule } from './admin/admin.module';
+import { TranscriptionModule } from './transcription/transcription.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -17,6 +18,7 @@ import { HealthController } from './health.controller';
     AuthModule,
     RagflowModule,
     KnowledgeModule,
+    TranscriptionModule,
     DocumentsModule,
     AgentModule,
     ChatModule,

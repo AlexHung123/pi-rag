@@ -10,5 +10,8 @@ apps/api/prisma/*.db
 apps/api/prisma/*.db-journal
 uploads/
 tmp/
+# Local media (audio sources + transcripts)
+apps/api/data/media/
+data/media/
 .turbo/
 *.tsbuildinfo

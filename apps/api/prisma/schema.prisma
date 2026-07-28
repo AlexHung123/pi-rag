@@ -19,6 +19,19 @@ enum DocumentStatus {
   fail
 }
 
+enum DocumentSourceType {
+  file
+  audio
+}
+
+enum TranscriptionJobStatus {
+  queued
+  running
+  done
+  failed
+  cancelled
+}
+
 enum MessageRole {
   user
   assistant
@@ -112,26 +125,63 @@ model KnowledgeBaseMember {
 }
 
 model Document {
-  id                 String         @id @default(uuid()) @db.Uuid
-  knowledgeBaseId    String         @map("knowledge_base_id") @db.Uuid
-  ownerUserId        String         @map("owner_user_id") @db.Uuid
-  ragflowDocumentId  String         @map("ragflow_document_id")
-  name               String
-  sizeBytes          BigInt         @default(0) @map("size_bytes")
-  status             DocumentStatus @default(unstart)
-  progress           Float          @default(0)
-  progressMsg        String?        @map("progress_msg")
-  chunkCount         Int            @default(0) @map("chunk_count")
-  errorMessage       String?        @map("error_message")
-  createdAt          DateTime       @default(now()) @map("created_at")
-  updatedAt          DateTime       @updatedAt @map("updated_at")
+  id                  String             @id @default(uuid()) @db.Uuid
+  knowledgeBaseId     String             @map("knowledge_base_id") @db.Uuid
+  ownerUserId         String             @map("owner_user_id") @db.Uuid
+  /// Null until transcript is uploaded to RAGFlow (audio pipeline).
+  ragflowDocumentId   String?            @map("ragflow_document_id")
+  name                String
+  sizeBytes           BigInt             @default(0) @map("size_bytes")
+  status              DocumentStatus     @default(unstart)
+  progress            Float              @default(0)
+  progressMsg         String?            @map("progress_msg")
+  chunkCount          Int                @default(0) @map("chunk_count")
+  errorMessage        String?            @map("error_message")
+  sourceType          DocumentSourceType @default(file) @map("source_type")
+  /// Relative path under MEDIA_ROOT for original audio (audio only).
+  mediaPath           String?            @map("media_path")
+  mediaContentType    String?            @map("media_content_type")
+  transcriptLanguage  String?            @map("transcript_language")
+  durationSeconds     Float?             @map("duration_seconds")
+  createdAt           DateTime           @default(now()) @map("created_at")
+  updatedAt           DateTime           @updatedAt @map("updated_at")
 
-  knowledgeBase KnowledgeBase @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
-  owner         User          @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  knowledgeBase     KnowledgeBase      @relation(fields: [knowledgeBaseId], references: [id], onDelete: Cascade)
+  owner             User               @relation(fields: [ownerUserId], references: [id], onDelete: Cascade)
+  transcriptionJobs TranscriptionJob[]
 
   @@index([knowledgeBaseId])
   @@index([ownerUserId])
   @@map("documents")
+}
+
+model TranscriptionJob {
+  id              String                 @id @default(uuid()) @db.Uuid
+  documentId      String                 @map("document_id") @db.Uuid
+  knowledgeBaseId String                 @map("knowledge_base_id") @db.Uuid
+  ownerUserId     String                 @map("owner_user_id") @db.Uuid
+  status          TranscriptionJobStatus @default(queued)
+  /// queued | probing | transcribing | writing | uploading | parsing | done
+  stage           String                 @default("queued")
+  progress        Float                  @default(0)
+  progressMsg     String?                @map("progress_msg")
+  language        String?
+  sttModel        String?                @map("stt_model")
+  attempts        Int                    @default(0)
+  maxAttempts     Int                    @default(3) @map("max_attempts")
+  lockedBy        String?                @map("locked_by")
+  errorMessage    String?                @map("error_message")
+  startedAt       DateTime?              @map("started_at")
+  finishedAt      DateTime?              @map("finished_at")
+  createdAt       DateTime               @default(now()) @map("created_at")
+  updatedAt       DateTime               @updatedAt @map("updated_at")
+
+  document Document @relation(fields: [documentId], references: [id], onDelete: Cascade)
+
+  @@index([status, createdAt])
+  @@index([documentId])
+  @@index([ownerUserId, createdAt])
+  @@map("transcription_jobs")
 }
 
 model Conversation {

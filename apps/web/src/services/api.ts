@@ -232,6 +232,17 @@ export type KnowledgeBaseMember = {
   updatedAt: string;
 };
 
+export type DocumentSourceType = 'file' | 'audio';
+
+export type TranscriptionJobSummary = {
+  jobId: string;
+  status: 'queued' | 'running' | 'done' | 'failed' | 'cancelled';
+  stage: string;
+  progress: number;
+  progressMsg: string | null;
+  errorMessage: string | null;
+};
+
 export type DocumentItem = {
   id: string;
   knowledgeBaseId: string;
@@ -242,6 +253,11 @@ export type DocumentItem = {
   progressMsg?: string | null;
   chunkCount: number;
   errorMessage?: string | null;
+  sourceType?: DocumentSourceType;
+  durationSeconds?: number | null;
+  transcriptLanguage?: string | null;
+  ragflowDocumentId?: string | null;
+  transcription?: TranscriptionJobSummary | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -350,14 +366,25 @@ export const kbApi = {
 export const docApi = {
   list: (kbId: string) =>
     apiFetch<{ items: DocumentItem[] }>(`/api/knowledge-bases/${kbId}/documents`),
-  upload: async (kbId: string, file: File) => {
+  upload: async (kbId: string, file: File, opts?: { language?: string }) => {
     const form = new FormData();
     form.append('file', file);
+    if (opts?.language) form.append('language', opts.language);
     return apiFetch<DocumentItem>(`/api/knowledge-bases/${kbId}/documents`, {
       method: 'POST',
       body: form,
     });
   },
+  cancelTranscription: (kbId: string, docId: string) =>
+    apiFetch<DocumentItem>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/cancel-transcription`,
+      { method: 'POST' },
+    ),
+  retryTranscription: (kbId: string, docId: string) =>
+    apiFetch<DocumentItem>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/retry-transcription`,
+      { method: 'POST' },
+    ),
   parse: (kbId: string, docId: string) =>
     apiFetch<DocumentItem>(
       `/api/knowledge-bases/${kbId}/documents/${docId}/parse`,

@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { FileText, Folder, Upload, X } from 'lucide-react'
+import { FileAudio, FileText, Folder, Upload, X } from 'lucide-react'
 import {
   authApi,
   docApi,
@@ -84,6 +84,40 @@ const DEFAULT_PDF_PARSER: PdfParserValue = 'mineru-from-env@MinerU'
 const CHUNK_TOKEN_MIN = 1
 const CHUNK_TOKEN_MAX = 2048
 const DEFAULT_CHUNK_TOKEN_NUM = 512
+
+/** Audio extensions accepted by the Knowledge upload UI (aligned with API allowlist). */
+const AUDIO_ACCEPT =
+  '.mp3,.wav,.m4a,.mp4,.flac,.ogg,.aac,.webm,.wma,.mkv,audio/*,video/mp4,video/webm'
+
+function isAudioDoc(doc: DocumentItem): boolean {
+  return doc.sourceType === 'audio'
+}
+
+function isTranscribing(doc: DocumentItem): boolean {
+  if (!isAudioDoc(doc)) return false
+  const js = doc.transcription?.status
+  if (js === 'queued' || js === 'running') return true
+  // Fallback when job summary missing but still pre-RAGFlow
+  return !doc.ragflowDocumentId && (doc.status === 'unstart' || doc.status === 'running')
+}
+
+function canRetryTranscription(doc: DocumentItem): boolean {
+  if (!isAudioDoc(doc)) return false
+  const js = doc.transcription?.status
+  return doc.status === 'fail' || js === 'failed' || js === 'cancelled'
+}
+
+function statusLabel(doc: DocumentItem): string {
+  if (isAudioDoc(doc) && doc.progressMsg) {
+    const pct = Math.round((doc.progress || 0) * 100)
+    if (doc.status === 'running' && pct > 0 && pct < 100) {
+      return `${doc.progressMsg} (${pct}%)`
+    }
+    return doc.progressMsg
+  }
+  if (doc.status === 'running') return `${Math.round((doc.progress || 0) * 100)}%`
+  return doc.status
+}
 
 export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => void }) {
   const [kbs, setKbs] = useState<KnowledgeBase[]>([])
@@ -217,8 +251,14 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
   useEffect(() => {
     if (!selectedId) return
-    const hasRunning = docs.some(d => d.status === 'running')
-    if (!hasRunning) return
+    // Poll while parse/transcription is in progress (incl. queued audio)
+    const hasActive = docs.some(
+      d =>
+        d.status === 'running' ||
+        (d.status === 'unstart' && isAudioDoc(d) && !d.ragflowDocumentId) ||
+        isTranscribing(d),
+    )
+    if (!hasActive) return
     const t = setInterval(() => {
       loadDocs(selectedId, { quiet: true }).catch(() => undefined)
     }, 2000)
@@ -382,7 +422,8 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
         }
         const doc = await docApi.upload(selectedId, file)
         if (remaining !== undefined) remaining -= file.size
-        if (parseOnCreation && doc?.id) {
+        // Audio auto-parses after STT; skip manual parse-on-creation for audio
+        if (parseOnCreation && doc?.id && doc.sourceType !== 'audio' && doc.ragflowDocumentId) {
           await docApi.parse(selectedId, doc.id)
         }
       }
@@ -422,6 +463,34 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     setError('')
     try {
       await docApi.stopParse(selectedId, docId)
+      await loadDocs(selectedId, { quiet: true })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onCancelTranscription = async (docId: string) => {
+    if (!selectedId) return
+    setBusy(true)
+    setError('')
+    try {
+      await docApi.cancelTranscription(selectedId, docId)
+      await loadDocs(selectedId, { quiet: true })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onRetryTranscription = async (docId: string) => {
+    if (!selectedId) return
+    setBusy(true)
+    setError('')
+    try {
+      await docApi.retryTranscription(selectedId, docId)
       await loadDocs(selectedId, { quiet: true })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
@@ -472,7 +541,11 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const parseableSelected = useMemo(
     () =>
       filteredDocs.filter(
-        d => selectedDocIds.has(d.id) && d.status !== 'running',
+        d =>
+          selectedDocIds.has(d.id) &&
+          d.status !== 'running' &&
+          !!d.ragflowDocumentId &&
+          !isTranscribing(d),
       ),
     [filteredDocs, selectedDocIds],
   )
@@ -1238,9 +1311,22 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                       </td>
                       <td>
                         <div className="kb-file-name" title={doc.name}>
+                          {isAudioDoc(doc) ? (
+                            <FileAudio size={14} style={{ marginRight: 6, verticalAlign: 'middle', opacity: 0.75 }} aria-hidden />
+                          ) : null}
                           {doc.name}
+                          {isAudioDoc(doc) ? (
+                            <span className="kb-visibility-badge shared" style={{ marginLeft: 6 }} title="Audio source — transcript ingested after STT">
+                              Audio
+                            </span>
+                          ) : null}
                         </div>
-                        <div className="kb-file-sub">{formatBytes(doc.sizeBytes)}</div>
+                        <div className="kb-file-sub">
+                          {formatBytes(doc.sizeBytes)}
+                          {doc.durationSeconds != null && Number.isFinite(doc.durationSeconds)
+                            ? ` · ${Math.round(doc.durationSeconds)}s`
+                            : ''}
+                        </div>
                       </td>
                       <td className="kb-cell-muted">{formatDateTime(doc.createdAt)}</td>
                       <td>
@@ -1250,14 +1336,38 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                         </label>
                       </td>
                       <td className="kb-cell-muted">{doc.chunkCount}</td>
-                      <td className="kb-cell-muted">—</td>
+                      <td className="kb-cell-muted" title={doc.errorMessage || doc.progressMsg || ''}>
+                        {doc.progressMsg && (isAudioDoc(doc) || doc.status === 'running')
+                          ? doc.progressMsg
+                          : '—'}
+                      </td>
                       <td>
                         <div className="kb-parse-cell">
-                          <span className={`badge ${doc.status}`}>
-                            {doc.status === 'running' ? `${Math.round((doc.progress || 0) * 100)}%` : doc.status}
+                          <span className={`badge ${doc.status}`} title={doc.errorMessage || doc.progressMsg || ''}>
+                            {statusLabel(doc)}
                           </span>
                           {canEditContent ? (
-                            doc.status === 'running' ? (
+                            isTranscribing(doc) ? (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void onCancelTranscription(doc.id)}
+                                title="Cancel transcription"
+                              >
+                                Cancel
+                              </button>
+                            ) : canRetryTranscription(doc) && !doc.ragflowDocumentId ? (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void onRetryTranscription(doc.id)}
+                                title="Retry transcription"
+                              >
+                                Retry STT
+                              </button>
+                            ) : doc.status === 'running' && doc.ragflowDocumentId ? (
                               <button
                                 className="btn btn-secondary btn-sm"
                                 type="button"
@@ -1266,7 +1376,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                               >
                                 Stop
                               </button>
-                            ) : (
+                            ) : doc.ragflowDocumentId ? (
                               <button
                                 className="btn btn-secondary btn-sm"
                                 type="button"
@@ -1275,13 +1385,19 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                               >
                                 {doc.status === 'done' ? 'Re-parse' : 'Parse'}
                               </button>
-                            )
+                            ) : null
                           ) : null}
                         </div>
                       </td>
                       <td>
                         <div className="kb-action-cell">
-                          <button className="btn btn-secondary btn-sm" type="button" disabled={busy} onClick={() => setPreviewDoc(doc)}>
+                          <button
+                            className="btn btn-secondary btn-sm"
+                            type="button"
+                            disabled={busy || !doc.ragflowDocumentId}
+                            title={!doc.ragflowDocumentId ? 'Preview available after transcript is ready' : 'Preview'}
+                            onClick={() => setPreviewDoc(doc)}
+                          >
                             Preview
                           </button>
                           {canEditContent ? (
@@ -1444,7 +1560,8 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                   : 'Drag and drop your file here to upload'}
               </p>
               <p className="kb-upload-dropzone-hint">
-                Supports single or batch file upload. PDF, TXT, MD, and other common document types.
+                Documents (PDF, TXT, MD, Office…) and audio (MP3, M4A, WAV, FLAC…).
+                Audio is transcribed then ingested as a transcript for chat.
                 Click to browse{uploadMode === 'folder' ? ' a folder' : ''}.
                 {storage
                   ? ` Storage remaining: ${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total.`
@@ -1456,6 +1573,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               ref={fileRef}
               type="file"
               multiple
+              accept={`${AUDIO_ACCEPT},.pdf,.txt,.md,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.html,.json`}
               hidden
               onChange={e => {
                 if (e.target.files) mergePendingFiles(e.target.files)
@@ -1466,6 +1584,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               ref={folderRef}
               type="file"
               multiple
+              accept={`${AUDIO_ACCEPT},.pdf,.txt,.md,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.csv,.html,.json`}
               hidden
               // Folder selection (Chromium / WebKit)
               {...({ webkitdirectory: '', directory: '' } as React.InputHTMLAttributes<HTMLInputElement>)}

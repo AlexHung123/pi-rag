@@ -1,5 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { DocumentStatus } from '@prisma/client';
+import {
+  Document,
+  DocumentSourceType,
+  TranscriptionJob,
+} from '@prisma/client';
 import { PrismaService } from '../prisma/prisma.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
@@ -8,6 +12,14 @@ import {
   assertWithinStorageQuota,
   withUserStorageLock,
 } from '../common/storage-quota';
+import { isAudioUpload, extensionOf } from '../transcription/audio-formats';
+import { MediaStorage } from '../transcription/media-storage';
+import { SttClient } from '../transcription/stt.client';
+import { TranscriptionService } from '../transcription/transcription.service';
+
+type DocWithJob = Document & {
+  transcriptionJobs?: TranscriptionJob[];
+};
 
 @Injectable()
 export class DocumentsService {
@@ -15,21 +27,20 @@ export class DocumentsService {
     private readonly prisma: PrismaService,
     private readonly ragflow: RagflowService,
     private readonly knowledge: KnowledgeService,
+    private readonly media: MediaStorage,
+    private readonly stt: SttClient,
+    private readonly transcription: TranscriptionService,
   ) {}
 
-  private serialize(doc: {
-    id: string;
-    knowledgeBaseId: string;
-    name: string;
-    sizeBytes: bigint;
-    status: DocumentStatus;
-    progress: number;
-    progressMsg: string | null;
-    chunkCount: number;
-    errorMessage: string | null;
-    createdAt: Date;
-    updatedAt: Date;
-  }) {
+  private serialize(
+    doc: DocWithJob,
+    job?: TranscriptionJob | null,
+  ) {
+    const latestJob =
+      job ??
+      (doc.transcriptionJobs && doc.transcriptionJobs.length
+        ? doc.transcriptionJobs[0]
+        : null);
     return {
       id: doc.id,
       knowledgeBaseId: doc.knowledgeBaseId,
@@ -40,9 +51,27 @@ export class DocumentsService {
       progressMsg: doc.progressMsg,
       chunkCount: doc.chunkCount,
       errorMessage: doc.errorMessage,
+      sourceType: doc.sourceType as DocumentSourceType,
+      durationSeconds: doc.durationSeconds ?? null,
+      transcriptLanguage: doc.transcriptLanguage ?? null,
+      ragflowDocumentId: doc.ragflowDocumentId ?? null,
+      transcription: this.transcription.summarize(latestJob),
       createdAt: doc.createdAt.toISOString(),
       updatedAt: doc.updatedAt.toISOString(),
     };
+  }
+
+  private async loadJobMap(documentIds: string[]) {
+    if (!documentIds.length) return new Map<string, TranscriptionJob>();
+    const jobs = await this.prisma.transcriptionJob.findMany({
+      where: { documentId: { in: documentIds } },
+      orderBy: { createdAt: 'desc' },
+    });
+    const map = new Map<string, TranscriptionJob>();
+    for (const j of jobs) {
+      if (!map.has(j.documentId)) map.set(j.documentId, j);
+    }
+    return map;
   }
 
   async list(userId: string, knowledgeBaseId: string) {
@@ -51,18 +80,21 @@ export class DocumentsService {
       where: { knowledgeBaseId },
       orderBy: { createdAt: 'desc' },
     });
-    // refresh running docs opportunistically
+    // refresh running / unstart docs opportunistically
     await Promise.all(
       docs
         .filter((d) => d.status === 'running' || d.status === 'unstart')
         .slice(0, 10)
-        .map((d) => this.refreshStatus(userId, knowledgeBaseId, d.id).catch(() => null)),
+        .map((d) =>
+          this.refreshStatus(userId, knowledgeBaseId, d.id).catch(() => null),
+        ),
     );
     const fresh = await this.prisma.document.findMany({
       where: { knowledgeBaseId },
       orderBy: { createdAt: 'desc' },
     });
-    return fresh.map((d) => this.serialize(d));
+    const jobMap = await this.loadJobMap(fresh.map((d) => d.id));
+    return fresh.map((d) => this.serialize(d, jobMap.get(d.id)));
   }
 
   /** Document in a readable KB (any doc in the KB, not only uploader's). */
@@ -90,13 +122,30 @@ export class DocumentsService {
     return this.getInEditableKb(userId, knowledgeBaseId, docId);
   }
 
+  private maxAudioBytes(): number {
+    // Spec default 500 MiB when unset
+    return Number(process.env.MAX_AUDIO_UPLOAD_BYTES || 524288000);
+  }
+
   async upload(
     userId: string,
     knowledgeBaseId: string,
-    file: { originalname: string; buffer: Buffer; size: number; mimetype?: string },
+    file: {
+      originalname: string;
+      buffer: Buffer;
+      size: number;
+      mimetype?: string;
+    },
+    opts?: { language?: string | null },
   ) {
     const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
     if (!file?.buffer?.length) throw badRequest('file is required');
+
+    const audio = isAudioUpload(file.originalname, file.mimetype);
+    if (audio) {
+      return this.uploadAudio(userId, kb, file, opts);
+    }
+
     const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
     if (file.size > maxBytes) throw badRequest(`file exceeds max size ${maxBytes}`);
 
@@ -125,15 +174,106 @@ export class DocumentsService {
           sizeBytes: BigInt(rfDoc.size ?? file.size),
           status: 'unstart',
           progress: 0,
+          sourceType: 'file',
         },
       });
-      return this.serialize(doc);
+      return this.serialize(doc, null);
     });
+  }
+
+  private async uploadAudio(
+    userId: string,
+    kb: { id: string; ragflowDatasetId: string },
+    file: {
+      originalname: string;
+      buffer: Buffer;
+      size: number;
+      mimetype?: string;
+    },
+    opts?: { language?: string | null },
+  ) {
+    this.stt.assertConfigured();
+
+    const limit = this.maxAudioBytes();
+    if (file.size > limit) {
+      throw badRequest(`audio file exceeds max size ${limit} bytes`);
+    }
+
+    return withUserStorageLock(this.prisma, userId, async () => {
+      await assertWithinStorageQuota(this.prisma, userId, file.size);
+
+      const safeName =
+        file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'audio.bin';
+      const displayName = safeName.replace(/\.[^.]+$/, '') || safeName;
+      const ext = extensionOf(safeName) || 'bin';
+      const language =
+        (opts?.language || process.env.STT_DEFAULT_LANGUAGE || 'zh')?.trim() ||
+        null;
+
+      // Create document first to get UUID for media path
+      const doc = await this.prisma.document.create({
+        data: {
+          knowledgeBaseId: kb.id,
+          ownerUserId: userId,
+          ragflowDocumentId: null,
+          name: displayName,
+          sizeBytes: BigInt(file.size),
+          status: 'unstart',
+          progress: 0,
+          progressMsg: 'Queued for transcription',
+          sourceType: 'audio',
+          mediaContentType: file.mimetype || null,
+          transcriptLanguage: language,
+        },
+      });
+
+      try {
+        const { relativePath } = this.media.writeSourceAudio(
+          userId,
+          doc.id,
+          ext,
+          file.buffer,
+        );
+        const updated = await this.prisma.document.update({
+          where: { id: doc.id },
+          data: { mediaPath: relativePath },
+        });
+        const job = await this.transcription.enqueueForDocument(updated, {
+          language,
+        });
+        const finalDoc = await this.prisma.document.findUniqueOrThrow({
+          where: { id: doc.id },
+        });
+        return this.serialize(finalDoc, job);
+      } catch (e) {
+        // Cleanup on failure
+        this.media.removeDocDir(userId, doc.id);
+        await this.prisma.document.delete({ where: { id: doc.id } }).catch(() => null);
+        throw e;
+      }
+    });
+  }
+
+  async cancelTranscription(userId: string, knowledgeBaseId: string, docId: string) {
+    const result = await this.transcription.cancel(userId, knowledgeBaseId, docId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+    return this.serialize(doc, await this.transcription.latestJob(doc.id));
+  }
+
+  async retryTranscription(userId: string, knowledgeBaseId: string, docId: string) {
+    const job = await this.transcription.retry(userId, knowledgeBaseId, docId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+    return this.serialize(doc, job);
   }
 
   async parse(userId: string, knowledgeBaseId: string, docId: string) {
     const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
     const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+    if (!doc.ragflowDocumentId) {
+      throw badRequest(
+        'document is not ready for parse (audio still transcribing or failed)',
+      );
+    }
     await this.ragflow.parseDocuments(kb.ragflowDatasetId, [doc.ragflowDocumentId]);
     const updated = await this.prisma.document.update({
       where: { id: doc.id },
@@ -144,7 +284,7 @@ export class DocumentsService {
         errorMessage: null,
       },
     });
-    return this.serialize(updated);
+    return this.serialize(updated, await this.transcription.latestJob(updated.id));
   }
 
   /**
@@ -162,14 +302,16 @@ export class DocumentsService {
     });
     if (!docs.length) throw notFound('document not found');
 
-    const targets = docs.filter((d) => d.status !== 'running');
+    const targets = docs.filter(
+      (d) => d.status !== 'running' && d.ragflowDocumentId,
+    );
     if (!targets.length) {
       return { ok: true as const, count: 0, skipped: docs.length, items: [] };
     }
 
     await this.ragflow.parseDocuments(
       kb.ragflowDatasetId,
-      targets.map((d) => d.ragflowDocumentId),
+      targets.map((d) => d.ragflowDocumentId!),
     );
     await this.prisma.document.updateMany({
       where: { id: { in: targets.map((d) => d.id) } },
@@ -184,17 +326,27 @@ export class DocumentsService {
       where: { id: { in: targets.map((d) => d.id) } },
       orderBy: { createdAt: 'desc' },
     });
+    const jobMap = await this.loadJobMap(updated.map((d) => d.id));
     return {
       ok: true as const,
       count: updated.length,
       skipped: docs.length - targets.length,
-      items: updated.map((d) => this.serialize(d)),
+      items: updated.map((d) => this.serialize(d, jobMap.get(d.id))),
     };
   }
 
   async stopParse(userId: string, knowledgeBaseId: string, docId: string) {
     const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
     const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+
+    // If audio still in STT (no RF id), cancel transcription instead
+    if (!doc.ragflowDocumentId && doc.sourceType === 'audio') {
+      return this.cancelTranscription(userId, knowledgeBaseId, docId);
+    }
+    if (!doc.ragflowDocumentId) {
+      throw badRequest('document has no RAGFlow id');
+    }
+
     await this.ragflow.stopParseDocuments(kb.ragflowDatasetId, [doc.ragflowDocumentId]);
     const updated = await this.prisma.document.update({
       where: { id: doc.id },
@@ -205,7 +357,7 @@ export class DocumentsService {
         errorMessage: null,
       },
     });
-    return this.serialize(updated);
+    return this.serialize(updated, await this.transcription.latestJob(updated.id));
   }
 
   /** Stop parse for multiple documents in one RAGFlow call. Only affects `running`. */
@@ -220,14 +372,30 @@ export class DocumentsService {
     });
     if (!docs.length) throw notFound('document not found');
 
-    const targets = docs.filter((d) => d.status === 'running');
+    const targets = docs.filter((d) => d.status === 'running' && d.ragflowDocumentId);
+    // Also cancel audio STT jobs without RF id
+    for (const d of docs) {
+      if (d.sourceType === 'audio' && !d.ragflowDocumentId && d.status === 'running') {
+        await this.transcription.cancel(userId, knowledgeBaseId, d.id).catch(() => null);
+      }
+    }
+
     if (!targets.length) {
-      return { ok: true as const, count: 0, skipped: docs.length, items: [] };
+      const jobMap = await this.loadJobMap(docs.map((d) => d.id));
+      const fresh = await this.prisma.document.findMany({
+        where: { id: { in: uniqueIds } },
+      });
+      return {
+        ok: true as const,
+        count: 0,
+        skipped: docs.length,
+        items: fresh.map((d) => this.serialize(d, jobMap.get(d.id))),
+      };
     }
 
     await this.ragflow.stopParseDocuments(
       kb.ragflowDatasetId,
-      targets.map((d) => d.ragflowDocumentId),
+      targets.map((d) => d.ragflowDocumentId!),
     );
     await this.prisma.document.updateMany({
       where: { id: { in: targets.map((d) => d.id) } },
@@ -239,22 +407,37 @@ export class DocumentsService {
       },
     });
     const updated = await this.prisma.document.findMany({
-      where: { id: { in: targets.map((d) => d.id) } },
+      where: { id: { in: uniqueIds } },
       orderBy: { createdAt: 'desc' },
     });
+    const jobMap = await this.loadJobMap(updated.map((d) => d.id));
     return {
       ok: true as const,
-      count: updated.length,
+      count: targets.length,
       skipped: docs.length - targets.length,
-      items: updated.map((d) => this.serialize(d)),
+      items: updated.map((d) => this.serialize(d, jobMap.get(d.id))),
     };
   }
 
   async refreshStatus(userId: string, knowledgeBaseId: string, docId: string) {
+    await this.knowledge.getReadable(userId, knowledgeBaseId);
+    let doc = await this.getInReadableKb(userId, knowledgeBaseId, docId);
+
+    // Audio without RAGFlow id: refresh from job, not RAGFlow
+    if (doc.sourceType === 'audio' && !doc.ragflowDocumentId) {
+      doc = (await this.transcription.syncDocumentFromJob(doc.id)) || doc;
+      return this.serialize(doc, await this.transcription.latestJob(doc.id));
+    }
+
+    if (!doc.ragflowDocumentId) {
+      return this.serialize(doc, await this.transcription.latestJob(doc.id));
+    }
+
     const kb = await this.knowledge.getReadable(userId, knowledgeBaseId);
-    const doc = await this.getInReadableKb(userId, knowledgeBaseId, docId);
     const rf = await this.ragflow.getDocument(kb.ragflowDatasetId, doc.ragflowDocumentId);
-    if (!rf) return this.serialize(doc);
+    if (!rf) {
+      return this.serialize(doc, await this.transcription.latestJob(doc.id));
+    }
 
     let status = this.ragflow.mapRunToStatus(rf.run);
     // If chunks already exist, treat as done
@@ -288,10 +471,10 @@ export class DocumentsService {
         progress,
         progressMsg: rf.progress_msg || doc.progressMsg,
         chunkCount: chunkCount || doc.chunkCount,
-        name: rf.name || doc.name,
+        name: doc.sourceType === 'audio' ? doc.name : rf.name || doc.name,
       },
     });
-    return this.serialize(updated);
+    return this.serialize(updated, await this.transcription.latestJob(updated.id));
   }
 
   async get(userId: string, knowledgeBaseId: string, docId: string) {
@@ -306,6 +489,15 @@ export class DocumentsService {
   ) {
     const kb = await this.knowledge.getReadable(userId, knowledgeBaseId);
     const doc = await this.getInReadableKb(userId, knowledgeBaseId, docId);
+    if (!doc.ragflowDocumentId) {
+      return {
+        document: this.serialize(doc, await this.transcription.latestJob(doc.id)),
+        chunks: [],
+        total: 0,
+        page: opts.page || 1,
+        pageSize: opts.pageSize || 20,
+      };
+    }
     const result = await this.ragflow.listChunks(kb.ragflowDatasetId, doc.ragflowDocumentId, opts);
     if (result.total !== doc.chunkCount) {
       await this.prisma.document.update({
@@ -314,7 +506,10 @@ export class DocumentsService {
       });
     }
     return {
-      document: this.serialize({ ...doc, chunkCount: result.total }),
+      document: this.serialize(
+        { ...doc, chunkCount: result.total },
+        await this.transcription.latestJob(doc.id),
+      ),
       chunks: result.chunks.map((c) => ({
         id: c.id,
         content: c.content || c.content_with_weight || '',
@@ -351,6 +546,9 @@ export class DocumentsService {
   async downloadFile(userId: string, knowledgeBaseId: string, docId: string) {
     const kb = await this.knowledge.getReadable(userId, knowledgeBaseId);
     const doc = await this.getInReadableKb(userId, knowledgeBaseId, docId);
+    if (!doc.ragflowDocumentId) {
+      throw badRequest('file not available yet (transcription in progress)');
+    }
     const file = await this.ragflow.downloadDocument(
       kb.ragflowDatasetId,
       doc.ragflowDocumentId,
@@ -365,11 +563,21 @@ export class DocumentsService {
   async remove(userId: string, knowledgeBaseId: string, docId: string) {
     const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
     const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
-    try {
-      await this.ragflow.deleteDocuments(kb.ragflowDatasetId, [doc.ragflowDocumentId]);
-    } catch {
-      // continue
+
+    await this.transcription.cancelJobsForDocument(doc.id);
+
+    if (doc.ragflowDocumentId) {
+      try {
+        await this.ragflow.deleteDocuments(kb.ragflowDatasetId, [doc.ragflowDocumentId]);
+      } catch {
+        // continue
+      }
     }
+
+    if (doc.sourceType === 'audio') {
+      this.media.removeDocDir(doc.ownerUserId, doc.id);
+    }
+
     await this.prisma.document.delete({ where: { id: doc.id } });
     return { ok: true };
   }
