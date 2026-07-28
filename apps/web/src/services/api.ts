@@ -17,6 +17,31 @@ export function getCsrfToken(): string {
   return memoryCsrfToken || getCookie('csb_kb_csrf');
 }
 
+/**
+ * CSRF must be sent as a header (server no longer accepts cookie-only).
+ * If memory/cookie is empty, refresh once via GET /api/auth/me.
+ */
+async function requireCsrfToken(): Promise<string> {
+  let csrf = getCsrfToken();
+  if (csrf) return csrf;
+  try {
+    const res = await fetch(`${API_BASE}/api/auth/me`, { credentials: 'include' });
+    if (res.ok) {
+      const data = (await res.json()) as { csrfToken?: string };
+      if (data.csrfToken) {
+        setCsrfToken(data.csrfToken);
+        csrf = data.csrfToken;
+      }
+    }
+  } catch {
+    // fall through to throw below
+  }
+  if (!csrf) {
+    throw new Error('Missing CSRF token; please reload or log in again');
+  }
+  return csrf;
+}
+
 function errorMessageFromBody(data: unknown, fallback: string): string {
   if (!data || typeof data !== 'object') return fallback;
   const msg = (data as { message?: unknown }).message;
@@ -53,7 +78,14 @@ export async function apiFetch<T>(
     headers.set('Content-Type', 'application/json');
   }
   const method = (init.method || 'GET').toUpperCase();
-  if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
+  // login/register: no session yet. logout: server does not require CSRF.
+  const skipCsrf =
+    path === '/api/auth/login' ||
+    path === '/api/auth/register' ||
+    path === '/api/auth/logout';
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && !skipCsrf) {
+    headers.set('X-CSRF-Token', await requireCsrfToken());
+  } else if (path === '/api/auth/logout') {
     const csrf = getCsrfToken();
     if (csrf) headers.set('X-CSRF-Token', csrf);
   }
@@ -583,7 +615,7 @@ export const chatApi = {
       credentials: 'include',
       headers: {
         'Content-Type': 'application/json',
-        'X-CSRF-Token': getCsrfToken(),
+        'X-CSRF-Token': await requireCsrfToken(),
       },
       body: JSON.stringify(body),
     });

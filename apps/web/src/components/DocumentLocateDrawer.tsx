@@ -21,12 +21,11 @@ function escapeHtml(s: string) {
     .replace(/'/g, '&#39;');
 }
 
-function looksLikeHtml(s: string) {
-  return /<\/?[a-z][\s\S]*>/i.test(s);
-}
-
+/**
+ * Render untrusted file text as HTML for layout only.
+ * Always escape — never pass through raw HTML (stored XSS).
+ */
 function toHtmlContent(content: string) {
-  if (looksLikeHtml(content)) return content;
   return escapeHtml(content).replace(/\n/g, '<br />');
 }
 

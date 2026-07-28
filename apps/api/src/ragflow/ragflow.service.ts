@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import {
   CreateDatasetInput,
   RagflowChunk,
@@ -14,15 +14,64 @@ import { getRagRetrievalConfig } from '../rag/rag-config';
 type ApiEnvelope<T> = { code: number; message?: string; data?: T };
 
 @Injectable()
-export class RagflowService {
+export class RagflowService implements OnModuleInit {
   private readonly logger = new Logger(RagflowService.name);
   private readonly mock = new RagflowMockStore();
+  private mockBootWarned = false;
 
   useMock(): boolean {
     const mockEnv = (process.env.RAGFLOW_MOCK || '').toLowerCase();
     if (mockEnv === 'true') return true;
     if (mockEnv === 'false') return false;
     return !process.env.RAGFLOW_API_KEY;
+  }
+
+  /**
+   * Production must not silently fall into in-memory mock (data would not persist
+   * in RAGFlow). Dev may auto-mock when API key is missing, with a loud warning.
+   */
+  onModuleInit() {
+    const mockEnv = (process.env.RAGFLOW_MOCK || '').toLowerCase();
+    const isProd = (process.env.NODE_ENV || '').toLowerCase() === 'production';
+    const hasKey = Boolean((process.env.RAGFLOW_API_KEY || '').trim());
+
+    if (isProd) {
+      if (mockEnv === 'true') {
+        this.logger.warn(
+          'RAGFLOW_MOCK=true in production: using in-memory mock (no real RAGFlow). ' +
+            'Data is lost on restart and is not shared across instances.',
+        );
+        return;
+      }
+      if (!hasKey) {
+        throw new Error(
+          'RAGFLOW_API_KEY is required when NODE_ENV=production ' +
+            '(or set RAGFLOW_MOCK=true only if you intentionally want the in-memory mock).',
+        );
+      }
+      return;
+    }
+
+    if (this.useMock()) {
+      this.warnMockActive(
+        mockEnv === 'true'
+          ? 'RAGFLOW_MOCK=true'
+          : 'no RAGFLOW_API_KEY (dev auto-mock)',
+      );
+    }
+  }
+
+  private warnMockActive(reason: string) {
+    if (this.mockBootWarned) return;
+    this.mockBootWarned = true;
+    this.logger.warn(
+      `╔══════════════════════════════════════════════════════════════╗\n` +
+        `║  RAGFlow MOCK is ACTIVE (${reason})                          \n` +
+        `║  Uploads/parse/retrieve use process memory only.             \n` +
+        `║  Set RAGFLOW_API_KEY (+ RAGFLOW_BASE_URL) for real RAGFlow,  \n` +
+        `║  or RAGFLOW_MOCK=false to force real API.                    \n` +
+        `╚══════════════════════════════════════════════════════════════╝`,
+    );
   }
 
   private baseUrl(): string {

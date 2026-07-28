@@ -6,7 +6,7 @@ import {
 import { Request } from 'express';
 import { AuthService } from './auth.service';
 import { forbidden, unauthorized } from '../common/errors';
-import { AuthPrincipal, CSRF_COOKIE, SESSION_COOKIE } from './auth.types';
+import { AuthPrincipal, SESSION_COOKIE } from './auth.types';
 
 export type AuthedRequest = Request & {
   principal?: AuthPrincipal;
@@ -25,15 +25,13 @@ export class AuthGuard implements CanActivate {
 
     const method = (req.method || 'GET').toUpperCase();
     if (!['GET', 'HEAD', 'OPTIONS'].includes(method)) {
-      // Session-bound CSRF: header must match the secret stored with the session.
-      // Cookie double-submit is optional (helps when JS can read the cookie).
+      // Session-bound CSRF: require header (never cookie-only — browser sends
+      // the non-HttpOnly CSRF cookie automatically, which is not proof of intent).
       const headerToken =
         (req.headers['x-csrf-token'] as string | undefined) ||
         (req.headers['x-xsrf-token'] as string | undefined) ||
         '';
-      const cookieToken = req.cookies?.[CSRF_COOKIE] || '';
-      const token = headerToken || cookieToken;
-      if (!token || token !== principal.csrfSecret) {
+      if (!headerToken || headerToken !== principal.csrfSecret) {
         throw forbidden('invalid csrf token');
       }
     }

@@ -1,6 +1,8 @@
 /**
  * Capture exact LLM request payloads + gateway responses for debugging 500s.
  * Writes under apps/api/data/llm-debug/ (last-request.json, last-error.json, history).
+ *
+ * Gated by LLM_DEBUG=true (or 1). Default off so chat content is not dumped to disk.
  */
 
 import { existsSync, mkdirSync, writeFileSync, readdirSync, unlinkSync } from 'fs';
@@ -32,6 +34,11 @@ export type LlmCallSnapshot = {
     roles: string[];
   };
 };
+
+export function isLlmDebugEnabled(): boolean {
+  const v = (process.env.LLM_DEBUG || '').toLowerCase();
+  return v === 'true' || v === '1';
+}
 
 function debugDir(): string {
   // Nest cwd is typically apps/api when using npm run dev:api
@@ -98,8 +105,25 @@ function callKey(conversationId?: string): string {
   return `${conversationId || 'unknown'}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function compactErrorMessage(
+  message: string,
+  baseUrl: string,
+  modelId: string,
+): string {
+  if (/nginx|Internal Server Error|<html/i.test(message)) {
+    return (
+      `LLM gateway error (HTTP 500 from ${baseUrl}, model ${modelId}). ` +
+      (isLlmDebugEnabled()
+        ? `See API log and apps/api/data/llm-debug/last-error.json for the exact request payload.`
+        : `Set LLM_DEBUG=true on the API to dump the request payload for diagnosis.`)
+    );
+  }
+  return message;
+}
+
 /**
  * Build pi-agent / pi-ai hooks that dump the exact chat/completions payload.
+ * No-ops for onPayload/onResponse when LLM_DEBUG is not enabled.
  */
 export function createLlmDebugHooks(opts: {
   conversationId?: string;
@@ -114,6 +138,17 @@ export function createLlmDebugHooks(opts: {
   /** Call from agent.prompt catch / error paths */
   recordError: (err: unknown) => string;
 } {
+  if (!isLlmDebugEnabled()) {
+    return {
+      onPayload: () => undefined,
+      onResponse: () => {},
+      recordError: (err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err);
+        return compactErrorMessage(message, opts.baseUrl, opts.modelId);
+      },
+    };
+  }
+
   let activeKey: string | null = null;
 
   const onPayload = (payload: unknown): undefined => {
@@ -183,7 +218,10 @@ export function createLlmDebugHooks(opts: {
       snap.error = { message, name };
       if (!snap.response && /500|Internal Server Error|nginx/i.test(message)) {
         // Body often embeds nginx HTML when gateway dies before onResponse
-        snap.response = { status: 500, headers: { note: 'inferred-from-error-message' } };
+        snap.response = {
+          status: 500,
+          headers: { note: 'inferred-from-error-message' },
+        };
       }
       writeJson(join(dir, 'last-request.json'), snap);
       writeJson(join(dir, 'last-error.json'), snap);
@@ -210,14 +248,7 @@ export function createLlmDebugHooks(opts: {
       );
     }
 
-    // Compact message for the chat UI (avoid dumping full nginx HTML)
-    if (/nginx|Internal Server Error|<html/i.test(message)) {
-      return (
-        `LLM gateway error (HTTP 500 from ${opts.baseUrl}, model ${opts.modelId}). ` +
-        `See API log and apps/api/data/llm-debug/last-error.json for the exact request payload.`
-      );
-    }
-    return message;
+    return compactErrorMessage(message, opts.baseUrl, opts.modelId);
   };
 
   return { onPayload, onResponse, recordError };

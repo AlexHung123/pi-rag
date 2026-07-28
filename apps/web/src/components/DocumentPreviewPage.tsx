@@ -26,10 +26,6 @@ function formatTime(iso: string) {
   }
 }
 
-function looksLikeHtml(s: string) {
-  return /<\/?[a-z][\s\S]*>/i.test(s);
-}
-
 function escapeHtml(s: string) {
   return s
     .replace(/&/g, '&amp;')
@@ -39,14 +35,14 @@ function escapeHtml(s: string) {
     .replace(/'/g, '&#39;');
 }
 
-/** Render chunk / full text as HTML. Plain text is escaped and keeps line breaks. */
+/**
+ * Render untrusted file/chunk text as HTML for layout only.
+ * Always escape — never pass through raw HTML (stored XSS).
+ */
 function toHtmlContent(content: string, { ellipsis = false, maxLen = 220 } = {}) {
   let text = content || '';
   if (ellipsis && text.length > maxLen) {
     text = `${text.slice(0, maxLen)}…`;
-  }
-  if (looksLikeHtml(text)) {
-    return text;
   }
   return escapeHtml(text).replace(/\n/g, '<br />');
 }
