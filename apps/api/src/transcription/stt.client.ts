@@ -44,10 +44,12 @@ export class SttClient {
 
     const base = (process.env.STT_BASE_URL || '').replace(/\/$/, '');
     const apiKey = (process.env.STT_API_KEY || '').trim();
-    const model = (process.env.STT_MODEL || '').trim();
+    // FunASR server model ids (e.g. sensevoice); empty lets server default
+    const model = (process.env.STT_MODEL || 'sensevoice').trim();
     const timeoutMs = Number(process.env.STT_TIMEOUT_MS || 3_600_000);
+    // yue = Cantonese (SenseVoice); use auto for mixed meetings
     const language =
-      (opts?.language || process.env.STT_DEFAULT_LANGUAGE || 'zh').trim() ||
+      (opts?.language || process.env.STT_DEFAULT_LANGUAGE || 'yue').trim() ||
       undefined;
 
     if (!fs.existsSync(filePath)) {
@@ -77,15 +79,19 @@ export class SttClient {
     form.append('file', fileBlob, filename);
     form.append('response_format', 'verbose_json');
     if (model) form.append('model', model);
-    if (language) form.append('language', language);
+    if (language) form.append('language', this.mapLanguageForStt(language));
 
     const headers: Record<string, string> = {};
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    const url = `${base}/v1/audio/transcriptions`;
+    this.logger.log(
+      `STT request model=${model || '-'} lang=${language || '-'} file=${filename}`,
+    );
     try {
-      const res = await fetch(`${base}/v1/audio/transcriptions`, {
+      const res = await fetch(url, {
         method: 'POST',
         headers,
         body: form,
@@ -108,6 +114,27 @@ export class SttClient {
     }
   }
 
+  /** Map UI/aliases to SenseVoice / FunASR language codes. */
+  mapLanguageForStt(lang: string): string {
+    const l = lang.trim().toLowerCase();
+    const aliases: Record<string, string> = {
+      cantonese: 'yue',
+      'yue-hk': 'yue',
+      'zh-yue': 'yue',
+      'zh-hk': 'yue',
+      mandarin: 'zh',
+      chinese: 'zh',
+      'zh-cn': 'zh',
+      'zh-hans': 'zh',
+    };
+    return aliases[l] || l;
+  }
+
+  /** Strip SenseVoice-style tags like <|yue|><|NEUTRAL|> from text. */
+  stripSenseVoiceTags(text: string): string {
+    return (text || '').replace(/<\|[^|]*\|>/g, '').replace(/\s+/g, ' ').trim();
+  }
+
   normalizeResponse(body: string, fallbackLanguage?: string): SttResult {
     const trimmed = (body || '').trim();
     if (!trimmed) {
@@ -116,10 +143,11 @@ export class SttClient {
 
     // Plain text fallback
     if (!trimmed.startsWith('{') && !trimmed.startsWith('[')) {
+      const plain = this.stripSenseVoiceTags(trimmed);
       return {
-        text: trimmed,
+        text: plain,
         language: fallbackLanguage,
-        segments: [{ start: 0, end: 0, text: trimmed }],
+        segments: plain ? [{ start: 0, end: 0, text: plain }] : [],
       };
     }
 
@@ -127,20 +155,23 @@ export class SttClient {
     try {
       json = JSON.parse(trimmed);
     } catch {
+      const plain = this.stripSenseVoiceTags(trimmed);
       return {
-        text: trimmed,
+        text: plain,
         language: fallbackLanguage,
-        segments: [{ start: 0, end: 0, text: trimmed }],
+        segments: plain ? [{ start: 0, end: 0, text: plain }] : [],
       };
     }
 
     const obj = json as Record<string, unknown>;
-    const text =
+    let text =
       typeof obj.text === 'string'
         ? obj.text
         : typeof obj.transcript === 'string'
           ? obj.transcript
           : '';
+    text = this.stripSenseVoiceTags(text);
+
     const language =
       (typeof obj.language === 'string' ? obj.language : undefined) ||
       fallbackLanguage;
@@ -151,43 +182,59 @@ export class SttClient {
           ? obj.duration_seconds
           : undefined;
 
-    const rawSegs = Array.isArray(obj.segments) ? obj.segments : [];
+    // OpenAI-style segments, or FunASR sentence_info (ms timestamps)
+    const rawSegs = Array.isArray(obj.segments)
+      ? obj.segments
+      : Array.isArray(obj.sentence_info)
+        ? obj.sentence_info
+        : [];
     const segments: TranscriptSegment[] = [];
     for (const s of rawSegs) {
       if (!s || typeof s !== 'object') continue;
       const seg = s as Record<string, unknown>;
-      const start =
+      let start =
         typeof seg.start === 'number'
           ? seg.start
           : typeof seg.start_time === 'number'
             ? seg.start_time
             : 0;
-      const end =
+      let end =
         typeof seg.end === 'number'
           ? seg.end
           : typeof seg.end_time === 'number'
             ? seg.end_time
             : start;
-      const segText =
+      // FunASR often reports milliseconds
+      if (end > 1000 || start > 1000) {
+        start = start / 1000;
+        end = end / 1000;
+      }
+      const segText = this.stripSenseVoiceTags(
         typeof seg.text === 'string'
           ? seg.text
           : typeof seg.content === 'string'
             ? seg.content
-            : '';
-      if (!segText.trim()) continue;
+            : '',
+      );
+      if (!segText) continue;
       segments.push({ start, end, text: segText });
     }
 
-    if (!segments.length && text.trim()) {
-      segments.push({ start: 0, end: duration ?? 0, text: text.trim() });
+    if (!segments.length && text) {
+      segments.push({ start: 0, end: duration ?? 0, text });
     }
 
-    return { text: text || segments.map((s) => s.text).join(' '), language, duration, segments };
+    return {
+      text: text || segments.map((s) => s.text).join(' '),
+      language,
+      duration,
+      segments,
+    };
   }
 
   private mockResult(filePath: string, language?: string | null): SttResult {
     const name = path.basename(filePath);
-    const lang = language || process.env.STT_DEFAULT_LANGUAGE || 'zh';
+    const lang = language || process.env.STT_DEFAULT_LANGUAGE || 'yue';
     this.logger.log(`STT_MOCK: fake transcript for ${name}`);
     return {
       text: '这是模拟转写结果。Hello from STT mock.',

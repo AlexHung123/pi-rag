@@ -43,7 +43,7 @@ export class TranscriptionService {
       (opts?.language ||
         doc.transcriptLanguage ||
         process.env.STT_DEFAULT_LANGUAGE ||
-        'zh')?.trim() || null;
+        'yue')?.trim() || null;
 
     const job = await this.prisma.transcriptionJob.create({
       data: {
@@ -319,9 +319,13 @@ export class TranscriptionService {
       progressMsg = job.progressMsg || (job.status === 'cancelled' ? 'Cancelled' : 'Failed');
       errorMessage = job.errorMessage;
     } else if (job.status === 'done' && !doc.ragflowDocumentId) {
-      // Should be rare: job done but no RF id yet
-      status = 'running';
-      progressMsg = job.progressMsg || 'Finishing…';
+      // Transcript ready for user review (not yet ingested to RAGFlow)
+      status = 'unstart';
+      progress = 1;
+      progressMsg =
+        job.progressMsg ||
+        'Transcript ready — review, then ingest to knowledge base';
+      errorMessage = null;
     }
 
     if (

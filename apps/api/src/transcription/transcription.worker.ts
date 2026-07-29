@@ -80,6 +80,16 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
     return v !== 'false' && v !== '0';
   }
 
+  /**
+   * When false (default), stop after writing transcript.md so the user can
+   * preview and click "Ingest to knowledge base" (upload to RAGFlow).
+   * When true, immediately upload + optional auto-parse (legacy happy path).
+   */
+  private autoIngest(): boolean {
+    const v = (process.env.STT_AUTO_INGEST || 'false').toLowerCase();
+    return v === 'true' || v === '1';
+  }
+
   private async recoverStaleJobs() {
     const cutoff = new Date(Date.now() - this.staleMs());
     const stale = await this.prisma.transcriptionJob.findMany({
@@ -357,6 +367,41 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
       }
 
       if (await this.isCancelled(job.id)) return;
+
+      // ── Pause for review (default): do not push to RAGFlow until user ingests ──
+      if (!this.autoIngest() && !doc.ragflowDocumentId) {
+        await this.prisma.transcriptionJob.update({
+          where: { id: job.id },
+          data: {
+            status: 'done',
+            stage: 'ready',
+            progress: 1,
+            progressMsg: 'Transcript ready for review',
+            finishedAt: new Date(),
+            lockedBy: null,
+            sttModel: (process.env.STT_MODEL || '').trim() || null,
+          },
+        });
+        await this.prisma.document.update({
+          where: { id: doc.id },
+          data: {
+            status: 'unstart',
+            progress: 1,
+            progressMsg: 'Transcript ready — review, then ingest to knowledge base',
+            errorMessage: null,
+          },
+        });
+        this.logger.log(
+          transcriptionLogFields({
+            ...baseLog,
+            event: 'job_ready_for_review',
+            stage: 'ready',
+            skipStt: skippedStt,
+            ms: Date.now() - started,
+          }),
+        );
+        return;
+      }
 
       // If already in RAGFlow with id, only re-trigger parse if needed
       let rfDocId = doc.ragflowDocumentId;

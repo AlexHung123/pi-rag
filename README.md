@@ -57,16 +57,21 @@ Sign in (create the first admin via `ADMIN_USERNAME` / `ADMIN_PASSWORD` on empty
 You can upload meeting recordings (mp3, m4a, wav, …) into a knowledge base. The API stores the audio locally, transcribes it via an **OpenAI-compatible STT service** (or mock), writes a timestamped Markdown transcript, then uploads that transcript to RAGFlow and auto-parses it. Chat/RAG only sees the transcript — never raw audio.
 
 ```bash
-# apps/api/.env — local dev without Whisper
+# apps/api/.env — local dev without STT
 STT_MOCK=true
 RAGFLOW_MOCK=true   # or real RAGFlow
 
-# Real STT (example: local Whisper HTTP on M3 Ultra)
+# Real STT: FunASR SenseVoice (Cantonese-friendly) on LAN host
 STT_MOCK=false
-STT_BASE_URL=http://127.0.0.1:8080
-STT_DEFAULT_LANGUAGE=zh
+STT_BASE_URL=http://192.168.1.11:8002
+STT_MODEL=sensevoice
+STT_DEFAULT_LANGUAGE=yue   # Cantonese; use auto for mixed meetings
 STT_WORKER_CONCURRENCY=1
+# Default: review transcript in UI, then click Ingest (do not auto-push to RAGFlow)
+STT_AUTO_INGEST=false
 ```
+
+Flow: upload audio → STT → **Review & ingest** (preview/edit markdown) → RAGFlow + parse → chat.
 
 If `STT_BASE_URL` is empty and `STT_MOCK` is false, **audio** uploads fail with a clear error; normal document uploads still work. See design: [`docs/superpowers/specs/2026-07-28-audio-transcription-ingest-design.md`](docs/superpowers/specs/2026-07-28-audio-transcription-ingest-design.md).
 

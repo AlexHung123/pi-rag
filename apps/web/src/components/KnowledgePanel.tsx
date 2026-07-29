@@ -95,10 +95,11 @@ function isAudioDoc(doc: DocumentItem): boolean {
 
 function isTranscribing(doc: DocumentItem): boolean {
   if (!isAudioDoc(doc)) return false
+  if (doc.transcriptReady) return false
   const js = doc.transcription?.status
   if (js === 'queued' || js === 'running') return true
-  // Fallback when job summary missing but still pre-RAGFlow
-  return !doc.ragflowDocumentId && (doc.status === 'unstart' || doc.status === 'running')
+  // Running STT (not yet ready for review)
+  return !doc.ragflowDocumentId && doc.status === 'running'
 }
 
 function canRetryTranscription(doc: DocumentItem): boolean {
@@ -107,14 +108,12 @@ function canRetryTranscription(doc: DocumentItem): boolean {
   return doc.status === 'fail' || js === 'failed' || js === 'cancelled'
 }
 
-function statusLabel(doc: DocumentItem): string {
-  if (isAudioDoc(doc) && doc.progressMsg) {
-    const pct = Math.round((doc.progress || 0) * 100)
-    if (doc.status === 'running' && pct > 0 && pct < 100) {
-      return `${doc.progressMsg} (${pct}%)`
-    }
-    return doc.progressMsg
-  }
+function canReviewTranscript(doc: DocumentItem): boolean {
+  return isAudioDoc(doc) && !!doc.transcriptReady && !doc.ragflowDocumentId
+}
+
+/** Parse column badge text — same for audio and normal files. */
+function parseBadgeLabel(doc: DocumentItem): string {
   if (doc.status === 'running') return `${Math.round((doc.progress || 0) * 100)}%`
   return doc.status
 }
@@ -140,6 +139,10 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const [kbsLoading, setKbsLoading] = useState(true)
   const [docsLoading, setDocsLoading] = useState(false)
   const [previewDoc, setPreviewDoc] = useState<DocumentItem | null>(null)
+  const [transcriptDoc, setTranscriptDoc] = useState<DocumentItem | null>(null)
+  const [transcriptMd, setTranscriptMd] = useState('')
+  const [transcriptLoading, setTranscriptLoading] = useState(false)
+  const [transcriptDirty, setTranscriptDirty] = useState(false)
   const [selectedDocIds, setSelectedDocIds] = useState<Set<string>>(new Set())
   const [members, setMembers] = useState<KnowledgeBaseMember[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
@@ -420,9 +423,23 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
             `File "${file.name}" (${formatBytes(file.size)}) exceeds remaining storage (${formatBytes(remaining)}).`,
           )
         }
-        const doc = await docApi.upload(selectedId, file)
+        // Hard timeout so UI never sticks on "Uploading…" forever
+        const doc = await Promise.race([
+          docApi.upload(selectedId, file),
+          new Promise<never>((_, reject) =>
+            setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Upload timed out for "${file.name}". Check API logs; if this persists, restart the API (storage lock).`,
+                  ),
+                ),
+              90_000,
+            ),
+          ),
+        ])
         if (remaining !== undefined) remaining -= file.size
-        // Audio auto-parses after STT; skip manual parse-on-creation for audio
+        // Audio: STT then Review & ingest; skip parse-on-creation for audio
         if (parseOnCreation && doc?.id && doc.sourceType !== 'audio' && doc.ragflowDocumentId) {
           await docApi.parse(selectedId, doc.id)
         }
@@ -492,6 +509,67 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     try {
       await docApi.retryTranscription(selectedId, docId)
       await loadDocs(selectedId, { quiet: true })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const openTranscriptReview = async (doc: DocumentItem) => {
+    if (!selectedId) return
+    setTranscriptDoc(doc)
+    setTranscriptMd('')
+    setTranscriptDirty(false)
+    setTranscriptLoading(true)
+    setError('')
+    try {
+      const res = await docApi.getTranscript(selectedId, doc.id)
+      setTranscriptMd(res.markdown)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+      setTranscriptDoc(null)
+    } finally {
+      setTranscriptLoading(false)
+    }
+  }
+
+  const closeTranscriptReview = () => {
+    if (busy) return
+    setTranscriptDoc(null)
+    setTranscriptMd('')
+    setTranscriptDirty(false)
+  }
+
+  const onSaveTranscript = async () => {
+    if (!selectedId || !transcriptDoc) return
+    setBusy(true)
+    setError('')
+    try {
+      await docApi.saveTranscript(selectedId, transcriptDoc.id, transcriptMd)
+      setTranscriptDirty(false)
+      await loadDocs(selectedId, { quiet: true })
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const onIngestTranscript = async () => {
+    if (!selectedId || !transcriptDoc) return
+    setBusy(true)
+    setError('')
+    try {
+      await docApi.ingestTranscript(selectedId, transcriptDoc.id, {
+        parse: true,
+        markdown: transcriptDirty ? transcriptMd : undefined,
+      })
+      setTranscriptDoc(null)
+      setTranscriptMd('')
+      setTranscriptDirty(false)
+      await loadDocs(selectedId, { quiet: true })
+      await loadKbs({ quiet: true })
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -1336,15 +1414,23 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                         </label>
                       </td>
                       <td className="kb-cell-muted">{doc.chunkCount}</td>
-                      <td className="kb-cell-muted" title={doc.errorMessage || doc.progressMsg || ''}>
-                        {doc.progressMsg && (isAudioDoc(doc) || doc.status === 'running')
-                          ? doc.progressMsg
-                          : '—'}
+                      <td
+                        className="kb-cell-muted kb-meta-cell"
+                        title={doc.errorMessage || doc.progressMsg || ''}
+                      >
+                        {doc.errorMessage?.trim()
+                          ? doc.errorMessage
+                          : doc.progressMsg?.trim()
+                            ? doc.progressMsg
+                            : '—'}
                       </td>
                       <td>
                         <div className="kb-parse-cell">
-                          <span className={`badge ${doc.status}`} title={doc.errorMessage || doc.progressMsg || ''}>
-                            {statusLabel(doc)}
+                          <span
+                            className={`badge ${doc.status}`}
+                            title={doc.errorMessage || doc.progressMsg || doc.status}
+                          >
+                            {parseBadgeLabel(doc)}
                           </span>
                           {canEditContent ? (
                             isTranscribing(doc) ? (
@@ -1356,6 +1442,16 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                                 title="Cancel transcription"
                               >
                                 Cancel
+                              </button>
+                            ) : canReviewTranscript(doc) ? (
+                              <button
+                                className="btn btn-secondary btn-sm"
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void openTranscriptReview(doc)}
+                                title="Review transcript, then ingest to knowledge base"
+                              >
+                                Review &amp; ingest
                               </button>
                             ) : canRetryTranscription(doc) && !doc.ragflowDocumentId ? (
                               <button
@@ -1391,15 +1487,31 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                       </td>
                       <td>
                         <div className="kb-action-cell">
-                          <button
-                            className="btn btn-secondary btn-sm"
-                            type="button"
-                            disabled={busy || !doc.ragflowDocumentId}
-                            title={!doc.ragflowDocumentId ? 'Preview available after transcript is ready' : 'Preview'}
-                            onClick={() => setPreviewDoc(doc)}
-                          >
-                            Preview
-                          </button>
+                          {canReviewTranscript(doc) ? (
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              type="button"
+                              disabled={busy}
+                              title="Preview transcript text"
+                              onClick={() => void openTranscriptReview(doc)}
+                            >
+                              Transcript
+                            </button>
+                          ) : (
+                            <button
+                              className="btn btn-secondary btn-sm"
+                              type="button"
+                              disabled={busy || !doc.ragflowDocumentId}
+                              title={
+                                !doc.ragflowDocumentId
+                                  ? 'Chunk preview after ingest to knowledge base'
+                                  : 'Preview'
+                              }
+                              onClick={() => setPreviewDoc(doc)}
+                            >
+                              Preview
+                            </button>
+                          )}
                           {canEditContent ? (
                             <button
                               className="btn btn-danger btn-sm"
@@ -1561,7 +1673,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               </p>
               <p className="kb-upload-dropzone-hint">
                 Documents (PDF, TXT, MD, Office…) and audio (MP3, M4A, WAV, FLAC…).
-                Audio is transcribed then ingested as a transcript for chat.
+                Audio is transcribed first — review the transcript, then ingest to chat.
                 Click to browse{uploadMode === 'folder' ? ' a folder' : ''}.
                 {storage
                   ? ` Storage remaining: ${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total.`
@@ -1651,6 +1763,91 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 onClick={() => void saveUpload()}
               >
                 {busy ? 'Uploading…' : 'Save'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {transcriptDoc && (
+        <div className="kb-modal-backdrop" role="presentation" onClick={closeTranscriptReview}>
+          <div
+            className="kb-modal kb-upload-modal"
+            role="dialog"
+            aria-labelledby="transcript-review-title"
+            style={{ maxWidth: 720, width: 'min(720px, 96vw)' }}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="kb-upload-modal-header">
+              <h2 id="transcript-review-title">Review transcript</h2>
+              <button
+                type="button"
+                className="kb-upload-modal-close"
+                aria-label="Close"
+                disabled={busy}
+                onClick={closeTranscriptReview}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <p className="field-hint" style={{ marginTop: 0 }}>
+              <strong>{transcriptDoc.name}</strong>
+              {transcriptDoc.transcriptLanguage ? ` · ${transcriptDoc.transcriptLanguage}` : ''}
+              {transcriptDoc.durationSeconds != null && Number.isFinite(transcriptDoc.durationSeconds)
+                ? ` · ${Math.round(transcriptDoc.durationSeconds)}s`
+                : ''}
+              . Edit if needed, then ingest to the knowledge base (RAGFlow + parse).
+            </p>
+            {error ? <p className="error-text">{error}</p> : null}
+            {transcriptLoading ? (
+              <p className="field-hint">Loading transcript…</p>
+            ) : (
+              <textarea
+                className="kb-search-input"
+                style={{
+                  width: '100%',
+                  minHeight: 360,
+                  fontFamily: 'ui-monospace, SFMono-Regular, Menlo, monospace',
+                  fontSize: 13,
+                  lineHeight: 1.45,
+                  padding: 12,
+                  resize: 'vertical',
+                  boxSizing: 'border-box',
+                }}
+                value={transcriptMd}
+                disabled={busy}
+                onChange={e => {
+                  setTranscriptMd(e.target.value)
+                  setTranscriptDirty(true)
+                }}
+                spellCheck={false}
+              />
+            )}
+            <div className="kb-modal-actions" style={{ marginTop: 12 }}>
+              <button
+                className="btn btn-secondary"
+                type="button"
+                disabled={busy}
+                onClick={closeTranscriptReview}
+              >
+                Close
+              </button>
+              <button
+                className="btn btn-secondary"
+                type="button"
+                disabled={busy || transcriptLoading || !transcriptDirty}
+                onClick={() => void onSaveTranscript()}
+              >
+                {busy ? 'Saving…' : 'Save edits'}
+              </button>
+              <button
+                className="btn"
+                type="button"
+                disabled={busy || transcriptLoading || !transcriptMd.trim()}
+                onClick={() => void onIngestTranscript()}
+                title="Upload transcript to RAGFlow and start parse"
+              >
+                {busy ? 'Ingesting…' : 'Ingest to knowledge base'}
               </button>
             </div>
           </div>

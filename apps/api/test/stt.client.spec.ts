@@ -50,6 +50,22 @@ describe('SttClient', () => {
     expect(result.segments[0].text).toBe('just text');
   });
 
+  it('strips SenseVoice tags and maps language aliases', () => {
+    const client = new SttClient();
+    expect(client.mapLanguageForStt('cantonese')).toBe('yue');
+    expect(client.mapLanguageForStt('zh-HK')).toBe('yue');
+    const result = client.normalizeResponse(
+      JSON.stringify({
+        text: '<|yue|><|NEUTRAL|>呢句系粤语',
+        language: 'yue',
+        duration: 2,
+        segments: [{ start: 0, end: 2, text: '<|yue|>呢句系粤语' }],
+      }),
+    );
+    expect(result.text).toBe('呢句系粤语');
+    expect(result.segments[0].text).toBe('呢句系粤语');
+  });
+
   it('assertConfigured fails when mock off and no base url', () => {
     process.env.STT_MOCK = 'false';
     delete process.env.STT_BASE_URL;

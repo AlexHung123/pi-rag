@@ -18,6 +18,7 @@ import { MediaStorage } from '../transcription/media-storage';
 import { SttClient } from '../transcription/stt.client';
 import { TranscriptionService } from '../transcription/transcription.service';
 import { probeDurationSeconds } from '../transcription/duration-probe';
+import { transcriptRagflowFilename } from '../transcription/transcript-format';
 
 type DocWithJob = Document & {
   transcriptionJobs?: TranscriptionJob[];
@@ -54,6 +55,16 @@ export class DocumentsService {
       (doc.transcriptionJobs && doc.transcriptionJobs.length
         ? doc.transcriptionJobs[0]
         : null);
+    const hasLocalTranscript =
+      doc.sourceType === 'audio' &&
+      this.media.hasTranscript(doc.ownerUserId, doc.id);
+    // Ready for user review: local transcript exists, not yet in RAGFlow
+    const transcriptReady =
+      hasLocalTranscript &&
+      !doc.ragflowDocumentId &&
+      (!latestJob ||
+        latestJob.status === 'done' ||
+        latestJob.stage === 'ready');
     return {
       id: doc.id,
       knowledgeBaseId: doc.knowledgeBaseId,
@@ -68,6 +79,7 @@ export class DocumentsService {
       durationSeconds: doc.durationSeconds ?? null,
       transcriptLanguage: doc.transcriptLanguage ?? null,
       ragflowDocumentId: doc.ragflowDocumentId ?? null,
+      transcriptReady,
       transcription: this.transcription.summarize(latestJob),
       createdAt: doc.createdAt.toISOString(),
       updatedAt: doc.updatedAt.toISOString(),
@@ -241,7 +253,7 @@ export class DocumentsService {
       const displayName = safeName.replace(/\.[^.]+$/, '') || safeName;
       const ext = extensionOf(safeName) || 'bin';
       const language =
-        (opts?.language || process.env.STT_DEFAULT_LANGUAGE || 'zh')?.trim() ||
+        (opts?.language || process.env.STT_DEFAULT_LANGUAGE || 'yue')?.trim() ||
         null;
 
       // Create document first to get UUID for media path
@@ -283,8 +295,11 @@ export class DocumentsService {
           throw badRequest('file is required');
         }
 
-        // Best-effort early duration (non-blocking for queue; failure is fine)
-        const duration = await probeDurationSeconds(absolutePath);
+        // Duration probe is best-effort; never block upload more than a few seconds
+        const duration = await Promise.race([
+          probeDurationSeconds(absolutePath),
+          new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
+        ]);
 
         const updated = await this.prisma.document.update({
           where: { id: doc.id },
@@ -311,7 +326,7 @@ export class DocumentsService {
   }
 
   async cancelTranscription(userId: string, knowledgeBaseId: string, docId: string) {
-    const result = await this.transcription.cancel(userId, knowledgeBaseId, docId);
+    await this.transcription.cancel(userId, knowledgeBaseId, docId);
     const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
     return this.serialize(doc, await this.transcription.latestJob(doc.id));
   }
@@ -320,6 +335,144 @@ export class DocumentsService {
     const job = await this.transcription.retry(userId, knowledgeBaseId, docId);
     const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
     return this.serialize(doc, job);
+  }
+
+  /** Read local transcript.md for audio docs (preview before RAGFlow ingest). */
+  async getTranscript(userId: string, knowledgeBaseId: string, docId: string) {
+    const doc = await this.getInReadableKb(userId, knowledgeBaseId, docId);
+    if (doc.sourceType !== 'audio') {
+      throw badRequest('document is not an audio source');
+    }
+    const markdown = this.media.readTranscriptIfExists(doc.ownerUserId, doc.id);
+    if (markdown == null) {
+      throw notFound('transcript not ready yet');
+    }
+    return {
+      documentId: doc.id,
+      name: doc.name,
+      language: doc.transcriptLanguage,
+      durationSeconds: doc.durationSeconds,
+      ragflowDocumentId: doc.ragflowDocumentId,
+      markdown,
+    };
+  }
+
+  /** Save edited transcript before ingest (optional). */
+  async saveTranscript(
+    userId: string,
+    knowledgeBaseId: string,
+    docId: string,
+    markdown: string,
+  ) {
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+    if (doc.sourceType !== 'audio') {
+      throw badRequest('document is not an audio source');
+    }
+    if (doc.ragflowDocumentId) {
+      throw badRequest(
+        'transcript already ingested to knowledge base; re-transcribe to replace',
+      );
+    }
+    const body = (markdown || '').trim();
+    if (!body) throw badRequest('markdown is required');
+    this.media.writeTranscript(doc.ownerUserId, doc.id, body.endsWith('\n') ? body : `${body}\n`);
+    const updated = await this.prisma.document.update({
+      where: { id: doc.id },
+      data: {
+        progressMsg: 'Transcript ready — review, then ingest to knowledge base',
+        errorMessage: null,
+      },
+    });
+    return this.serialize(updated, await this.transcription.latestJob(updated.id));
+  }
+
+  /**
+   * Push local transcript.md to RAGFlow and optionally start parse.
+   * Call after user reviews the transcript preview.
+   */
+  async ingestTranscript(
+    userId: string,
+    knowledgeBaseId: string,
+    docId: string,
+    opts?: { parse?: boolean; markdown?: string | null },
+  ) {
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+    if (doc.sourceType !== 'audio') {
+      throw badRequest('document is not an audio source');
+    }
+
+    if (opts?.markdown?.trim()) {
+      this.media.writeTranscript(
+        doc.ownerUserId,
+        doc.id,
+        opts.markdown.trim().endsWith('\n')
+          ? opts.markdown.trim()
+          : `${opts.markdown.trim()}\n`,
+      );
+    }
+
+    let markdown = this.media.readTranscriptIfExists(doc.ownerUserId, doc.id);
+    if (!markdown?.trim()) {
+      throw badRequest('transcript not ready yet; wait for transcription to finish');
+    }
+
+    const doParse =
+      opts?.parse !== false &&
+      (process.env.STT_AUTO_PARSE || 'true').toLowerCase() !== 'false';
+
+    // Already ingested: optionally re-parse only
+    if (doc.ragflowDocumentId) {
+      if (doParse) {
+        return this.parse(userId, knowledgeBaseId, docId);
+      }
+      return this.serialize(doc, await this.transcription.latestJob(doc.id));
+    }
+
+    const rfName = transcriptRagflowFilename(doc.name);
+    const buffer = Buffer.from(markdown, 'utf8');
+    const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [
+      {
+        filename: rfName,
+        buffer,
+        mimetype: 'text/markdown',
+      },
+    ]);
+    const rfDoc = uploaded[0];
+    if (!rfDoc?.id) throw badRequest('RAGFlow upload failed for transcript');
+
+    let updated = await this.prisma.document.update({
+      where: { id: doc.id },
+      data: {
+        ragflowDocumentId: rfDoc.id,
+        progressMsg: doParse ? 'Parse started' : 'Transcript ingested — parse to index',
+        progress: doParse ? 0.05 : 0,
+        status: doParse ? 'running' : 'unstart',
+        errorMessage: null,
+      },
+    });
+
+    const job = await this.transcription.latestJob(doc.id);
+    if (job) {
+      await this.prisma.transcriptionJob.update({
+        where: { id: job.id },
+        data: {
+          stage: doParse ? 'parsing' : 'done',
+          status: 'done',
+          progress: 1,
+          progressMsg: doParse
+            ? 'Ingested; parse running'
+            : 'Ingested to knowledge base',
+        },
+      });
+    }
+
+    if (doParse) {
+      await this.ragflow.parseDocuments(kb.ragflowDatasetId, [rfDoc.id]);
+      updated = await this.prisma.document.findUniqueOrThrow({ where: { id: doc.id } });
+    }
+
+    return this.serialize(updated, await this.transcription.latestJob(updated.id));
   }
 
   async parse(userId: string, knowledgeBaseId: string, docId: string) {

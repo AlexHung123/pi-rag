@@ -150,6 +150,45 @@ export class DocumentsController {
     return this.documents.retryTranscription(user.userId, kbId, docId);
   }
 
+  /** Preview local transcript.md (before RAGFlow ingest). */
+  @Get(':docId/transcript')
+  async getTranscript(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+  ) {
+    return this.documents.getTranscript(user.userId, kbId, docId);
+  }
+
+  /** Save edited transcript markdown (before ingest). */
+  @Post(':docId/transcript')
+  async saveTranscript(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+    @Body() body: { markdown?: string },
+  ) {
+    if (!body?.markdown?.trim()) throw badRequest('markdown is required');
+    return this.documents.saveTranscript(user.userId, kbId, docId, body.markdown);
+  }
+
+  /**
+   * Upload local transcript to RAGFlow + optional auto-parse.
+   * Body: { parse?: boolean, markdown?: string }
+   */
+  @Post(':docId/ingest-transcript')
+  async ingestTranscript(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+    @Body() body?: { parse?: boolean; markdown?: string },
+  ) {
+    return this.documents.ingestTranscript(user.userId, kbId, docId, {
+      parse: body?.parse,
+      markdown: body?.markdown,
+    });
+  }
+
   @Get(':docId/chunks')
   async chunks(
     @CurrentUser() user: AuthPrincipal,

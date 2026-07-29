@@ -286,9 +286,20 @@ export type DocumentItem = {
   durationSeconds?: number | null;
   transcriptLanguage?: string | null;
   ragflowDocumentId?: string | null;
+  /** Audio: local transcript ready, not yet in RAGFlow */
+  transcriptReady?: boolean;
   transcription?: TranscriptionJobSummary | null;
   createdAt: string;
   updatedAt: string;
+};
+
+export type TranscriptPreview = {
+  documentId: string;
+  name: string;
+  language: string | null;
+  durationSeconds: number | null;
+  ragflowDocumentId: string | null;
+  markdown: string;
 };
 
 /** RAGFlow position box: [pageNumber, x1, x2, y1, y2] in PDF page space */
@@ -413,6 +424,25 @@ export const docApi = {
     apiFetch<DocumentItem>(
       `/api/knowledge-bases/${kbId}/documents/${docId}/retry-transcription`,
       { method: 'POST' },
+    ),
+  getTranscript: (kbId: string, docId: string) =>
+    apiFetch<TranscriptPreview>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/transcript`,
+    ),
+  saveTranscript: (kbId: string, docId: string, markdown: string) =>
+    apiFetch<DocumentItem>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/transcript`,
+      { method: 'POST', body: JSON.stringify({ markdown }) },
+    ),
+  /** Push transcript to RAGFlow (+ parse by default). */
+  ingestTranscript: (
+    kbId: string,
+    docId: string,
+    opts?: { parse?: boolean; markdown?: string },
+  ) =>
+    apiFetch<DocumentItem>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/ingest-transcript`,
+      { method: 'POST', body: JSON.stringify(opts || {}) },
     ),
   parse: (kbId: string, docId: string) =>
     apiFetch<DocumentItem>(

@@ -2714,6 +2714,16 @@ button {
   font-size: 0.85rem;
 }
 
+/* Metadata column: same for audio + normal files (RAGFlow / STT progress logs) */
+.kb-meta-cell {
+  max-width: 280px;
+  white-space: normal;
+  word-break: break-word;
+  line-height: 1.35;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
 .kb-files-empty {
   text-align: center !important;
   color: var(--text-tertiary);

@@ -19,6 +19,13 @@ export function storageLockKeys(userId: string): [number, number] {
 /**
  * Serialize check+upload+insert for one user so concurrent uploads cannot
  * all pass quota against a stale "used" sum (TOCTOU).
+ *
+ * Uses transaction-scoped advisory locks (pg_advisory_xact_lock) so lock + work
+ * share one pooled connection and the lock is released when the transaction
+ * ends. Session-level pg_advisory_lock is unsafe with Prisma's pool: lock and
+ * unlock may run on different connections and leave a permanent hang.
+ *
+ * Cast to integer: Postgres has (int,int) and (bigint) overloads, not (bigint,bigint).
  */
 export async function withUserStorageLock<T>(
   prisma: PrismaService,
@@ -26,12 +33,24 @@ export async function withUserStorageLock<T>(
   fn: () => Promise<T>,
 ): Promise<T> {
   const [key1, key2] = storageLockKeys(userId);
-  await prisma.$executeRaw`SELECT pg_advisory_lock(${key1}, ${key2})`;
-  try {
-    return await fn();
-  } finally {
-    await prisma.$executeRaw`SELECT pg_advisory_unlock(${key1}, ${key2})`;
-  }
+  return prisma.$transaction(
+    async (tx) => {
+      await tx.$executeRawUnsafe(
+        'SELECT pg_advisory_xact_lock($1::integer, $2::integer)',
+        key1,
+        key2,
+      );
+      // fn uses the outer prisma client for writes; mutual exclusion is still
+      // enforced while this transaction holds the xact lock on its connection.
+      return fn();
+    },
+    {
+      // Wait up to 60s to acquire lock if another upload is in progress
+      maxWait: 60_000,
+      // Large audio may take a while under the lock (disk + enqueue only)
+      timeout: 120_000,
+    },
+  );
 }
 
 export function defaultStorageQuotaBytes(): number {
