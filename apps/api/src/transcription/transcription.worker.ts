@@ -9,8 +9,8 @@ import {
   buildTranscriptMarkdown,
   transcriptRagflowFilename,
 } from './transcript-format';
-import { probeDurationSeconds } from './duration-probe';
 import { transcriptionLogFields } from './transcription-log';
+import { decodeMojibakeUtf8 } from '../common/filename';
 
 @Injectable()
 export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
@@ -188,7 +188,7 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
             where: { id: row.id },
             data: {
               status: 'running',
-              stage: 'probing',
+              stage: 'transcribing',
               progress: 0.02,
               progressMsg: 'Starting…',
               lockedBy: this.instanceId,
@@ -264,26 +264,8 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
       }
       const audioAbs = this.media.absoluteFromRelative(doc.mediaPath);
 
-      // ── Stage: probing (optional duration) ──
-      await this.setStage(job.id, doc.id, {
-        stage: 'probing',
-        progress: 0.03,
-        progressMsg: 'Probing audio…',
-      });
-      this.logger.log(
-        transcriptionLogFields({ ...baseLog, event: 'stage', stage: 'probing' }),
-      );
-
+      // Duration only from STT response (no local ffprobe).
       let durationSeconds = doc.durationSeconds ?? null;
-      if (durationSeconds == null) {
-        durationSeconds = await probeDurationSeconds(audioAbs);
-        if (durationSeconds != null) {
-          await this.prisma.document.update({
-            where: { id: doc.id },
-            data: { durationSeconds },
-          });
-        }
-      }
 
       if (await this.isCancelled(job.id)) return;
 
@@ -341,14 +323,23 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
           }),
         );
 
-        const title = doc.name.replace(/\.[^.]+$/, '') || doc.name;
+        const sourceName = decodeMojibakeUtf8(doc.name);
+        const title = sourceName.replace(/\.[^.]+$/, '') || sourceName;
         markdown = buildTranscriptMarkdown({
           title,
-          originalFilename: doc.name,
+          originalFilename: sourceName,
           language: sttResult.language || job.language,
           durationSeconds: sttResult.duration ?? durationSeconds,
           segments: sttResult.segments,
         });
+        // Persist healed title if multer had stored Latin-1 mojibake
+        if (sourceName !== doc.name) {
+          await this.prisma.document.update({
+            where: { id: doc.id },
+            data: { name: title },
+          });
+          doc.name = title;
+        }
         this.media.writeTranscript(doc.ownerUserId, doc.id, markdown);
 
         await this.prisma.document.update({
@@ -422,7 +413,7 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
           }),
         );
 
-        const rfName = transcriptRagflowFilename(doc.name);
+        const rfName = transcriptRagflowFilename(decodeMojibakeUtf8(doc.name));
         const buffer = Buffer.from(markdown, 'utf8');
         const uploaded = await this.ragflow.uploadDocuments(
           doc.knowledgeBase.ragflowDatasetId,

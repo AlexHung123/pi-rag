@@ -17,6 +17,7 @@ import { AuthGuard } from '../auth/auth.guard';
 import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthPrincipal } from '../auth/auth.types';
 import { badRequest } from '../common/errors';
+import { fixMulterOriginalName } from '../common/filename';
 import { AdminGuard } from './admin.guard';
 import { AdminService } from './admin.service';
 
@@ -82,7 +83,7 @@ export class AdminController {
   ) {
     if (!file) throw badRequest('file is required');
     return this.admin.uploadDocument(kbId, {
-      originalname: file.originalname,
+      originalname: fixMulterOriginalName(file.originalname),
       buffer: file.buffer,
       size: file.size,
       mimetype: file.mimetype,

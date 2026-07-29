@@ -6,6 +6,7 @@ import { RagflowService } from '../ragflow/ragflow.service';
 import { AgentSessionPool } from '../agent/agent-session.pool';
 import { TranscriptionService } from '../transcription/transcription.service';
 import { badRequest, notFound } from '../common/errors';
+import { decodeMojibakeUtf8, fixMulterOriginalName } from '../common/filename';
 import {
   assertWithinStorageQuota,
   defaultStorageQuotaBytes,
@@ -139,7 +140,7 @@ export class AdminService {
       knowledgeBaseName: doc.knowledgeBase?.name,
       ownerUserId: doc.ownerUserId,
       ownerUsername: doc.owner?.username,
-      name: doc.name,
+      name: decodeMojibakeUtf8(doc.name),
       sizeBytes: Number(doc.sizeBytes),
       status: doc.status,
       progress: doc.progress,
@@ -218,8 +219,9 @@ export class AdminService {
     return withUserStorageLock(this.prisma, kb.ownerUserId, async () => {
       await assertWithinStorageQuota(this.prisma, kb.ownerUserId, file.size);
 
+      const originalname = fixMulterOriginalName(file.originalname);
       const safeName =
-        file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
+        originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
       const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [
         {
           filename: safeName,

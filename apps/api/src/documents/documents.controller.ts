@@ -18,6 +18,7 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthPrincipal } from '../auth/auth.types';
 import { DocumentsService } from './documents.service';
 import { badRequest } from '../common/errors';
+import { fixMulterOriginalName } from '../common/filename';
 import { MediaStorage } from '../transcription/media-storage';
 
 /** Max of document + audio caps so multer does not reject large audio early. */
@@ -69,11 +70,12 @@ export class DocumentsController {
   ) {
     if (!file) throw badRequest('file is required');
     // Disk storage: path is set; buffer may be empty
+    // Multer/busboy Latin-1-decodes UTF-8 filenames → Chinese becomes mojibake
     return this.documents.upload(
       user.userId,
       kbId,
       {
-        originalname: file.originalname,
+        originalname: fixMulterOriginalName(file.originalname),
         size: file.size,
         mimetype: file.mimetype,
         path: file.path,

@@ -9,6 +9,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { KnowledgeService } from '../knowledge/knowledge.service';
 import { badRequest, notFound } from '../common/errors';
+import { decodeMojibakeUtf8, fixMulterOriginalName } from '../common/filename';
 import {
   assertWithinStorageQuota,
   withUserStorageLock,
@@ -17,7 +18,6 @@ import { isAudioUpload, extensionOf } from '../transcription/audio-formats';
 import { MediaStorage } from '../transcription/media-storage';
 import { SttClient } from '../transcription/stt.client';
 import { TranscriptionService } from '../transcription/transcription.service';
-import { probeDurationSeconds } from '../transcription/duration-probe';
 import { transcriptRagflowFilename } from '../transcription/transcript-format';
 
 type DocWithJob = Document & {
@@ -68,7 +68,8 @@ export class DocumentsService {
     return {
       id: doc.id,
       knowledgeBaseId: doc.knowledgeBaseId,
-      name: doc.name,
+      // Heal historical multer Latin-1 mojibake so Chinese titles display correctly
+      name: decodeMojibakeUtf8(doc.name),
       sizeBytes: Number(doc.sizeBytes),
       status: doc.status,
       progress: doc.progress,
@@ -179,9 +180,13 @@ export class DocumentsService {
       throw badRequest('file is required');
     }
 
-    const audio = isAudioUpload(file.originalname, file.mimetype);
+    // Defense in depth: controllers also fix; tests may call service directly
+    const originalname = fixMulterOriginalName(file.originalname);
+    const fixedFile = { ...file, originalname, size };
+
+    const audio = isAudioUpload(originalname, file.mimetype);
     if (audio) {
-      return this.uploadAudio(userId, kb, { ...file, size }, opts);
+      return this.uploadAudio(userId, kb, fixedFile, opts);
     }
 
     const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
@@ -196,17 +201,17 @@ export class DocumentsService {
         await assertWithinStorageQuota(this.prisma, userId, size);
 
         const safeName =
-          file.originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
+          originalname.replace(/[\\/]/g, '_').slice(0, 200) || 'upload.bin';
         // Small docs: load into memory once for RAGFlow multipart
         const buffer =
-          file.buffer?.length
-            ? file.buffer
-            : fs.readFileSync(file.path!);
+          fixedFile.buffer?.length
+            ? fixedFile.buffer
+            : fs.readFileSync(fixedFile.path!);
         const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [
           {
             filename: safeName,
             buffer,
-            mimetype: file.mimetype,
+            mimetype: fixedFile.mimetype,
           },
         ]);
         const rfDoc = uploaded[0];
@@ -275,17 +280,16 @@ export class DocumentsService {
 
       try {
         let relativePath: string;
-        let absolutePath: string;
         if (file.path && fs.existsSync(file.path)) {
           // P1: rename/move from multer temp into final media path (no second full RAM copy)
-          ({ relativePath, absolutePath } = this.media.placeSourceFromTemp(
+          ({ relativePath } = this.media.placeSourceFromTemp(
             userId,
             doc.id,
             ext,
             file.path,
           ));
         } else if (file.buffer?.length) {
-          ({ relativePath, absolutePath } = this.media.writeSourceAudio(
+          ({ relativePath } = this.media.writeSourceAudio(
             userId,
             doc.id,
             ext,
@@ -295,17 +299,11 @@ export class DocumentsService {
           throw badRequest('file is required');
         }
 
-        // Duration probe is best-effort; never block upload more than a few seconds
-        const duration = await Promise.race([
-          probeDurationSeconds(absolutePath),
-          new Promise<null>((resolve) => setTimeout(() => resolve(null), 3000)),
-        ]);
-
+        // Duration comes from STT response later (no local ffprobe).
         const updated = await this.prisma.document.update({
           where: { id: doc.id },
           data: {
             mediaPath: relativePath,
-            ...(duration != null ? { durationSeconds: duration } : {}),
           },
         });
         const job = await this.transcription.enqueueForDocument(updated, {
@@ -429,7 +427,7 @@ export class DocumentsService {
       return this.serialize(doc, await this.transcription.latestJob(doc.id));
     }
 
-    const rfName = transcriptRagflowFilename(doc.name);
+    const rfName = transcriptRagflowFilename(decodeMojibakeUtf8(doc.name));
     const buffer = Buffer.from(markdown, 'utf8');
     const uploaded = await this.ragflow.uploadDocuments(kb.ragflowDatasetId, [
       {

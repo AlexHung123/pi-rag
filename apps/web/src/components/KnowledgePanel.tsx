@@ -1418,11 +1418,14 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                         className="kb-cell-muted kb-meta-cell"
                         title={doc.errorMessage || doc.progressMsg || ''}
                       >
-                        {doc.errorMessage?.trim()
-                          ? doc.errorMessage
-                          : doc.progressMsg?.trim()
-                            ? doc.progressMsg
-                            : '—'}
+                        {(() => {
+                          const meta =
+                            doc.errorMessage?.trim() ||
+                            doc.progressMsg?.trim() ||
+                            '';
+                          if (!meta) return '—';
+                          return meta.length > 20 ? `${meta.slice(0, 20)}…` : meta;
+                        })()}
                       </td>
                       <td>
                         <div className="kb-parse-cell">
