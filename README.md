@@ -71,16 +71,14 @@ STT_WORKER_CONCURRENCY=1
 STT_AUTO_INGEST=false
 # Speaker labels (if FunASR supports spk=true)
 STT_SPK=false
-# Video (.mp4): ffmpeg → 16kHz mono WAV, then SenseVoice
-# Local: STT_FFMPEG_BIN=ffmpeg
-# Or on STT host: STT_FFMPEG_SSH=user@192.168.1.11
+# Remote STT should convert video itself (recommended). Client-side ffmpeg off:
+STT_CLIENT_TRANSCODE=false
 ```
 
-Flow: upload audio/video → (mp4: ffmpeg → wav) → STT → **Review & ingest** → RAGFlow + parse → chat.
+Flow: upload audio/video → **one** `POST {STT_BASE_URL}/v1/audio/transcriptions`  
+(remote: mp4→wav→SenseVoice) → **Review & ingest** → RAGFlow + parse → chat.
 
-**Video (.mp4):** Worker runs  
-`ffmpeg -i source.mp4 -ar 16000 -ac 1 -c:a pcm_s16le meeting.wav`,  
-then `POST {STT_BASE_URL}/v1/audio/transcriptions` with `model=sensevoice` and `response_format=verbose_json`.
+**Video:** Prefer a unified remote STT (e.g. `http://192.168.1.11:8002`) that accepts `.mp4` and runs ffmpeg in-process. pi-rag sends the original file; set `STT_CLIENT_TRANSCODE=true` only if the STT server cannot handle video.
 
 If `STT_BASE_URL` is empty and `STT_MOCK` is false, **audio** uploads fail with a clear error; normal document uploads still work. See design: [`docs/superpowers/specs/2026-07-28-audio-transcription-ingest-design.md`](docs/superpowers/specs/2026-07-28-audio-transcription-ingest-design.md).
 

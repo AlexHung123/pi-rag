@@ -17,6 +17,24 @@ export type TranscribeFileOpts = {
   spk?: boolean;
 };
 
+/** Best-effort MIME so remote STT can treat .mp4 as video. */
+function guessMime(filename: string): string | undefined {
+  const ext = path.extname(filename).toLowerCase();
+  const map: Record<string, string> = {
+    '.mp4': 'video/mp4',
+    '.mkv': 'video/x-matroska',
+    '.webm': 'video/webm',
+    '.mov': 'video/quicktime',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.m4a': 'audio/mp4',
+    '.flac': 'audio/flac',
+    '.ogg': 'audio/ogg',
+    '.aac': 'audio/aac',
+  };
+  return map[ext];
+}
+
 @Injectable()
 export class SttClient {
   private readonly logger = new Logger(SttClient.name);
@@ -71,30 +89,33 @@ export class SttClient {
     }
 
     const filename = path.basename(filePath);
-    // Prefer file-backed Blob (Node 19.8+) to avoid an extra full-buffer copy when possible.
+    // Preserve extension in multipart filename so remote STT can detect .mp4
+    // and run in-process ffmpeg → 16k mono wav before SenseVoice.
+    const mime = guessMime(filename);
     let fileBlob: Blob;
     try {
       const openAsBlob = (fs as unknown as {
-        openAsBlob?: (p: string) => Promise<Blob>;
+        openAsBlob?: (p: string, opts?: { type?: string }) => Promise<Blob>;
       }).openAsBlob;
       if (typeof openAsBlob === 'function') {
-        fileBlob = await openAsBlob(filePath);
+        fileBlob = await openAsBlob(filePath, mime ? { type: mime } : undefined);
       } else {
         fileBlob = new Blob([fs.readFileSync(filePath)], {
-          type: 'application/octet-stream',
+          type: mime || 'application/octet-stream',
         });
       }
     } catch {
       fileBlob = new Blob([fs.readFileSync(filePath)], {
-        type: 'application/octet-stream',
+        type: mime || 'application/octet-stream',
       });
     }
     const form = new FormData();
     form.append('file', fileBlob, filename);
+    // Prefer verbose_json for timestamps (and speaker when spk=true)
     form.append('response_format', 'verbose_json');
     if (model) form.append('model', model);
     if (language) form.append('language', this.mapLanguageForStt(language));
-    // FunASR speaker diarization
+    // FunASR / your server: Form spk: bool
     if (spk) form.append('spk', 'true');
 
     const headers: Record<string, string> = {};

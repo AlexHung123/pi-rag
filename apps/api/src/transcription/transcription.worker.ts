@@ -292,10 +292,19 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
           progressMsg: 'Reusing existing transcript…',
         });
       } else {
-        // ── Stage: transcoding video → 16k mono WAV (mp4 etc.) ──
+        // ── Optional client-side transcode (default OFF) ──
+        // Remote unified STT (e.g. 192.168.1.11:8002) converts mp4→16k mono wav
+        // in-process before SenseVoice. Enable STT_CLIENT_TRANSCODE only if the
+        // STT server cannot accept video containers.
         let sttInputAbs = sourceAbs;
+        const clientTranscode =
+          (process.env.STT_CLIENT_TRANSCODE || '').toLowerCase() === 'true' ||
+          (process.env.STT_CLIENT_TRANSCODE || '').toLowerCase() === '1';
         const forceWav = (process.env.STT_FORCE_WAV || '').toLowerCase() === 'true';
-        if (needsWavTranscode(sourceNameForType) || forceWav) {
+        if (
+          clientTranscode &&
+          (needsWavTranscode(sourceNameForType) || forceWav)
+        ) {
           await this.setStage(job.id, doc.id, {
             stage: 'transcoding',
             progress: 0.08,
@@ -307,21 +316,33 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
               event: 'stage',
               stage: 'transcoding',
               file: sourceNameForType,
+              mode: 'client',
             }),
           );
           this.media.ensureDocDir(doc.ownerUserId, doc.id);
           const wavAbs = this.media.sttWavPath(doc.ownerUserId, doc.id);
           await transcodeToWav16kMono(sourceAbs, wavAbs);
           sttInputAbs = wavAbs;
+        } else if (needsWavTranscode(sourceNameForType)) {
+          this.logger.log(
+            transcriptionLogFields({
+              ...baseLog,
+              event: 'skip_client_transcode',
+              file: sourceNameForType,
+              reason: 'remote_stt_handles_video',
+            }),
+          );
         }
 
         if (await this.isCancelled(job.id)) return;
 
-        // ── Stage: transcribing ──
+        // ── Stage: transcribing (send original mp4/audio; remote may ffmpeg) ──
         await this.setStage(job.id, doc.id, {
           stage: 'transcribing',
           progress: 0.1,
-          progressMsg: 'Transcribing…',
+          progressMsg: needsWavTranscode(sourceNameForType)
+            ? 'Transcribing video (remote convert + STT)…'
+            : 'Transcribing…',
         });
         this.logger.log(
           transcriptionLogFields({
