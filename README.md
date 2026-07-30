@@ -69,9 +69,18 @@ STT_DEFAULT_LANGUAGE=yue   # Cantonese; use auto for mixed meetings
 STT_WORKER_CONCURRENCY=1
 # Default: review transcript in UI, then click Ingest (do not auto-push to RAGFlow)
 STT_AUTO_INGEST=false
+# Speaker labels (if FunASR supports spk=true)
+STT_SPK=false
+# Video (.mp4): ffmpeg → 16kHz mono WAV, then SenseVoice
+# Local: STT_FFMPEG_BIN=ffmpeg
+# Or on STT host: STT_FFMPEG_SSH=user@192.168.1.11
 ```
 
-Flow: upload audio → STT → **Review & ingest** (preview/edit markdown) → RAGFlow + parse → chat.
+Flow: upload audio/video → (mp4: ffmpeg → wav) → STT → **Review & ingest** → RAGFlow + parse → chat.
+
+**Video (.mp4):** Worker runs  
+`ffmpeg -i source.mp4 -ar 16000 -ac 1 -c:a pcm_s16le meeting.wav`,  
+then `POST {STT_BASE_URL}/v1/audio/transcriptions` with `model=sensevoice` and `response_format=verbose_json`.
 
 If `STT_BASE_URL` is empty and `STT_MOCK` is false, **audio** uploads fail with a clear error; normal document uploads still work. See design: [`docs/superpowers/specs/2026-07-28-audio-transcription-ingest-design.md`](docs/superpowers/specs/2026-07-28-audio-transcription-ingest-design.md).
 

@@ -66,6 +66,21 @@ describe('SttClient', () => {
     expect(result.segments[0].text).toBe('呢句系粤语');
   });
 
+  it('parses speaker fields from segments', () => {
+    const client = new SttClient();
+    const result = client.normalizeResponse(
+      JSON.stringify({
+        text: 'a b',
+        segments: [
+          { start: 0, end: 1, text: 'a', spk: 'spk0' },
+          { start: 1, end: 2, text: 'b', speaker: 'spk1' },
+        ],
+      }),
+    );
+    expect(result.segments[0].speaker).toBe('spk0');
+    expect(result.segments[1].speaker).toBe('spk1');
+  });
+
   it('assertConfigured fails when mock off and no base url', () => {
     process.env.STT_MOCK = 'false';
     delete process.env.STT_BASE_URL;

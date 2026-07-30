@@ -11,6 +11,12 @@ export type SttResult = {
   segments: TranscriptSegment[];
 };
 
+export type TranscribeFileOpts = {
+  language?: string | null;
+  /** Speaker diarization (FunASR: form field spk=true). */
+  spk?: boolean;
+};
+
 @Injectable()
 export class SttClient {
   private readonly logger = new Logger(SttClient.name);
@@ -33,13 +39,20 @@ export class SttClient {
     }
   }
 
+  /** Whether to request speaker diarization (spk=true). */
+  spkEnabled(opts?: TranscribeFileOpts): boolean {
+    if (typeof opts?.spk === 'boolean') return opts.spk;
+    const v = (process.env.STT_SPK || '').toLowerCase();
+    return v === 'true' || v === '1';
+  }
+
   async transcribeFile(
     filePath: string,
-    opts?: { language?: string | null },
+    opts?: TranscribeFileOpts,
   ): Promise<SttResult> {
     this.assertConfigured();
     if (this.isMock()) {
-      return this.mockResult(filePath, opts?.language);
+      return this.mockResult(filePath, opts?.language, this.spkEnabled(opts));
     }
 
     const base = (process.env.STT_BASE_URL || '').replace(/\/$/, '');
@@ -51,6 +64,7 @@ export class SttClient {
     const language =
       (opts?.language || process.env.STT_DEFAULT_LANGUAGE || 'yue').trim() ||
       undefined;
+    const spk = this.spkEnabled(opts);
 
     if (!fs.existsSync(filePath)) {
       throw new Error(`audio file not found: ${filePath}`);
@@ -80,6 +94,8 @@ export class SttClient {
     form.append('response_format', 'verbose_json');
     if (model) form.append('model', model);
     if (language) form.append('language', this.mapLanguageForStt(language));
+    // FunASR speaker diarization
+    if (spk) form.append('spk', 'true');
 
     const headers: Record<string, string> = {};
     if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`;
@@ -88,7 +104,7 @@ export class SttClient {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     const url = `${base}/v1/audio/transcriptions`;
     this.logger.log(
-      `STT request model=${model || '-'} lang=${language || '-'} file=${filename}`,
+      `STT request model=${model || '-'} lang=${language || '-'} spk=${spk} file=${filename}`,
     );
     try {
       const res = await fetch(url, {
@@ -217,7 +233,17 @@ export class SttClient {
             : '',
       );
       if (!segText) continue;
-      segments.push({ start, end, text: segText });
+      const speakerRaw =
+        seg.spk ??
+        seg.speaker ??
+        seg.speaker_id ??
+        seg.speaker_label ??
+        null;
+      const speaker =
+        speakerRaw != null && String(speakerRaw).trim()
+          ? String(speakerRaw).trim()
+          : null;
+      segments.push({ start, end, text: segText, speaker });
     }
 
     if (!segments.length && text) {
@@ -232,18 +258,37 @@ export class SttClient {
     };
   }
 
-  private mockResult(filePath: string, language?: string | null): SttResult {
+  private mockResult(
+    filePath: string,
+    language?: string | null,
+    spk = false,
+  ): SttResult {
     const name = path.basename(filePath);
     const lang = language || process.env.STT_DEFAULT_LANGUAGE || 'yue';
-    this.logger.log(`STT_MOCK: fake transcript for ${name}`);
+    this.logger.log(`STT_MOCK: fake transcript for ${name} spk=${spk}`);
     return {
       text: '这是模拟转写结果。Hello from STT mock.',
       language: lang,
       duration: 125,
       segments: [
-        { start: 0, end: 12, text: '这是模拟转写结果。' },
-        { start: 12, end: 45, text: '会议讨论了登录改版与后端接口分工。' },
-        { start: 72, end: 125, text: 'Hello from STT mock. Action items follow next week.' },
+        {
+          start: 0,
+          end: 12,
+          text: '这是模拟转写结果。',
+          speaker: spk ? 'spk0' : null,
+        },
+        {
+          start: 12,
+          end: 45,
+          text: '会议讨论了登录改版与后端接口分工。',
+          speaker: spk ? 'spk1' : null,
+        },
+        {
+          start: 72,
+          end: 125,
+          text: 'Hello from STT mock. Action items follow next week.',
+          speaker: spk ? 'spk0' : null,
+        },
       ],
     };
   }

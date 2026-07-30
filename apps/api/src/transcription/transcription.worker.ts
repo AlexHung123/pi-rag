@@ -11,6 +11,9 @@ import {
 } from './transcript-format';
 import { transcriptionLogFields } from './transcription-log';
 import { decodeMojibakeUtf8 } from '../common/filename';
+import { needsWavTranscode } from './audio-formats';
+import { transcodeToWav16kMono } from './ffmpeg-transcode';
+import * as path from 'path';
 
 @Injectable()
 export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
@@ -262,7 +265,8 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
       if (!doc.mediaPath) {
         throw new Error('document has no mediaPath');
       }
-      const audioAbs = this.media.absoluteFromRelative(doc.mediaPath);
+      const sourceAbs = this.media.absoluteFromRelative(doc.mediaPath);
+      const sourceNameForType = path.basename(sourceAbs);
 
       // Duration only from STT response (no local ffprobe).
       let durationSeconds = doc.durationSeconds ?? null;
@@ -288,6 +292,31 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
           progressMsg: 'Reusing existing transcript…',
         });
       } else {
+        // ── Stage: transcoding video → 16k mono WAV (mp4 etc.) ──
+        let sttInputAbs = sourceAbs;
+        const forceWav = (process.env.STT_FORCE_WAV || '').toLowerCase() === 'true';
+        if (needsWavTranscode(sourceNameForType) || forceWav) {
+          await this.setStage(job.id, doc.id, {
+            stage: 'transcoding',
+            progress: 0.08,
+            progressMsg: 'Converting video to WAV (16kHz mono)…',
+          });
+          this.logger.log(
+            transcriptionLogFields({
+              ...baseLog,
+              event: 'stage',
+              stage: 'transcoding',
+              file: sourceNameForType,
+            }),
+          );
+          this.media.ensureDocDir(doc.ownerUserId, doc.id);
+          const wavAbs = this.media.sttWavPath(doc.ownerUserId, doc.id);
+          await transcodeToWav16kMono(sourceAbs, wavAbs);
+          sttInputAbs = wavAbs;
+        }
+
+        if (await this.isCancelled(job.id)) return;
+
         // ── Stage: transcribing ──
         await this.setStage(job.id, doc.id, {
           stage: 'transcribing',
@@ -299,10 +328,11 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
             ...baseLog,
             event: 'stage',
             stage: 'transcribing',
+            file: path.basename(sttInputAbs),
           }),
         );
 
-        const sttResult = await this.stt.transcribeFile(audioAbs, {
+        const sttResult = await this.stt.transcribeFile(sttInputAbs, {
           language: job.language || doc.transcriptLanguage,
         });
 

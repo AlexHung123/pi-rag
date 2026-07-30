@@ -17,7 +17,16 @@ export const AUDIO_EXTENSIONS = [
 
 export type AudioExtension = (typeof AUDIO_EXTENSIONS)[number];
 
+/**
+ * Video / A/V containers that should be ffmpeg-transcoded to 16kHz mono WAV
+ * before SenseVoice (mp4 is the primary case).
+ */
+export const VIDEO_TRANSCODE_EXTENSIONS = ['mp4', 'mkv', 'webm', 'mov'] as const;
+
+export type VideoTranscodeExtension = (typeof VIDEO_TRANSCODE_EXTENSIONS)[number];
+
 const EXT_SET = new Set<string>(AUDIO_EXTENSIONS);
+const VIDEO_EXT_SET = new Set<string>(VIDEO_TRANSCODE_EXTENSIONS);
 
 /** Common MIME types that indicate audio (or audio-in-video containers). */
 const AUDIO_MIME_PREFIXES = ['audio/'] as const;
@@ -68,6 +77,19 @@ export function isAudioUpload(filename: string, mime?: string | null): boolean {
   if (isAudioFilename(filename)) return true;
   // Only trust mime alone when extension is missing/unknown and mime is clearly audio
   if (!extensionOf(filename) && isAudioMime(mime)) return true;
+  return false;
+}
+
+export function isVideoTranscodeExtension(ext: string): ext is VideoTranscodeExtension {
+  return VIDEO_EXT_SET.has(ext.toLowerCase());
+}
+
+/** True if file should be converted to wav before STT (e.g. .mp4). */
+export function needsWavTranscode(filename: string, mime?: string | null): boolean {
+  const ext = extensionOf(filename);
+  if (isVideoTranscodeExtension(ext)) return true;
+  // Treat video/* mime with unknown ext as transcode candidate
+  if (mime && mime.toLowerCase().startsWith('video/')) return true;
   return false;
 }
 

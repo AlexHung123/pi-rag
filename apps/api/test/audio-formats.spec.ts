@@ -25,3 +25,16 @@ describe('audio-formats', () => {
     expect(isAudioUpload('doc.pdf', 'audio/mpeg')).toBe(false);
   });
 });
+
+describe('needsWavTranscode', () => {
+  it('flags mp4/mkv/webm/mov for ffmpeg → wav', async () => {
+    const { needsWavTranscode } = await import('../src/transcription/audio-formats');
+    expect(needsWavTranscode('clip.mp4')).toBe(true);
+    expect(needsWavTranscode('a.mkv')).toBe(true);
+    expect(needsWavTranscode('a.webm')).toBe(true);
+    expect(needsWavTranscode('a.mov')).toBe(true);
+    expect(needsWavTranscode('a.mp3')).toBe(false);
+    expect(needsWavTranscode('a.wav')).toBe(false);
+    expect(needsWavTranscode('x.bin', 'video/mp4')).toBe(true);
+  });
+});

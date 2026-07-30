@@ -2,6 +2,8 @@ export type TranscriptSegment = {
   start: number; // seconds
   end: number;
   text: string;
+  /** Speaker label when STT returns diarization (spk=true). */
+  speaker?: string | null;
 };
 
 export type TranscriptFormatInput = {
@@ -59,7 +61,11 @@ export function buildTranscriptMarkdown(input: TranscriptFormatInput): string {
   for (const seg of segments) {
     const text = (seg.text || '').replace(/\s+/g, ' ').trim();
     if (!text) continue;
-    lines.push(`- [${formatTimestamp(seg.start)}] ${text}`);
+    const spk =
+      seg.speaker != null && String(seg.speaker).trim()
+        ? ` **[${String(seg.speaker).trim()}]**`
+        : '';
+    lines.push(`- [${formatTimestamp(seg.start)}]${spk} ${text}`);
   }
 
   if (lines[lines.length - 1] === '') {

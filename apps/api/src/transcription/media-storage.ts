@@ -59,12 +59,21 @@ export class MediaStorage {
     return `${this.docRelativeDir(userId, documentId)}/transcript.md`;
   }
 
+  /** 16kHz mono PCM WAV for STT (e.g. after mp4 ffmpeg transcode). */
+  sttWavRelativePath(userId: string, documentId: string): string {
+    return `${this.docRelativeDir(userId, documentId)}/meeting.wav`;
+  }
+
   sourcePath(userId: string, documentId: string, ext: string): string {
     return this.resolveSafe(this.sourceRelativePath(userId, documentId, ext));
   }
 
   transcriptPath(userId: string, documentId: string): string {
     return this.resolveSafe(this.transcriptRelativePath(userId, documentId));
+  }
+
+  sttWavPath(userId: string, documentId: string): string {
+    return this.resolveSafe(this.sttWavRelativePath(userId, documentId));
   }
 
   writeSourceAudio(
