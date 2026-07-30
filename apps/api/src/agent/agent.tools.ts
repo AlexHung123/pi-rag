@@ -19,6 +19,11 @@ import {
   resolveDocumentScope,
   resolveRetrievalScope,
 } from '../rag/resolve-scope';
+import {
+  formatDocCandidates,
+  resolveSummaryDocument,
+  runSummarizeDocument,
+} from '../rag/summarize-document';
 
 export type { CitationSource };
 export { evidenceLabelFromScore };
@@ -447,7 +452,157 @@ export function createUserTools(deps: {
     },
   };
 
-  return [retrieve, keywordSearch, listDocumentChunks];
+  const summarizeDocument: AppAgentTool = {
+    name: 'summarize_document',
+    label: 'Summarize document',
+    description:
+      'Read a full document in order (all chunks) and produce material for a whole-document summary. Prefer this for "总结/摘要/summarize this document" over retrieve_chunks or keyword_search. Pass knowledgeBaseIds from the UI selection. Identify the document via appDocumentId (best), documentNameHint (filename/title), or omit both when the selected KB has exactly one indexed document. Do NOT chain many keyword searches for a summary.',
+    parameters: Type.Object({
+      knowledgeBaseIds: Type.Array(Type.String(), {
+        description:
+          'User-selected app knowledge base UUIDs (from the UI selection)',
+      }),
+      appDocumentId: Type.Optional(
+        Type.String({
+          description:
+            'Portal document UUID (from prior sources or user). Preferred when known.',
+        }),
+      ),
+      documentNameHint: Type.Optional(
+        Type.String({
+          description:
+            'Filename or title to match within selected knowledge bases (e.g. 2026.07.transcript.md)',
+        }),
+      ),
+      focus: Type.Optional(
+        Type.String({
+          description:
+            'Optional focus for the summary (e.g. only policy points)',
+        }),
+      ),
+    }),
+    execute: async (_id, params) => {
+      const scope = await resolveRetrievalScope(
+        userId,
+        asStringArray(params.knowledgeBaseIds),
+        knowledge,
+        prisma,
+      );
+      if (!scope.ok) {
+        return {
+          content: [{ type: 'text', text: scope.message }],
+          details: { sources: [], message: scope.message, path: 'summarize' },
+        };
+      }
+
+      const appDocumentId = params.appDocumentId
+        ? String(params.appDocumentId).trim()
+        : undefined;
+      const documentNameHint = params.documentNameHint
+        ? String(params.documentNameHint).trim()
+        : undefined;
+      const focus = params.focus ? String(params.focus).trim() : undefined;
+
+      // Prefer portal scope when id is explicit (ownership re-check).
+      let doc;
+      if (appDocumentId) {
+        const docScope = await resolveDocumentScope(
+          userId,
+          appDocumentId,
+          knowledge,
+          prisma,
+        );
+        if (!docScope.ok) {
+          return {
+            content: [{ type: 'text', text: docScope.message }],
+            details: {
+              sources: [],
+              message: docScope.message,
+              path: 'summarize',
+            },
+          };
+        }
+        // Must still be inside the selected KB set.
+        const inScope = scope.accessible.some(
+          (kb) =>
+            kb.id === docScope.knowledgeBaseId &&
+            kb.documents.some((d) => d.id === docScope.appDocumentId),
+        );
+        if (!inScope) {
+          const message =
+            'Document is not in the currently selected knowledge bases. Ask the user to select the right KB.';
+          return {
+            content: [{ type: 'text', text: message }],
+            details: { sources: [], message, path: 'summarize' },
+          };
+        }
+        doc = {
+          appDocumentId: docScope.appDocumentId,
+          documentName: docScope.documentName,
+          ragflowDocumentId: docScope.ragflowDocumentId,
+          knowledgeBaseId: docScope.knowledgeBaseId,
+          knowledgeBaseName: docScope.knowledgeBaseName,
+          ragflowDatasetId: docScope.ragflowDatasetId,
+        };
+      } else {
+        const resolved = resolveSummaryDocument(scope, {
+          documentNameHint,
+        });
+        if (!resolved.ok) {
+          const list = resolved.candidates
+            ? `\nCandidates:\n${formatDocCandidates(resolved.candidates)}`
+            : '';
+          const message = `${resolved.message}${list}`;
+          return {
+            content: [{ type: 'text', text: message }],
+            details: {
+              sources: [],
+              message: resolved.message,
+              candidates: resolved.candidates || [],
+              path: 'summarize',
+            },
+          };
+        }
+        doc = resolved.doc;
+      }
+
+      try {
+        const result = await runSummarizeDocument({
+          doc,
+          focus,
+          listChunks: (datasetId, documentId, o) =>
+            ragflow.listChunks(datasetId, documentId, o),
+        });
+        return {
+          content: [{ type: 'text', text: result.text }],
+          details: {
+            sources: result.sources,
+            ...result.details,
+          },
+        };
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : String(err);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `summarize_document failed: ${message}. You may fall back to retrieve_chunks once, but do not spam keyword_search.`,
+            },
+          ],
+          details: {
+            sources: [],
+            message,
+            path: 'summarize_error',
+            appDocumentId: doc.appDocumentId,
+            documentName: doc.documentName,
+          },
+        };
+      }
+    },
+  };
+
+  return [retrieve, keywordSearch, listDocumentChunks, summarizeDocument];
 }
 
 export const DOMAIN_SYSTEM_PROMPT = `You are the CSB Knowledge Base Portal assistant.
@@ -459,15 +614,17 @@ Language:
 - Match the user's language for mixed or other languages when clear; otherwise prefer Traditional Chinese.
 
 Retrieval tools (when knowledge bases are selected):
-- retrieve_chunks — concepts, mechanisms, summaries, comparisons, open-ended factual questions (semantic/hybrid).
-- keyword_search — error codes, clause numbers, proper nouns, exact phrases, titles (RAGFlow ElasticSearch keyword path).
+- summarize_document — WHOLE-document summary / 总结整份文件 / 全文摘要 / "summarize this document". Reads all chunks in order (map-reduce if long). Prefer ONE call. Pass knowledgeBaseIds; identify doc via appDocumentId, documentNameHint (filename), or omit both if the selected KB has exactly one document.
+- retrieve_chunks — concepts, mechanisms, partial topics, comparisons, open-ended factual questions (semantic/hybrid). NOT for whole-document summaries.
+- keyword_search — error codes, clause numbers, proper nouns, exact phrases, titles. Do NOT spam keyword_search to "cover" a full document for summary.
 - list_document_chunks — browse a known document by portal appDocumentId from prior sources; never invent document ids.
-- You may call retrieve_chunks and keyword_search in the same turn when helpful (concept + exact term).
+- You may call retrieve_chunks and keyword_search in the same turn for non-summary Q&A when helpful (concept + exact term).
 
 Rules:
 - Knowledge bases are selected by the user in the UI only. Never invent or guess knowledge base ids or document ids.
 - Do NOT call retrieval tools for greetings, small talk, or meta questions about you (e.g. hello, hi, 你好, who are you, 你是誰, what can you do, 你可以做什麼, thanks). Answer those directly from this system role without tools or sources.
-- When the user asks a factual question that needs document content AND selected knowledge base IDs are present, you MUST call at least one retrieval tool (retrieve_chunks and/or keyword_search) with those knowledgeBaseIds before answering. Do not invent document content.
+- Whole-document summary intent (总结/摘要/概述整份/summarize this document/全文) → call summarize_document once. Do NOT chain many retrieve_chunks or keyword_search queries for that intent.
+- When the user asks a non-summary factual question that needs document content AND selected knowledge base IDs are present, you MUST call at least one retrieval tool (retrieve_chunks and/or keyword_search) with those knowledgeBaseIds before answering. Do not invent document content.
 - Prefer a self-contained question (resolve "it/this/上面" from history). Optional queries[] for multi-aspect topics on retrieve_chunks.
 - If no knowledge bases are selected, answer without document retrieval and, if facts from documents are needed, ask the user to select knowledge bases in the UI.
 - Only use tool evidence for document content; cite with [1], [2] matching evidence indices.
@@ -491,7 +648,9 @@ export function buildSelectedKbPromptPrefix(
   return (
     `[Selected knowledge bases for this question]\n${lines}\n\n` +
     `If this is a greeting, small talk, or a question about you / your capabilities (not document facts), answer directly WITHOUT calling retrieval tools. ` +
-    `If the user needs facts from the selected knowledge bases, retrieve with knowledgeBaseIds=${ids} before answering ` +
+    `If the user wants a whole-document summary (总结/摘要/summarize this document), call summarize_document once with knowledgeBaseIds=${ids} ` +
+    `(pass documentNameHint if they named a file; appDocumentId if known). Do not chain keyword_search for summaries. ` +
+    `If the user needs other facts from the selected knowledge bases, retrieve with knowledgeBaseIds=${ids} before answering ` +
     `(use retrieve_chunks for concepts; keyword_search for codes/exact phrases; both if helpful). ` +
     `Base your analysis only on the retrieved evidence. Cite with [1], [2], … and mention document names.\n\n` +
     rewriteHint +

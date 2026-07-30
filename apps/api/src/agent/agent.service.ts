@@ -24,6 +24,7 @@ const RETRIEVAL_TOOL_NAMES = new Set([
   'retrieve_chunks',
   'keyword_search',
   'list_document_chunks',
+  'summarize_document',
 ]);
 
 export type AgentStreamEvent =
@@ -415,7 +416,7 @@ function extractSourcesFromToolResult(result: unknown): CitationSource[] {
 
 /**
  * Scan agent message history for retrieval tool results (this turn).
- * Merges sources from retrieve_chunks / keyword_search / list_document_chunks.
+ * Merges sources from retrieve_chunks / keyword_search / list_document_chunks / summarize_document.
  */
 function extractSourcesFromAgentMessages(
   messages: Array<{ role: string; content?: unknown; details?: unknown; toolName?: string }>,

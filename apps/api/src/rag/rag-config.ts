@@ -69,6 +69,22 @@ export type RagRetrievalConfig = {
   adjacentExpandEnabled: boolean;
   /** Max primary hits to expand with neighbors. */
   adjacentExpandMaxHits: number;
+  /**
+   * summarize_document: if total document chars ≤ this, return full ordered
+   * text to the agent (no map-reduce).
+   */
+  summarizeDirectChars: number;
+  /** Max characters per map segment when document exceeds direct budget. */
+  summarizeMapChars: number;
+  /** Hard cap on map LLM calls (long docs truncate after this many segments). */
+  summarizeMaxMapCalls: number;
+  /** listChunks page size when loading a full document for summarize. */
+  summarizeListPageSize: number;
+  /** Per-chunk body cap when formatting full-text evidence for the agent. */
+  summarizeMaxChunkChars: number;
+  /** Max tokens for each map/reduce completion. */
+  summarizeMapMaxTokens: number;
+  summarizeReduceMaxTokens: number;
 };
 
 export function getRagRetrievalConfig(): RagRetrievalConfig {
@@ -115,6 +131,34 @@ export function getRagRetrievalConfig(): RagRetrievalConfig {
     adjacentExpandMaxHits: Math.min(
       10,
       Math.max(1, envInt('RAG_ADJACENT_EXPAND_MAX_HITS', 3)),
+    ),
+    summarizeDirectChars: Math.min(
+      100_000,
+      Math.max(2000, envInt('RAG_SUMMARIZE_DIRECT_CHARS', 24_000)),
+    ),
+    summarizeMapChars: Math.min(
+      50_000,
+      Math.max(2000, envInt('RAG_SUMMARIZE_MAP_CHARS', 12_000)),
+    ),
+    summarizeMaxMapCalls: Math.min(
+      50,
+      Math.max(1, envInt('RAG_SUMMARIZE_MAX_MAP_CALLS', 20)),
+    ),
+    summarizeListPageSize: Math.min(
+      100,
+      Math.max(10, envInt('RAG_SUMMARIZE_LIST_PAGE_SIZE', 50)),
+    ),
+    summarizeMaxChunkChars: Math.min(
+      16_000,
+      Math.max(500, envInt('RAG_SUMMARIZE_MAX_CHUNK_CHARS', 4000)),
+    ),
+    summarizeMapMaxTokens: Math.min(
+      4096,
+      Math.max(256, envInt('RAG_SUMMARIZE_MAP_MAX_TOKENS', 1024)),
+    ),
+    summarizeReduceMaxTokens: Math.min(
+      8192,
+      Math.max(512, envInt('RAG_SUMMARIZE_REDUCE_MAX_TOKENS', 2048)),
     ),
   };
 }
