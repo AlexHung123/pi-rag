@@ -283,6 +283,10 @@ export type DocumentItem = {
   chunkCount: number;
   errorMessage?: string | null;
   sourceType?: DocumentSourceType;
+  /** MIME of original media (audio pipeline), e.g. video/mp4 */
+  mediaContentType?: string | null;
+  /** Extension of original media file (audio pipeline); display name often omits it */
+  mediaExtension?: string | null;
   durationSeconds?: number | null;
   transcriptLanguage?: string | null;
   ragflowDocumentId?: string | null;

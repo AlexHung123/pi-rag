@@ -93,7 +93,7 @@ See [`.env.example`](.env.example).
 | `RAGFLOW_MOCK` | `true` = in-memory mock (no RAGFlow). Production requires API key unless this is explicitly `true` |
 | `STT_BASE_URL` / `STT_MOCK` | Local STT HTTP endpoint, or mock for dev |
 | `MEDIA_ROOT` | Local disk root for original audio (default `data/media`) |
-| `MAX_AUDIO_UPLOAD_BYTES` | Audio upload cap (default 500 MiB) |
+| `MAX_AUDIO_UPLOAD_BYTES` | Audio upload cap (default 1 GiB) |
 | `LLM_DEBUG` | `true` = dump full LLM request payloads to `apps/api/data/llm-debug/` (default off) |
 | `ADMIN_USERNAME` / `ADMIN_PASSWORD` | Bootstrap first admin when the users table is empty |
 | `OPENAI_API_KEY` | API key for OpenAI-compatible LLM (optional for local servers) |

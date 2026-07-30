@@ -73,7 +73,7 @@ export class AdminController {
     FileInterceptor('file', {
       storage: memoryStorage(),
       limits: {
-        fileSize: Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024),
+        fileSize: Number(process.env.MAX_UPLOAD_BYTES || 1024 * 1024 * 1024),
       },
     }),
   )

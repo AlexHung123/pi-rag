@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { FileAudio, FileText, Folder, Upload, X } from 'lucide-react'
+import { FileAudio, FileText, FileVideo, Folder, Upload, X } from 'lucide-react'
 import {
   authApi,
   docApi,
@@ -89,8 +89,25 @@ const DEFAULT_CHUNK_TOKEN_NUM = 512
 const AUDIO_ACCEPT =
   '.mp3,.wav,.m4a,.mp4,.flac,.ogg,.aac,.webm,.wma,.mkv,audio/*,video/mp4,video/webm'
 
+/** Video / A/V containers shown with a Video tag (aligned with API VIDEO_TRANSCODE_EXTENSIONS). */
+const VIDEO_EXTENSIONS = new Set(['mp4', 'mkv', 'webm', 'mov'])
+
 function isAudioDoc(doc: DocumentItem): boolean {
   return doc.sourceType === 'audio'
+}
+
+/** Audio-source docs that are video containers (e.g. .mp4) — UI label only. */
+function isVideoDoc(doc: DocumentItem): boolean {
+  if (!isAudioDoc(doc)) return false
+  // Display name usually strips the extension (demo.mp4 → "demo"); prefer media fields.
+  const ext = (
+    doc.mediaExtension ||
+    doc.name.split('.').pop() ||
+    ''
+  ).toLowerCase()
+  if (VIDEO_EXTENSIONS.has(ext)) return true
+  const mime = (doc.mediaContentType || '').toLowerCase()
+  return mime.startsWith('video/')
 }
 
 function isTranscribing(doc: DocumentItem): boolean {
@@ -1389,11 +1406,17 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                       </td>
                       <td>
                         <div className="kb-file-name" title={doc.name}>
-                          {isAudioDoc(doc) ? (
+                          {isVideoDoc(doc) ? (
+                            <FileVideo size={14} style={{ marginRight: 6, verticalAlign: 'middle', opacity: 0.75 }} aria-hidden />
+                          ) : isAudioDoc(doc) ? (
                             <FileAudio size={14} style={{ marginRight: 6, verticalAlign: 'middle', opacity: 0.75 }} aria-hidden />
                           ) : null}
                           {doc.name}
-                          {isAudioDoc(doc) ? (
+                          {isVideoDoc(doc) ? (
+                            <span className="kb-visibility-badge shared" style={{ marginLeft: 6 }} title="Video source — transcript ingested after STT">
+                              Video
+                            </span>
+                          ) : isAudioDoc(doc) ? (
                             <span className="kb-visibility-badge shared" style={{ marginLeft: 6 }} title="Audio source — transcript ingested after STT">
                               Audio
                             </span>
@@ -1675,8 +1698,8 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                   : 'Drag and drop your file here to upload'}
               </p>
               <p className="kb-upload-dropzone-hint">
-                Documents (PDF, TXT, MD, Office…) and audio (MP3, M4A, WAV, FLAC…).
-                Audio is transcribed first — review the transcript, then ingest to chat.
+                Documents (PDF, TXT, MD, Office…), audio (MP3, M4A, WAV, FLAC…), and video (MP4, MKV, WebM…).
+                Audio and video are transcribed first — review the transcript, then ingest to chat.
                 Click to browse{uploadMode === 'folder' ? ' a folder' : ''}.
                 {storage
                   ? ` Storage remaining: ${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total.`

@@ -23,8 +23,8 @@ import { MediaStorage } from '../transcription/media-storage';
 
 /** Max of document + audio caps so multer does not reject large audio early. */
 function multerMaxBytes(): number {
-  const docMax = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
-  const audioMax = Number(process.env.MAX_AUDIO_UPLOAD_BYTES || 524288000);
+  const docMax = Number(process.env.MAX_UPLOAD_BYTES || 1024 * 1024 * 1024);
+  const audioMax = Number(process.env.MAX_AUDIO_UPLOAD_BYTES || 1024 * 1024 * 1024);
   return Math.max(docMax, audioMax);
 }
 

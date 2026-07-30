@@ -65,6 +65,10 @@ export class DocumentsService {
       (!latestJob ||
         latestJob.status === 'done' ||
         latestJob.stage === 'ready');
+    // Audio display names strip the extension; surface original container for UI tags.
+    const mediaExt = doc.mediaPath
+      ? extensionOf(doc.mediaPath) || null
+      : null;
     return {
       id: doc.id,
       knowledgeBaseId: doc.knowledgeBaseId,
@@ -77,6 +81,8 @@ export class DocumentsService {
       chunkCount: doc.chunkCount,
       errorMessage: doc.errorMessage,
       sourceType: doc.sourceType as DocumentSourceType,
+      mediaContentType: doc.mediaContentType ?? null,
+      mediaExtension: mediaExt,
       durationSeconds: doc.durationSeconds ?? null,
       transcriptLanguage: doc.transcriptLanguage ?? null,
       ragflowDocumentId: doc.ragflowDocumentId ?? null,
@@ -150,7 +156,7 @@ export class DocumentsService {
 
   private maxAudioBytes(): number {
     // Spec default 500 MiB when unset
-    return Number(process.env.MAX_AUDIO_UPLOAD_BYTES || 524288000);
+    return Number(process.env.MAX_AUDIO_UPLOAD_BYTES || 1024 * 1024 * 1024);
   }
 
   private resolveUploadBytes(file: UploadFileInput): {
@@ -189,7 +195,7 @@ export class DocumentsService {
       return this.uploadAudio(userId, kb, fixedFile, opts);
     }
 
-    const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
+    const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 1024 * 1024 * 1024);
     if (size > maxBytes) {
       this.media.removeTempFile(file.path);
       throw badRequest(`file exceeds max size ${maxBytes}`);

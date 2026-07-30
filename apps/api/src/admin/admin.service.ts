@@ -212,7 +212,7 @@ export class AdminService {
   ) {
     const kb = await this.getKbById(kbId);
     if (!file?.buffer?.length) throw badRequest('file is required');
-    const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 50 * 1024 * 1024);
+    const maxBytes = Number(process.env.MAX_UPLOAD_BYTES || 1024 * 1024 * 1024);
     if (file.size > maxBytes) throw badRequest(`file exceeds max size ${maxBytes}`);
 
     // Charge KB owner; lock that user so concurrent admin/user uploads cannot race quota.
