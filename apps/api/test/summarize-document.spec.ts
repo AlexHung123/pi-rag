@@ -1,10 +1,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { RetrievalScopeOk } from '../src/rag/resolve-scope';
 import {
+  buildSummarizeDocumentHeader,
   chunksToMappedHits,
+  extractSummaryLengthHint,
   listAllDocumentChunks,
   matchDocumentsByNameHint,
-  partitionHitsByCharBudget,
   resolveSummaryDocument,
   runSummarizeDocument,
   type DocCandidate,
@@ -44,15 +45,6 @@ function scopeWithDocs(docs: DocCandidate[]): RetrievalScopeOk {
       })),
     })),
     mapHit: (h) => h as MappedHit,
-  };
-}
-
-function hit(content: string, id: string): MappedHit {
-  return {
-    id,
-    content,
-    documentName: 'doc.md',
-    appDocumentId: 'doc-1',
   };
 }
 
@@ -136,23 +128,6 @@ describe('resolveSummaryDocument', () => {
   });
 });
 
-describe('partitionHitsByCharBudget', () => {
-  it('keeps order and splits by budget', () => {
-    const hits = [hit('aaaa', '1'), hit('bbbb', '2'), hit('cccc', '3')];
-    const parts = partitionHitsByCharBudget(hits, 8);
-    expect(parts).toHaveLength(2);
-    expect(parts[0]!.map((h) => h.id)).toEqual(['1', '2']);
-    expect(parts[1]!.map((h) => h.id)).toEqual(['3']);
-  });
-
-  it('puts oversized single chunk in its own segment', () => {
-    const hits = [hit('x'.repeat(20), 'big')];
-    const parts = partitionHitsByCharBudget(hits, 5);
-    expect(parts).toHaveLength(1);
-    expect(parts[0]![0]!.id).toBe('big');
-  });
-});
-
 describe('listAllDocumentChunks', () => {
   it('paginates until short page', async () => {
     const listChunks = vi
@@ -178,7 +153,7 @@ describe('runSummarizeDocument', () => {
     documentName: 'short.md',
   });
 
-  it('uses full_text path when under direct budget', async () => {
+  it('merges all chunks and returns full_text for the agent', async () => {
     const listChunks = vi.fn().mockResolvedValue({
       chunks: [
         { id: 'c1', content: 'Hello world section one.' },
@@ -190,65 +165,92 @@ describe('runSummarizeDocument', () => {
     const result = await runSummarizeDocument({
       doc,
       listChunks,
-      chatComplete: vi.fn(),
     });
 
     expect(result.details.path).toBe('full_text');
     expect(result.details.chunkCount).toBe(2);
     expect(result.text).toMatch(/full_text|Full document/i);
+    expect(result.text).toMatch(/Hello world section one/);
+    expect(result.text).toMatch(/Section two with more detail/);
     expect(result.sources.length).toBe(2);
-    expect(result.details.truncated).toBe(false);
   });
 
-  it('uses map_reduce when over direct budget', async () => {
-    const prev = process.env.RAG_SUMMARIZE_DIRECT_CHARS;
-    const prevMap = process.env.RAG_SUMMARIZE_MAP_CHARS;
-    // Config floors DIRECT at 2000 and MAP at 2000 — exceed those floors.
-    process.env.RAG_SUMMARIZE_DIRECT_CHARS = '2000';
-    process.env.RAG_SUMMARIZE_MAP_CHARS = '2000';
+  it('merges long documents the same way (no map-reduce)', async () => {
+    const longA = 'A'.repeat(1500);
+    const longB = 'B'.repeat(1500);
+    const listChunks = vi.fn().mockResolvedValue({
+      chunks: [
+        { id: 'c1', content: longA },
+        { id: 'c2', content: longB },
+      ],
+      total: 2,
+    });
 
-    try {
-      const longA = 'A'.repeat(1500);
-      const longB = 'B'.repeat(1500);
-      const listChunks = vi.fn().mockResolvedValue({
-        chunks: [
-          { id: 'c1', content: longA },
-          { id: 'c2', content: longB },
-        ],
-        total: 2,
-      });
+    const result = await runSummarizeDocument({
+      doc,
+      listChunks,
+      focus: 'key points',
+    });
 
-      const chatComplete = vi
-        .fn()
-        .mockResolvedValueOnce('Section A summary')
-        .mockResolvedValueOnce('Section B summary')
-        .mockResolvedValueOnce('Merged full summary of A and B');
-
-      const result = await runSummarizeDocument({
-        doc,
-        listChunks,
-        chatComplete,
-        focus: 'key points',
-      });
-
-      expect(result.details.path).toBe('map_reduce');
-      expect(result.details.mapSegments).toBeGreaterThanOrEqual(1);
-      expect(result.text).toMatch(/Merged full summary|map_reduce/i);
-      expect(chatComplete.mock.calls.length).toBeGreaterThanOrEqual(2);
-      expect(result.sources[0]?.appDocumentId).toBe('doc-1');
-    } finally {
-      if (prev === undefined) delete process.env.RAG_SUMMARIZE_DIRECT_CHARS;
-      else process.env.RAG_SUMMARIZE_DIRECT_CHARS = prev;
-      if (prevMap === undefined) delete process.env.RAG_SUMMARIZE_MAP_CHARS;
-      else process.env.RAG_SUMMARIZE_MAP_CHARS = prevMap;
-    }
+    expect(result.details.path).toBe('full_text');
+    expect(result.details.chunkCount).toBe(2);
+    expect(result.details.totalChars).toBe(3000);
+    expect(result.details.focus).toBe('key points');
+    expect(result.text).toMatch(/User focus \/ requirements: key points/);
+    expect(result.sources.length).toBe(2);
+    expect(result.sources[0]?.appDocumentId).toBe('doc-1');
   });
+
+  it('puts target length into header when focus includes 字數', async () => {
+    const listChunks = vi.fn().mockResolvedValue({
+      chunks: [{ id: 'c1', content: '會議內容若干。' }],
+      total: 1,
+    });
+
+    const result = await runSummarizeDocument({
+      doc,
+      listChunks,
+      focus: '要5000字，涵蓋政策重點',
+    });
+
+    expect(result.text).toMatch(/Target length: about 5000 Chinese characters/);
+    expect(result.text).toMatch(/User focus \/ requirements: 要5000字/);
+    expect(result.text).toMatch(/do not stop at a short outline/i);
+  });
+
 
   it('handles empty document', async () => {
     const listChunks = vi.fn().mockResolvedValue({ chunks: [], total: 0 });
     const result = await runSummarizeDocument({ doc, listChunks });
     expect(result.details.chunkCount).toBe(0);
     expect(result.text).toMatch(/no chunks/i);
+  });
+});
+
+describe('extractSummaryLengthHint', () => {
+  it('parses Chinese 字 counts', () => {
+    expect(extractSummaryLengthHint('幫我總結 要5000字').targetChars).toBe(5000);
+    expect(extractSummaryLengthHint('約 3000 字').targetChars).toBe(3000);
+  });
+
+  it('parses English character counts', () => {
+    expect(
+      extractSummaryLengthHint('about 2000 Chinese characters').targetChars,
+    ).toBe(2000);
+  });
+});
+
+describe('buildSummarizeDocumentHeader', () => {
+  it('includes target length when present in focus', () => {
+    const header = buildSummarizeDocumentHeader({
+      documentName: 'a.md',
+      knowledgeBaseName: 'KB',
+      chunkCount: 2,
+      totalChars: 100,
+      focus: '5000字',
+    });
+    expect(header).toMatch(/Target length: about 5000/);
+    expect(header).toMatch(/User focus \/ requirements: 5000字/);
   });
 });
 

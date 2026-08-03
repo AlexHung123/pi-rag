@@ -4,6 +4,10 @@ import { PrismaService } from '../prisma/prisma.service';
 import { AgentService } from '../agent/agent.service';
 import type { CitationSource } from '../agent/agent.tools';
 import { badRequest, notFound } from '../common/errors';
+import {
+  getDefaultModelId,
+  isModelAllowed,
+} from '../agent/pi-model';
 import { CHAT_MESSAGE_MAX_CHARS } from './chat.limits';
 
 @Injectable()
@@ -89,6 +93,8 @@ export class ChatService {
     conversationId: string,
     content: string,
     knowledgeBaseIds?: string[],
+    signal?: AbortSignal,
+    modelId?: string,
   ) {
     if (typeof content !== 'string' || !content.trim()) {
       throw badRequest('content is required');
@@ -98,6 +104,7 @@ export class ChatService {
         `content exceeds max length of ${CHAT_MESSAGE_MAX_CHARS} characters`,
       );
     }
+    const resolvedModelId = this.resolveModelId(modelId);
     const c = await this.getOwned(userId, conversationId);
     const selectedIds = (knowledgeBaseIds || []).filter(Boolean);
 
@@ -151,14 +158,23 @@ export class ChatService {
 
     let full = '';
     let sources: CitationSource[] = [];
+    let aborted = false;
     try {
       for await (const ev of this.agent.run(
         userId,
         conversationId,
         history,
         content,
-        { knowledgeBaseIds: selectedIds },
+        {
+          knowledgeBaseIds: selectedIds,
+          signal,
+          modelId: resolvedModelId,
+        },
       )) {
+        if (signal?.aborted) {
+          aborted = true;
+          break;
+        }
         if (ev.type === 'text_delta') {
           full += ev.delta;
           yield { event: 'text_delta', data: { delta: ev.delta } };
@@ -174,23 +190,37 @@ export class ChatService {
         } else if (ev.type === 'done') {
           full = ev.fullText || full;
           if (ev.sources?.length) sources = ev.sources;
+          if (ev.aborted) aborted = true;
         }
       }
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      yield { event: 'error', data: { message } };
-      full = full || `Error: ${message}`;
+      if (signal?.aborted) {
+        aborted = true;
+      } else {
+        const message = err instanceof Error ? err.message : String(err);
+        yield { event: 'error', data: { message } };
+        full = full || `Error: ${message}`;
+      }
+    }
+
+    // Client may have aborted mid-stream; still persist partial assistant text.
+    if (aborted || signal?.aborted) {
+      aborted = true;
     }
 
     const metadata: Record<string, unknown> = {};
     if (sources.length) metadata.sources = sources;
     if (selectedIds.length) metadata.knowledgeBaseIds = selectedIds;
+    if (aborted) metadata.aborted = true;
+
+    const assistantContent =
+      full || (aborted ? '(stopped)' : '(empty)');
 
     const assistant = await this.prisma.message.create({
       data: {
         conversationId: c.id,
         role: 'assistant',
-        content: full || '(empty)',
+        content: assistantContent,
         metadata: metadata as Prisma.InputJsonValue,
       },
     });
@@ -199,16 +229,36 @@ export class ChatService {
       data: { updatedAt: new Date() },
     });
 
-    yield {
-      event: 'assistant_message',
-      data: {
-        id: assistant.id,
-        role: 'assistant',
-        content: assistant.content,
-        sources,
-        createdAt: assistant.createdAt.toISOString(),
-      },
-    };
-    yield { event: 'done', data: {} };
+    // If the client already hung up, further writes may fail — that's fine.
+    try {
+      yield {
+        event: 'assistant_message',
+        data: {
+          id: assistant.id,
+          role: 'assistant',
+          content: assistant.content,
+          sources,
+          aborted,
+          createdAt: assistant.createdAt.toISOString(),
+        },
+      };
+      yield { event: 'done', data: { aborted } };
+    } catch {
+      /* client gone */
+    }
+  }
+
+  /**
+   * Resolve optional client modelId against OPENAI_MODELS allowlist.
+   * Omit/empty → default; unknown → 400 (before any message row is written).
+   * Public so the controller can validate before opening the SSE stream.
+   */
+  resolveModelId(modelId?: string): string {
+    const id = typeof modelId === 'string' ? modelId.trim() : '';
+    if (!id) return getDefaultModelId();
+    if (!isModelAllowed(id)) {
+      throw badRequest('model not allowed');
+    }
+    return id;
   }
 }

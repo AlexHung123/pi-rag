@@ -155,32 +155,3 @@ export function mergeCitationSources(
     }));
 }
 
-/**
- * Apply a total character budget across chunks (for list_document_chunks).
- * Keeps order; truncates the last included chunk if needed.
- */
-export function applyCharBudget(
-  hits: MappedHit[],
-  budget: number,
-): MappedHit[] {
-  if (budget <= 0 || !hits.length) return [];
-  const out: MappedHit[] = [];
-  let used = 0;
-  for (const h of hits) {
-    const len = (h.content || '').length;
-    if (used >= budget) break;
-    if (used + len <= budget) {
-      out.push(h);
-      used += len;
-      continue;
-    }
-    const remain = budget - used;
-    if (remain < 40) break;
-    out.push({
-      ...h,
-      content: truncateChunk(h.content || '', remain),
-    });
-    break;
-  }
-  return out;
-}

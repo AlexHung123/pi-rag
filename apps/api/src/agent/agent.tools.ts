@@ -5,7 +5,6 @@ import { PrismaService } from '../prisma/prisma.service';
 import type { RetrieveHit } from '../ragflow/ragflow.types';
 import { getRagRetrievalConfig } from '../rag/rag-config';
 import {
-  applyCharBudget,
   dedupeHitsById,
   evidenceLabelFromScore,
   filterHitsByThreshold,
@@ -346,117 +345,11 @@ export function createUserTools(deps: {
     },
   };
 
-  const listDocumentChunks: AppAgentTool = {
-    name: 'list_document_chunks',
-    label: 'List document chunks',
-    description:
-      'Browse chunks of a single document after you already know its portal appDocumentId (from prior retrieval sources or the user). Use to expand context for a named document section. Do NOT invent document ids. Optional keywords filter within the document.',
-    parameters: Type.Object({
-      appDocumentId: Type.String({
-        description:
-          'Portal document UUID only (from prior sources[].appDocumentId) — never invent',
-      }),
-      page: Type.Optional(
-        Type.Number({ description: 'Page number (default 1)' }),
-      ),
-      pageSize: Type.Optional(
-        Type.Number({
-          description: `Chunks per page (default 8, max ${ragCfg.listDocPageSizeMax})`,
-        }),
-      ),
-      keywords: Type.Optional(
-        Type.String({
-          description: 'Optional in-document keyword filter',
-        }),
-      ),
-    }),
-    execute: async (_id, params) => {
-      const appDocumentId = String(params.appDocumentId || '').trim();
-      const docScope = await resolveDocumentScope(
-        userId,
-        appDocumentId,
-        knowledge,
-        prisma,
-      );
-      if (!docScope.ok) {
-        return {
-          content: [{ type: 'text', text: docScope.message }],
-          details: { hits: [], sources: [], message: docScope.message },
-        };
-      }
-
-      const page =
-        typeof params.page === 'number' && Number.isFinite(params.page)
-          ? Math.max(1, Math.floor(params.page))
-          : 1;
-      const pageSize = clampPageSize(
-        params.pageSize,
-        8,
-        ragCfg.listDocPageSizeMax,
-      );
-      const keywords = params.keywords
-        ? String(params.keywords).trim()
-        : undefined;
-
-      const listed = await ragflow.listChunks(
-        docScope.ragflowDatasetId,
-        docScope.ragflowDocumentId,
-        { page, pageSize, keywords: keywords || undefined },
-      );
-
-      let mapped: MappedHit[] = (listed.chunks || []).map((c, i) => ({
-        id: String(c.id || `chunk-${i + 1}`),
-        content: String(c.content || c.content_with_weight || ''),
-        documentId: docScope.ragflowDocumentId,
-        documentName: docScope.documentName,
-        datasetId: docScope.ragflowDatasetId,
-        knowledgeBaseId: docScope.knowledgeBaseId,
-        knowledgeBaseName: docScope.knowledgeBaseName,
-        appDocumentId: docScope.appDocumentId,
-        positions: Array.isArray(c.positions)
-          ? (c.positions as MappedHit['positions'])
-          : undefined,
-        // Browse order — no retrieval score; leave undefined.
-        score: undefined,
-      }));
-
-      mapped = applyCharBudget(mapped, ragCfg.listDocCharBudget);
-
-      const sources = mappedHitsToCitationSources(mapped);
-      const text = formatEvidenceForModel(mapped, {
-        maxChunkChars: ragCfg.maxChunkChars,
-        query: keywords
-          ? `list ${docScope.documentName} keywords=${keywords}`
-          : `list ${docScope.documentName} page=${page}`,
-        message:
-          mapped.length === 0
-            ? 'No chunks returned for this document (empty, filtered, or not parsed).'
-            : undefined,
-      });
-
-      return {
-        content: [{ type: 'text', text }],
-        details: {
-          hits: mapped,
-          sources,
-          appDocumentId: docScope.appDocumentId,
-          documentName: docScope.documentName,
-          page,
-          pageSize,
-          total: listed.total,
-          keywords: keywords || null,
-          charBudget: ragCfg.listDocCharBudget,
-          path: 'list_document',
-        },
-      };
-    },
-  };
-
   const summarizeDocument: AppAgentTool = {
     name: 'summarize_document',
     label: 'Summarize document',
     description:
-      'Read a full document in order (all chunks) and produce material for a whole-document summary. Prefer this for "总结/摘要/summarize this document" over retrieve_chunks or keyword_search. Pass knowledgeBaseIds from the UI selection. Identify the document via appDocumentId (best), documentNameHint (filename/title), or omit both when the selected KB has exactly one indexed document. Do NOT chain many keyword searches for a summary.',
+      'Read a full document in order (all chunks) and produce material for a whole-document summary. Prefer this for "总结/摘要/summarize this document" over retrieve_chunks or keyword_search. Pass knowledgeBaseIds from the UI selection. Identify the document via appDocumentId (best), documentNameHint (filename/title), or omit both when the selected KB has exactly one indexed document. If the user asked for a length (e.g. 5000字 / 2000 characters) or topical focus, pass that in focus. Do NOT chain many keyword searches for a summary.',
     parameters: Type.Object({
       knowledgeBaseIds: Type.Array(Type.String(), {
         description:
@@ -477,7 +370,7 @@ export function createUserTools(deps: {
       focus: Type.Optional(
         Type.String({
           description:
-            'Optional focus for the summary (e.g. only policy points)',
+            'Optional focus and/or length for the summary. Include user length requests (e.g. "5000字", "about 2000 characters") and topical focus (e.g. only policy points).',
         }),
       ),
     }),
@@ -602,7 +495,7 @@ export function createUserTools(deps: {
     },
   };
 
-  return [retrieve, keywordSearch, listDocumentChunks, summarizeDocument];
+  return [retrieve, keywordSearch, summarizeDocument];
 }
 
 export const DOMAIN_SYSTEM_PROMPT = `You are the CSB Knowledge Base Portal assistant.
@@ -614,23 +507,24 @@ Language:
 - Match the user's language for mixed or other languages when clear; otherwise prefer Traditional Chinese.
 
 Retrieval tools (when knowledge bases are selected):
-- summarize_document — WHOLE-document summary / 总结整份文件 / 全文摘要 / "summarize this document". Reads all chunks in order (map-reduce if long). Prefer ONE call. Pass knowledgeBaseIds; identify doc via appDocumentId, documentNameHint (filename), or omit both if the selected KB has exactly one document.
+- summarize_document — WHOLE-document summary / 总结整份文件 / 全文摘要 / "summarize this document". Reads all chunks in order and returns full text for you to summarize. Prefer ONE call. Pass knowledgeBaseIds; identify doc via appDocumentId, documentNameHint (filename), or omit both if the selected KB has exactly one document. Put length requests (e.g. 5000字) and topical focus into the focus parameter.
 - retrieve_chunks — concepts, mechanisms, partial topics, comparisons, open-ended factual questions (semantic/hybrid). NOT for whole-document summaries.
 - keyword_search — error codes, clause numbers, proper nouns, exact phrases, titles. Do NOT spam keyword_search to "cover" a full document for summary.
-- list_document_chunks — browse a known document by portal appDocumentId from prior sources; never invent document ids.
 - You may call retrieve_chunks and keyword_search in the same turn for non-summary Q&A when helpful (concept + exact term).
 
 Rules:
 - Knowledge bases are selected by the user in the UI only. Never invent or guess knowledge base ids or document ids.
 - Do NOT call retrieval tools for greetings, small talk, or meta questions about you (e.g. hello, hi, 你好, who are you, 你是誰, what can you do, 你可以做什麼, thanks). Answer those directly from this system role without tools or sources.
 - Whole-document summary intent (总结/摘要/概述整份/summarize this document/全文) → call summarize_document once. Do NOT chain many retrieve_chunks or keyword_search queries for that intent.
+- When the user specifies a length or depth for a summary (e.g. 5000字, 約3000字, about 2000 characters, detailed/詳細), you MUST honor it: pass that requirement in summarize_document.focus and expand the final answer to approach the requested length. Do not stop at a short outline when they asked for a long summary.
+- For non-summary Q&A, be concise and practical unless the user asks for detail or a specific length.
 - When the user asks a non-summary factual question that needs document content AND selected knowledge base IDs are present, you MUST call at least one retrieval tool (retrieve_chunks and/or keyword_search) with those knowledgeBaseIds before answering. Do not invent document content.
 - Prefer a self-contained question (resolve "it/this/上面" from history). Optional queries[] for multi-aspect topics on retrieve_chunks.
 - If no knowledge bases are selected, answer without document retrieval and, if facts from documents are needed, ask the user to select knowledge bases in the UI.
 - Only use tool evidence for document content; cite with [1], [2] matching evidence indices.
 - If retrieval returns no / weak evidence, say you don't know based on the selected knowledge bases.
 - Knowledge bases are user-private; never claim access to other users' data.
-- Be concise and practical. Mention document names when citing facts.
+- Mention document names when citing facts.
 `;
 
 /** Build a prompt prefix when the UI has knowledge bases selected. */
@@ -643,13 +537,15 @@ export function buildSelectedKbPromptPrefix(
   const ids = JSON.stringify(selected.map((k) => k.id));
   const rewriteHint = opts?.rewriteQuery
     ? `Suggested retrieval question (self-contained): ${opts.rewriteQuery}\n` +
-      `You may pass this as retrieve_chunks.question or keyword_search.query (or refine it).\n\n`
+      `You may pass this as retrieve_chunks.question or keyword_search.query (or refine it). ` +
+      `Do not treat length/format instructions as retrieval terms; put those in summarize_document.focus or the final answer.\n\n`
     : '';
   return (
     `[Selected knowledge bases for this question]\n${lines}\n\n` +
     `If this is a greeting, small talk, or a question about you / your capabilities (not document facts), answer directly WITHOUT calling retrieval tools. ` +
     `If the user wants a whole-document summary (总结/摘要/summarize this document), call summarize_document once with knowledgeBaseIds=${ids} ` +
-    `(pass documentNameHint if they named a file; appDocumentId if known). Do not chain keyword_search for summaries. ` +
+    `(pass documentNameHint if they named a file; appDocumentId if known; pass focus with any length request like 5000字 and topical focus). ` +
+    `Honor user-requested summary length — expand thoroughly, do not give a short outline when they asked for many characters. Do not chain keyword_search for summaries. ` +
     `If the user needs other facts from the selected knowledge bases, retrieve with knowledgeBaseIds=${ids} before answering ` +
     `(use retrieve_chunks for concepts; keyword_search for codes/exact phrases; both if helpful). ` +
     `Base your analysis only on the retrieved evidence. Cite with [1], [2], … and mention document names.\n\n` +

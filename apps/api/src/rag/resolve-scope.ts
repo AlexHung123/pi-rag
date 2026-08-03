@@ -163,7 +163,7 @@ export async function resolveRetrievalScope(
 }
 
 /**
- * Resolve a portal document UUID for list_document_chunks.
+ * Resolve a portal document UUID for document-scoped tools (e.g. summarize_document).
  * Fails closed on missing / unreadable documents (no existence leak beyond generic message).
  */
 export async function resolveDocumentScope(

@@ -15,15 +15,25 @@ import {
 } from './agent.tools';
 import { importEsm } from './import-esm';
 import { createLlmDebugHooks } from './llm-debug';
-import { isLlmConfigured, loadPiModelBundle } from './pi-model';
+import {
+  buildPiModel,
+  isLlmConfigured,
+  loadPiModelBundle,
+} from './pi-model';
 import { rewriteQueryForRetrieval } from '../rag/query-rewrite';
 import { mergeCitationSources } from '../rag/evidence';
+import { AgentRunToolGuard } from './agent-run-limits';
+import {
+  compactMessagesIfNeeded,
+  getAgentCompactionSettings,
+  summarizeWithChatCompletions,
+  type CompactableMessage,
+} from './agent-compaction';
 
 /** Tools that may attach details.sources for the citation UI. */
 const RETRIEVAL_TOOL_NAMES = new Set([
   'retrieve_chunks',
   'keyword_search',
-  'list_document_chunks',
   'summarize_document',
 ]);
 
@@ -32,11 +42,15 @@ export type AgentStreamEvent =
   | { type: 'tool_start'; name: string }
   | { type: 'tool_end'; name: string; ok: boolean }
   | { type: 'sources'; sources: CitationSource[] }
-  | { type: 'done'; fullText: string; sources: CitationSource[] }
+  | { type: 'done'; fullText: string; sources: CitationSource[]; aborted?: boolean }
   | { type: 'error'; message: string };
 
 export type AgentRunOptions = {
   knowledgeBaseIds?: string[];
+  /** Client disconnect / Stop button — aborts the in-flight agent run. */
+  signal?: AbortSignal;
+  /** Allowlisted model id for this prompt (defaults to OPENAI_MODEL). */
+  modelId?: string;
 };
 
 @Injectable()
@@ -92,6 +106,13 @@ export class AgentService {
       return;
     }
 
+    // Per-message model: switch on the pooled agent before this prompt.
+    const modelId =
+      typeof options.modelId === 'string' ? options.modelId.trim() : '';
+    if (modelId) {
+      session.agent.state.model = buildPiModel(modelId) as never;
+    }
+
     const selectedKbIds = (options.knowledgeBaseIds || []).filter(Boolean);
     let promptText = userMessage;
     if (selectedKbIds.length) {
@@ -121,13 +142,76 @@ export class AgentService {
     /** Authoritative assistant text for this run (deltas or last message_end). */
     let fullText = '';
     let sources: CitationSource[] = [];
+    let clientAborted = false;
+    const externalSignal = options.signal;
+    const guard = new AgentRunToolGuard();
 
     const push = (ev: AgentStreamEvent) => {
       queue.push(ev);
       notify?.();
     };
 
+    const abortFromClient = () => {
+      if (clientAborted) return;
+      clientAborted = true;
+      this.logger.debug(`abort requested for conversation ${conversationId}`);
+      try {
+        session.agent.abort();
+      } catch {
+        /* ignore */
+      }
+    };
+
+    if (externalSignal?.aborted) {
+      abortFromClient();
+    }
+    const onExternalAbort = () => abortFromClient();
+    externalSignal?.addEventListener('abort', onExternalAbort);
+
+    // Per-run tool caps (pooled agents reuse hooks; always rebind + clear).
+    const prevBefore = session.agent.beforeToolCall;
+    const prevAfter = session.agent.afterToolCall;
+    session.agent.beforeToolCall = async (ctx) => {
+      const name = String(ctx.toolCall?.name || 'tool');
+      const decision = guard.beforeToolCall(name, ctx.args);
+      if (!decision.allow) {
+        this.logger.warn(
+          `tool blocked conv=${conversationId} tool=${name}: ${decision.reason}`,
+        );
+        if (guard.shouldHardStop) {
+          try {
+            session.agent.abort();
+          } catch {
+            /* ignore */
+          }
+        }
+        return { block: true, reason: decision.reason };
+      }
+      return undefined;
+    };
+    session.agent.afterToolCall = async (ctx) => {
+      const name = String(ctx.toolCall?.name || 'tool');
+      guard.afterToolCall(name, ctx.args, Boolean(ctx.isError));
+      // After hitting the global tool budget, prefer ending the run over more LLM turns.
+      if (guard.toolCallCount >= 1 && guard.shouldHardStop) {
+        return { terminate: true };
+      }
+      return undefined;
+    };
+
     const unsubscribe = session.agent.subscribe((event: AgentPoolEvent) => {
+      if (event.type === 'turn_start') {
+        if (guard.onTurnStart()) {
+          this.logger.warn(
+            `max turns exceeded conv=${conversationId}; aborting agent`,
+          );
+          try {
+            session.agent.abort();
+          } catch {
+            /* ignore */
+          }
+        }
+      }
       this.mapEvent(
         event,
         push,
@@ -162,9 +246,21 @@ export class AgentService {
     session.agent.onPayload = llmDebug.onPayload;
     session.agent.onResponse = llmDebug.onResponse;
 
+    // Lightweight memory compaction (bare Agent; does not touch Postgres).
+    if (!clientAborted && !externalSignal?.aborted) {
+      await this.maybeCompactAgent(session.agent, {
+        conversationId,
+        signal: externalSignal,
+      });
+    }
+
     const promptPromise = session.agent
       .prompt(promptText)
       .catch((err: unknown) => {
+        if (clientAborted || externalSignal?.aborted) {
+          // User Stop / client disconnect — not a hard failure.
+          return;
+        }
         const message = llmDebug.recordError(err);
         this.logger.warn(`agent.prompt failed: ${message}`);
         push({ type: 'error', message });
@@ -176,6 +272,9 @@ export class AgentService {
 
     try {
       while (!finished || queue.length > 0) {
+        if (externalSignal?.aborted) {
+          abortFromClient();
+        }
         if (queue.length === 0) {
           await new Promise<void>((resolve) => {
             notify = resolve;
@@ -198,12 +297,21 @@ export class AgentService {
           session.agent.state.errorMessage ||
           '';
       }
-      if (session.agent.state.errorMessage && !fullText) {
+      const aborted =
+        clientAborted ||
+        externalSignal?.aborted === true ||
+        /abort/i.test(String(session.agent.state.errorMessage || ''));
+
+      if (session.agent.state.errorMessage && !fullText && !aborted) {
         const message = llmDebug.recordError(
           new Error(session.agent.state.errorMessage),
         );
         yield { type: 'error', message };
         fullText = message;
+      }
+
+      if (aborted && !fullText) {
+        fullText = '(stopped)';
       }
 
       // Fallback: recover citation sources from tool results in agent history
@@ -215,10 +323,82 @@ export class AgentService {
         }
       }
 
-      yield { type: 'done', fullText, sources };
+      yield { type: 'done', fullText, sources, aborted };
     } finally {
+      // Consumer early-return or client stop: force abort and wait so pool release is safe.
+      if (!finished) {
+        abortFromClient();
+      }
+      try {
+        await promptPromise;
+      } catch {
+        /* already handled */
+      }
+      externalSignal?.removeEventListener('abort', onExternalAbort);
+      session.agent.beforeToolCall = prevBefore;
+      session.agent.afterToolCall = prevAfter;
       unsubscribe();
       this.pool.release(conversationId);
+    }
+  }
+
+  /**
+   * If in-memory transcript is over the token threshold, summarize older
+   * messages and keep a recent tail on the pooled Agent.
+   */
+  private async maybeCompactAgent(
+    agent: PooledAgent,
+    opts: { conversationId: string; signal?: AbortSignal },
+  ): Promise<void> {
+    const settings = getAgentCompactionSettings();
+    if (!settings.enabled) return;
+
+    const model = agent.state.model as
+      | { id?: string; baseUrl?: string; contextWindow?: number }
+      | undefined;
+    const contextWindow =
+      typeof model?.contextWindow === 'number' && model.contextWindow > 0
+        ? model.contextWindow
+        : 256_000;
+    const baseUrl = String(
+      model?.baseUrl || process.env.OPENAI_BASE_URL || '',
+    ).replace(/\/$/, '');
+    const modelId = String(
+      model?.id || process.env.OPENAI_MODEL || '',
+    ).trim();
+    const apiKey = (process.env.OPENAI_API_KEY || '').trim();
+
+    const current = (agent.state.messages || []) as CompactableMessage[];
+    if (current.length < 4) return;
+
+    try {
+      const result = await compactMessagesIfNeeded({
+        messages: current,
+        contextWindow,
+        settings,
+        signal: opts.signal,
+        summarize: (toSum, signal) =>
+          summarizeWithChatCompletions({
+            baseUrl,
+            apiKey: apiKey || undefined,
+            model: modelId,
+            messagesToSummarize: toSum,
+            signal,
+          }),
+      });
+
+      if (!result.compacted) return;
+
+      agent.state.messages = result.messages as typeof agent.state.messages;
+      this.logger.log(
+        `compaction conv=${opts.conversationId} tokens ${result.tokensBefore}→${result.tokensAfter} ` +
+          `keptFrom=${result.firstKeptIndex} hardDrop=${result.hardDrop}`,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      this.logger.warn(
+        `compaction skipped conv=${opts.conversationId}: ${message}`,
+      );
     }
   }
 
@@ -416,7 +596,7 @@ function extractSourcesFromToolResult(result: unknown): CitationSource[] {
 
 /**
  * Scan agent message history for retrieval tool results (this turn).
- * Merges sources from retrieve_chunks / keyword_search / list_document_chunks / summarize_document.
+ * Merges sources from retrieve_chunks / keyword_search / summarize_document.
  */
 function extractSourcesFromAgentMessages(
   messages: Array<{ role: string; content?: unknown; details?: unknown; toolName?: string }>,

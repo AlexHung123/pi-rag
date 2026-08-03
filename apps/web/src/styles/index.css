@@ -931,82 +931,263 @@ button {
 
 .input-area {
   flex: 0 0 auto;
-  padding: 8px clamp(20px, 5vw, 72px) 18px;
+  padding: 8px clamp(20px, 5vw, 72px) 20px;
   background: var(--bg-app);
 }
 
-.input-stack {
+/* ── Unified composer (ChatGPT-style shell) ── */
+.composer {
   width: min(100%, 800px);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-}
-
-/* ── Knowledge base multi-select ── */
-.kb-select-bar {
-  position: relative;
-  display: flex;
-  flex-direction: column;
   gap: 6px;
+  padding: 12px 14px 10px;
+  border: 1px solid var(--border-color);
+  border-radius: 24px;
+  background: var(--surface-primary);
+  box-shadow: var(--shadow-md);
+  transition:
+    border-color var(--transition-fast),
+    box-shadow var(--transition-fast);
 }
 
-.kb-select-trigger {
-  display: inline-flex;
+.composer:focus-within {
+  border-color: var(--border-color-hover);
+  box-shadow: var(--shadow-focus), var(--shadow-md);
+}
+
+.composer-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 0 2px 2px;
+}
+
+.composer-input {
+  width: 100%;
+  min-height: 28px;
+  max-height: 180px;
+  resize: none;
+  border: 0;
+  outline: 0;
+  padding: 4px 4px 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 15px;
+  line-height: 22px;
+}
+
+.composer-input::placeholder {
+  color: var(--text-tertiary);
+}
+
+.composer-input:disabled {
+  opacity: 0.7;
+  cursor: not-allowed;
+}
+
+.composer-toolbar {
+  display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  max-width: 100%;
-  min-height: 34px;
-  padding: 6px 12px;
+  gap: 10px;
+  min-height: 36px;
+}
+
+.composer-toolbar-left,
+.composer-toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.composer-toolbar-left {
+  position: relative;
+  flex: 1 1 auto;
+  flex-wrap: wrap;
+}
+
+.composer-toolbar-right {
+  flex: 0 0 auto;
+}
+
+.composer-tool-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: min(220px, 48vw);
+  min-height: 32px;
+  padding: 5px 10px 5px 8px;
   border: 1px solid var(--border-color);
   border-radius: 999px;
-  background: var(--surface-primary);
+  background: var(--bg-app);
   color: var(--text-secondary);
   font-size: 13px;
   font-weight: 500;
   cursor: pointer;
-  box-shadow: var(--shadow-sm);
   transition:
     border-color var(--transition-fast),
     background var(--transition-fast),
     color var(--transition-fast);
 }
 
-.kb-select-trigger:hover:not(:disabled) {
+.composer-tool-pill:hover:not(:disabled) {
   border-color: var(--border-color-hover);
   color: var(--text-primary);
+  background: var(--surface-primary);
 }
 
-.kb-select-trigger.has-selection {
-  border-color: var(--color-primary);
+.composer-tool-pill.has-selection {
+  border-color: color-mix(in srgb, var(--color-primary) 45%, var(--border-color));
   background: var(--color-primary-soft);
   color: var(--color-primary);
 }
 
-.kb-select-trigger:disabled {
+.composer-tool-pill:disabled {
   opacity: 0.7;
   cursor: not-allowed;
 }
 
-.kb-select-label {
+.composer-tool-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  opacity: 0.85;
+}
+
+.composer-tool-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.kb-select-chevron {
+.composer-tool-chevron {
   flex: 0 0 auto;
-  font-size: 11px;
-  opacity: 0.7;
+  font-size: 10px;
+  opacity: 0.65;
+  line-height: 1;
 }
 
-.kb-selected-chips {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
+/* ── Model picker (ghost text, bottom-right of composer) ── */
+.model-picker {
+  position: relative;
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(220px, 40vw);
 }
+
+.model-picker-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  min-height: 32px;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast);
+}
+
+.model-picker-trigger:hover:not(:disabled) {
+  background: var(--color-sidebar-hover);
+  color: var(--text-secondary);
+}
+
+.model-picker-trigger.has-selection {
+  color: var(--color-primary);
+}
+
+.model-picker-trigger:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.model-picker-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-picker-chevron {
+  flex: 0 0 auto;
+  font-size: 10px;
+  opacity: 0.7;
+  line-height: 1;
+}
+
+.model-picker-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 35;
+  min-width: 220px;
+  max-width: min(360px, 80vw);
+  max-height: 260px;
+  overflow: auto;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  background: var(--surface-primary);
+  box-shadow: var(--shadow-lg);
+}
+
+.model-picker-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-align: left;
+  cursor: pointer;
+}
+
+.model-picker-option:hover {
+  background: var(--color-sidebar-hover);
+}
+
+.model-picker-option.active {
+  background: var(--color-primary-soft);
+  color: var(--color-primary);
+}
+
+.model-picker-option-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.model-picker-option-badge {
+  flex: 0 0 auto;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+  text-transform: lowercase;
+}
+
+.model-picker-option.active .model-picker-option-badge {
+  color: color-mix(in srgb, var(--color-primary) 70%, var(--text-tertiary));
+}
+
+/* ── Knowledge base multi-select dropdown ── */
 
 .kb-chip {
   display: inline-flex;
@@ -1049,9 +1230,9 @@ button {
 .kb-select-dropdown {
   position: absolute;
   left: 0;
-  right: 0;
-  bottom: calc(100% + 6px);
-  z-index: 30;
+  bottom: calc(100% + 8px);
+  z-index: 35;
+  width: min(360px, 85vw);
   max-height: 280px;
   overflow: auto;
   border: 1px solid var(--border-color);
@@ -1138,22 +1319,7 @@ button {
   white-space: nowrap;
 }
 
-.input-container {
-  display: flex;
-  width: 100%;
-  min-height: 54px;
-  margin: 0;
-  align-items: flex-end;
-  gap: 8px;
-  padding: 7px 8px 7px 12px;
-  border: 1px solid var(--border-color);
-  border-radius: 10px;
-  background: var(--surface-primary);
-  box-shadow: var(--shadow-md);
-  transition:
-    border-color var(--transition-fast),
-    box-shadow var(--transition-fast);
-}
+
 
 /* ── Source references (chat citations) ── */
 .sources-panel {
@@ -1455,39 +1621,24 @@ button {
   }
 }
 
-.input-container:focus-within {
-  border-color: var(--color-primary);
-  box-shadow: var(--shadow-focus), var(--shadow-md);
-}
-
-.input-container textarea {
-  flex: 1;
-  min-height: 38px;
-  max-height: 160px;
-  resize: vertical;
-  border: 0;
-  outline: 0;
-  padding: 8px 2px;
-  background: transparent;
-  color: var(--text-primary);
-  font: inherit;
-  font-size: 14px;
-  line-height: 22px;
-}
-
 .send-btn {
   display: inline-flex;
-  min-width: 64px;
-  height: 38px;
+  min-width: 36px;
+  height: 36px;
+  padding: 0 14px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
   border: 0;
-  border-radius: 7px;
+  border-radius: 999px;
   background: var(--surface-secondary);
   color: var(--text-tertiary);
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
+  transition:
+    background var(--transition-fast),
+    color var(--transition-fast);
 }
 
 .send-btn:disabled {
@@ -1502,6 +1653,37 @@ button {
 
 .send-btn.send-btn-active:hover {
   background: var(--color-primary-hover);
+}
+
+.send-btn.stop-btn {
+  background: var(--surface-secondary);
+  color: var(--color-error);
+  border: 1px solid color-mix(in srgb, var(--color-error) 35%, var(--border-color));
+  padding: 0 12px;
+}
+
+.send-btn.stop-btn-active {
+  cursor: pointer;
+  opacity: 1;
+}
+
+.send-btn.stop-btn:hover {
+  background: color-mix(in srgb, var(--color-error) 12%, var(--bg-primary));
+}
+
+@media (max-width: 520px) {
+  .composer {
+    border-radius: 20px;
+    padding: 10px 10px 8px;
+  }
+
+  .model-picker {
+    max-width: min(140px, 36vw);
+  }
+
+  .composer-tool-pill {
+    max-width: min(160px, 42vw);
+  }
 }
 
 /* ── Pi agent process panel (one collapsible overlay on the reply) ── */

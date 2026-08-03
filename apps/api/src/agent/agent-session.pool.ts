@@ -22,6 +22,31 @@ export type PooledAgent = {
     response: { status: number; headers: Record<string, string> },
     model?: unknown,
   ) => void;
+  /** Per-run hooks (mutated around each prompt; cleared after). */
+  beforeToolCall?: (
+    context: {
+      toolCall: { name?: string; id?: string };
+      args: unknown;
+    },
+    signal?: AbortSignal,
+  ) => Promise<{ block?: boolean; reason?: string } | undefined>;
+  afterToolCall?: (
+    context: {
+      toolCall: { name?: string; id?: string };
+      args: unknown;
+      isError: boolean;
+      result: unknown;
+    },
+    signal?: AbortSignal,
+  ) => Promise<
+    | {
+        content?: unknown;
+        details?: unknown;
+        isError?: boolean;
+        terminate?: boolean;
+      }
+    | undefined
+  >;
 };
 
 export type AgentPoolEvent = {
@@ -135,6 +160,20 @@ export class AgentSessionPool implements OnModuleDestroy {
       idle: size - busy,
       ttlMs: this.ttlMs,
     };
+  }
+
+  /** Abort an in-flight prompt without disposing the pooled session. */
+  abort(conversationId: string): void {
+    const s = this.sessions.get(conversationId);
+    if (!s) return;
+    try {
+      if (s.busy || s.agent.state.isStreaming) {
+        s.agent.abort();
+        this.logger.debug(`Aborted agent session ${conversationId}`);
+      }
+    } catch {
+      /* ignore */
+    }
   }
 
   dispose(conversationId: string): void {

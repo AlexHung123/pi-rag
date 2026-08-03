@@ -28,4 +28,14 @@ export class PostMessageDto {
   @ArrayMaxSize(50)
   @IsUUID('4', { each: true })
   knowledgeBaseIds?: string[];
+
+  /**
+   * Optional per-message model id (must be on server OPENAI_MODELS allowlist).
+   * Omit to use OPENAI_MODEL default.
+   */
+  @IsOptional()
+  @IsString()
+  @MinLength(1)
+  @MaxLength(128)
+  modelId?: string;
 }

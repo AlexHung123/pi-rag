@@ -28,6 +28,7 @@ import AdminAgentSessionsPanel from './components/admin/AdminAgentSessionsPanel'
 import {
   chatApi,
   kbApi,
+  modelsApi,
   type ChatMessage,
   type CitationSource,
   type Conversation,
@@ -60,6 +61,12 @@ export default function App() {
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
   const [kbPickerOpen, setKbPickerOpen] = useState(false);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [availableModels, setAvailableModels] = useState<
+    Array<{ id: string; name: string }>
+  >([]);
+  const [defaultModelId, setDefaultModelId] = useState('');
+  const [selectedModelId, setSelectedModelId] = useState('');
   const [locateSource, setLocateSource] = useState<CitationSource | null>(null);
   const [adminDataset, setAdminDataset] = useState<{
     id: string;
@@ -67,9 +74,13 @@ export default function App() {
   } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const kbPickerRef = useRef<HTMLDivElement>(null);
+  const modelPickerRef = useRef<HTMLDivElement>(null);
+  const composerInputRef = useRef<HTMLTextAreaElement>(null);
   /** Monotonic id so slower / out-of-order list responses cannot wipe newer state. */
   const listRequestIdRef = useRef(0);
   const sendingRef = useRef(false);
+  /** In-flight chat SSE; Stop aborts this controller. */
+  const abortRef = useRef<AbortController | null>(null);
 
   const refreshConversations = useCallback(async () => {
     const reqId = ++listRequestIdRef.current;
@@ -101,6 +112,23 @@ export default function App() {
     return res.items;
   }, []);
 
+  const refreshModels = useCallback(async () => {
+    const res = await modelsApi.list();
+    const models = (Array.isArray(res.models) ? res.models : [])
+      .map((m) => {
+        const id = String(m?.id || '').trim();
+        if (!id) return null;
+        const name = String(m?.name || '').trim() || id;
+        return { id, name };
+      })
+      .filter((m): m is { id: string; name: string } => m != null);
+    const defaultId = (res.defaultModelId || models[0]?.id || '').trim();
+    setAvailableModels(models);
+    setDefaultModelId(defaultId);
+    setSelectedModelId(defaultId);
+    return res;
+  }, []);
+
   // App stays mounted across logout/login, so session UI must be wiped when identity
   // changes — otherwise the previous account's conversation list flashes briefly.
   const userId = user?.id ?? null;
@@ -115,11 +143,17 @@ export default function App() {
     setKnowledgeBases([]);
     setSelectedKbIds([]);
     setKbPickerOpen(false);
+    setModelPickerOpen(false);
+    setAvailableModels([]);
+    setDefaultModelId('');
+    setSelectedModelId('');
     setLocateSource(null);
     setAdminDataset(null);
     setWorkspace('chat');
     setSending(false);
     sendingRef.current = false;
+    abortRef.current?.abort();
+    abortRef.current = null;
   }, [userId]);
 
   useEffect(() => {
@@ -130,22 +164,29 @@ export default function App() {
     refreshKnowledgeBases().catch(() => {
       /* non-blocking for chat */
     });
-  }, [userId, refreshConversations, refreshKnowledgeBases]);
+    refreshModels().catch(() => {
+      /* non-blocking: omit modelId on send → server default */
+    });
+  }, [userId, refreshConversations, refreshKnowledgeBases, refreshModels]);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, sending, agentProcess?.steps.length, agentProcess?.status]);
 
   useEffect(() => {
-    if (!kbPickerOpen) return;
+    if (!kbPickerOpen && !modelPickerOpen) return;
     const onDocClick = (e: MouseEvent) => {
-      if (!kbPickerRef.current?.contains(e.target as Node)) {
+      const target = e.target as Node;
+      if (kbPickerOpen && !kbPickerRef.current?.contains(target)) {
         setKbPickerOpen(false);
+      }
+      if (modelPickerOpen && !modelPickerRef.current?.contains(target)) {
+        setModelPickerOpen(false);
       }
     };
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
-  }, [kbPickerOpen]);
+  }, [kbPickerOpen, modelPickerOpen]);
 
   /**
    * Resolve a conversation id that exists for this user.
@@ -269,20 +310,32 @@ export default function App() {
   const selectAllKbs = () =>
     setSelectedKbIds(knowledgeBases.map((k) => k.id));
 
+  const stopSending = () => {
+    abortRef.current?.abort();
+  };
+
   const send = async () => {
     const content = input.trim();
     if (!content || sending) return;
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     setSending(true);
     sendingRef.current = true;
     setError('');
     setInput('');
+    if (composerInputRef.current) {
+      composerInputRef.current.style.height = 'auto';
+    }
     setKbPickerOpen(false);
+    setModelPickerOpen(false);
 
     let convId: string | null = null;
     let assistantText = '';
     let assistantSources: CitationSource[] = [];
     let finalMessageId = '';
     let sawText = false;
+    let userStopped = false;
     try {
       // Ensure we stream against a conversation that still exists for this user.
       // Fixes "conversation not found" when activeId is stale (deleted / desynced).
@@ -304,16 +357,23 @@ export default function App() {
       setAgentProcess(createInitialProcess(tempAssistant.id));
       setMessages((prev) => [...prev, tempUser, tempAssistant]);
 
+      const modelForSend = selectedModelId.trim();
       const streamOpts: {
         knowledgeBaseIds?: string[];
-      } = {};
+        modelId?: string;
+        signal: AbortSignal;
+      } = { signal: ac.signal };
       if (selectedKbIds.length > 0) {
         streamOpts.knowledgeBaseIds = selectedKbIds;
+      }
+      if (modelForSend) {
+        streamOpts.modelId = modelForSend;
       }
 
       const runStream = async (id: string) => {
         let sawConversationMissing = false;
         for await (const frame of chatApi.streamMessage(id, content, streamOpts)) {
+          if (ac.signal.aborted) break;
           if (frame.event === 'text_delta') {
             if (!sawText) {
               sawText = true;
@@ -354,6 +414,7 @@ export default function App() {
             if (Array.isArray(raw) && raw.length > 0) {
               assistantSources = raw as CitationSource[];
             }
+            if (frame.data.aborted === true) userStopped = true;
             setMessages((prev) => {
               const copy = [...prev];
               const last = copy[copy.length - 1];
@@ -371,6 +432,8 @@ export default function App() {
             setAgentProcess((p) =>
               p ? { ...p, messageId: finalMessageId || p.messageId } : p,
             );
+          } else if (frame.event === 'done') {
+            if (frame.data.aborted === true) userStopped = true;
           } else if (frame.event === 'error') {
             const msg = String(frame.data.message || 'stream error');
             if (/conversation not found/i.test(msg)) {
@@ -385,7 +448,8 @@ export default function App() {
 
       let missing = await runStream(convId);
       // One automatic recovery: create a fresh conversation and resend once.
-      if (missing && !assistantText) {
+      // Do not recover after the user explicitly stopped.
+      if (missing && !assistantText && !ac.signal.aborted) {
         setError('');
         const fresh = await ensureConversationId(null);
         convId = fresh;
@@ -393,15 +457,35 @@ export default function App() {
         if (missing) {
           setError('conversation not found');
         }
-      } else if (missing) {
+      } else if (missing && !ac.signal.aborted) {
         setError('conversation not found');
       }
 
-      await refreshConversations();
+      if (!ac.signal.aborted) {
+        await refreshConversations();
+      } else {
+        userStopped = true;
+        void refreshConversations().catch(() => undefined);
+      }
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      const aborted =
+        (e instanceof DOMException && e.name === 'AbortError') ||
+        (e instanceof Error && e.name === 'AbortError') ||
+        ac.signal.aborted;
+      if (aborted) {
+        userStopped = true;
+      } else {
+        setError(e instanceof Error ? e.message : String(e));
+      }
     } finally {
+      if (abortRef.current === ac) abortRef.current = null;
+      // Spec: always default to OPENAI_MODEL after each send completes.
+      if (defaultModelId) {
+        setSelectedModelId(defaultModelId);
+      }
       // Attach Sources only after the stream is fully done (with sending cleared)
+      const stoppedEmpty =
+        userStopped && !assistantText.trim() ? '(stopped)' : '';
       setMessages((prev) => {
         const copy = [...prev];
         const last = copy[copy.length - 1];
@@ -409,7 +493,7 @@ export default function App() {
           copy[copy.length - 1] = {
             ...last,
             id: finalMessageId || last.id,
-            content: assistantText || last.content,
+            content: assistantText || stoppedEmpty || last.content,
             sources: assistantSources.length ? assistantSources : last.sources,
           };
         }
@@ -452,6 +536,11 @@ export default function App() {
   const selectedKbNames = knowledgeBases
     .filter((k) => selectedKbIds.includes(k.id))
     .map((k) => k.name);
+  const activeModelId = selectedModelId || defaultModelId;
+  const activeModelName =
+    availableModels.find((m) => m.id === activeModelId)?.name ||
+    activeModelId ||
+    'Model';
 
   return (
     <div className="chat-page">
@@ -593,140 +682,258 @@ export default function App() {
           </div>
 
           <div className="input-area">
-            <div className="input-stack">
-              <div className="kb-select-bar" ref={kbPickerRef}>
-                <button
-                  type="button"
-                  className={`kb-select-trigger ${selectedKbIds.length ? 'has-selection' : ''}`}
-                  onClick={() => {
-                    setKbPickerOpen((v) => !v);
-                    if (!knowledgeBases.length) void refreshKnowledgeBases();
-                  }}
-                  disabled={sending}
-                  aria-expanded={kbPickerOpen}
-                  aria-haspopup="listbox"
-                >
-                  <span className="kb-select-label">
-                    {selectedKbIds.length === 0
-                      ? 'Knowledge bases (optional)'
-                      : selectedKbIds.length === 1
-                        ? selectedKbNames[0] || '1 selected'
-                        : `${selectedKbIds.length} knowledge bases`}
-                  </span>
-                  <span className="kb-select-chevron" aria-hidden>
-                    ▾
-                  </span>
-                </button>
-
-                {selectedKbIds.length > 0 && (
-                  <div className="kb-selected-chips">
-                    {selectedKbNames.map((name, i) => (
-                      <button
-                        key={selectedKbIds[i]}
-                        type="button"
-                        className="kb-chip"
-                        onClick={() => toggleKb(selectedKbIds[i])}
-                        title={`Remove ${name}`}
-                        disabled={sending}
-                      >
-                        {name}
-                        <span aria-hidden>×</span>
-                      </button>
-                    ))}
+            <div className="composer">
+              {selectedKbIds.length > 0 && (
+                <div className="composer-chips">
+                  {selectedKbNames.map((name, i) => (
                     <button
+                      key={selectedKbIds[i]}
                       type="button"
-                      className="kb-chip-clear"
-                      onClick={clearKbSelection}
+                      className="kb-chip"
+                      onClick={() => toggleKb(selectedKbIds[i])}
+                      title={`Remove ${name}`}
                       disabled={sending}
                     >
-                      Clear
+                      {name}
+                      <span aria-hidden>×</span>
                     </button>
-                  </div>
-                )}
+                  ))}
+                  <button
+                    type="button"
+                    className="kb-chip-clear"
+                    onClick={clearKbSelection}
+                    disabled={sending}
+                  >
+                    Clear
+                  </button>
+                </div>
+              )}
 
-                {kbPickerOpen && (
-                  <div className="kb-select-dropdown" role="listbox" aria-multiselectable>
-                    <div className="kb-select-actions">
-                      <button type="button" onClick={selectAllKbs} disabled={!knowledgeBases.length}>
-                        Select all
-                      </button>
-                      <button type="button" onClick={clearKbSelection} disabled={!selectedKbIds.length}>
-                        Clear
-                      </button>
-                    </div>
-                    {knowledgeBases.length === 0 ? (
-                      <p className="kb-select-empty">
-                        No knowledge bases yet. Create one in My Knowledge Base.
-                      </p>
-                    ) : (
-                      <ul className="kb-select-options">
-                        {knowledgeBases.map((kb) => {
-                          const checked = selectedKbIds.includes(kb.id);
-                          return (
-                            <li key={kb.id}>
-                              <label className={`kb-select-option ${checked ? 'checked' : ''}`}>
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={() => toggleKb(kb.id)}
-                                />
-                                <span className="kb-option-text">
-                                  <span className="kb-option-name">
-                                    {kb.name}
-                                    <span
-                                      className={`kb-visibility-badge sm ${kb.visibility === 'public' ? 'public' : 'private'}`}
-                                    >
-                                      {kb.visibility === 'public' ? 'Public' : 'Private'}
-                                    </span>
-                                  </span>
-                                  {kb.description ? (
-                                    <span className="kb-option-desc">{kb.description}</span>
-                                  ) : !kb.isOwner && kb.ownerUsername ? (
-                                    <span className="kb-option-desc">
-                                      by {kb.ownerUsername}
-                                      {kb.myRole === 'editor' || kb.myRole === 'viewer'
-                                        ? ` · ${kb.myRole}`
-                                        : ''}
-                                    </span>
-                                  ) : null}
-                                </span>
-                              </label>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              <div className="input-container">
-                <textarea
-                  value={input}
-                  placeholder={
-                    selectedKbIds.length
-                      ? 'Ask a question about the selected knowledge bases…'
-                      : 'Ask about your knowledge base, or select knowledge bases above…'
+              <textarea
+                ref={composerInputRef}
+                className="composer-input"
+                value={input}
+                placeholder={
+                  selectedKbIds.length
+                    ? 'Ask a question about the selected knowledge bases…'
+                    : 'Ask about your knowledge base, or pick knowledge bases below…'
+                }
+                onChange={(e) => {
+                  const el = e.target;
+                  setInput(el.value.slice(0, 32000));
+                  el.style.height = 'auto';
+                  el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+                }}
+                maxLength={32000}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault();
+                    void send();
                   }
-                  onChange={(e) => setInput(e.target.value.slice(0, 32000))}
-                  maxLength={32000}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' && !e.shiftKey) {
-                      e.preventDefault();
-                      void send();
-                    }
-                  }}
-                  disabled={sending}
-                  rows={1}
-                />
-                <button
-                  className={`send-btn ${input.trim() && !sending ? 'send-btn-active' : ''}`}
-                  type="button"
-                  disabled={sending || !input.trim()}
-                  onClick={() => void send()}
-                >
-                  {sending ? '…' : 'Send'}
-                </button>
+                }}
+                disabled={sending}
+                rows={1}
+              />
+
+              <div className="composer-toolbar">
+                <div className="composer-toolbar-left" ref={kbPickerRef}>
+                  <button
+                    type="button"
+                    className={`composer-tool-pill ${selectedKbIds.length ? 'has-selection' : ''}`}
+                    onClick={() => {
+                      setKbPickerOpen((v) => !v);
+                      setModelPickerOpen(false);
+                      if (!knowledgeBases.length) void refreshKnowledgeBases();
+                    }}
+                    disabled={sending}
+                    aria-expanded={kbPickerOpen}
+                    aria-haspopup="listbox"
+                    title="Select knowledge bases"
+                  >
+                    <span className="composer-tool-icon" aria-hidden>
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path
+                          d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7"
+                          stroke="currentColor"
+                          strokeWidth="1.5"
+                          strokeLinecap="round"
+                        />
+                      </svg>
+                    </span>
+                    <span className="composer-tool-label">
+                      {selectedKbIds.length === 0
+                        ? 'Knowledge'
+                        : selectedKbIds.length === 1
+                          ? selectedKbNames[0] || '1 KB'
+                          : `${selectedKbIds.length} KBs`}
+                    </span>
+                    <span className="composer-tool-chevron" aria-hidden>
+                      ▾
+                    </span>
+                  </button>
+
+                  {kbPickerOpen && (
+                    <div
+                      className="kb-select-dropdown composer-dropdown"
+                      role="listbox"
+                      aria-multiselectable
+                    >
+                      <div className="kb-select-actions">
+                        <button
+                          type="button"
+                          onClick={selectAllKbs}
+                          disabled={!knowledgeBases.length}
+                        >
+                          Select all
+                        </button>
+                        <button
+                          type="button"
+                          onClick={clearKbSelection}
+                          disabled={!selectedKbIds.length}
+                        >
+                          Clear
+                        </button>
+                      </div>
+                      {knowledgeBases.length === 0 ? (
+                        <p className="kb-select-empty">
+                          No knowledge bases yet. Create one in My Knowledge Base.
+                        </p>
+                      ) : (
+                        <ul className="kb-select-options">
+                          {knowledgeBases.map((kb) => {
+                            const checked = selectedKbIds.includes(kb.id);
+                            return (
+                              <li key={kb.id}>
+                                <label
+                                  className={`kb-select-option ${checked ? 'checked' : ''}`}
+                                >
+                                  <input
+                                    type="checkbox"
+                                    checked={checked}
+                                    onChange={() => toggleKb(kb.id)}
+                                  />
+                                  <span className="kb-option-text">
+                                    <span className="kb-option-name">
+                                      {kb.name}
+                                      <span
+                                        className={`kb-visibility-badge sm ${kb.visibility === 'public' ? 'public' : 'private'}`}
+                                      >
+                                        {kb.visibility === 'public'
+                                          ? 'Public'
+                                          : 'Private'}
+                                      </span>
+                                    </span>
+                                    {kb.description ? (
+                                      <span className="kb-option-desc">
+                                        {kb.description}
+                                      </span>
+                                    ) : !kb.isOwner && kb.ownerUsername ? (
+                                      <span className="kb-option-desc">
+                                        by {kb.ownerUsername}
+                                        {kb.myRole === 'editor' ||
+                                        kb.myRole === 'viewer'
+                                          ? ` · ${kb.myRole}`
+                                          : ''}
+                                      </span>
+                                    ) : null}
+                                  </span>
+                                </label>
+                              </li>
+                            );
+                          })}
+                        </ul>
+                      )}
+                    </div>
+                  )}
+                </div>
+
+                <div className="composer-toolbar-right">
+                  {availableModels.length > 1 && (
+                    <div className="model-picker" ref={modelPickerRef}>
+                      <button
+                        type="button"
+                        className={`model-picker-trigger ${
+                          selectedModelId &&
+                          defaultModelId &&
+                          selectedModelId !== defaultModelId
+                            ? 'has-selection'
+                            : ''
+                        }`}
+                        onClick={() => {
+                          setModelPickerOpen((v) => !v);
+                          setKbPickerOpen(false);
+                        }}
+                        disabled={sending}
+                        aria-expanded={modelPickerOpen}
+                        aria-haspopup="listbox"
+                        title={activeModelName}
+                      >
+                        <span className="model-picker-label">
+                          {activeModelName}
+                        </span>
+                        <span className="model-picker-chevron" aria-hidden>
+                          ▾
+                        </span>
+                      </button>
+
+                      {modelPickerOpen && (
+                        <div
+                          className="model-picker-menu composer-dropdown"
+                          role="listbox"
+                        >
+                          {availableModels.map((m) => {
+                            const active = m.id === activeModelId;
+                            return (
+                              <button
+                                key={m.id}
+                                type="button"
+                                role="option"
+                                aria-selected={active}
+                                className={`model-picker-option ${active ? 'active' : ''}`}
+                                onClick={() => {
+                                  setSelectedModelId(m.id);
+                                  setModelPickerOpen(false);
+                                }}
+                              >
+                                <span className="model-picker-option-name">
+                                  {m.name}
+                                </span>
+                                {m.id === defaultModelId && (
+                                  <span className="model-picker-option-badge">
+                                    default
+                                  </span>
+                                )}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {sending ? (
+                    <button
+                      className="send-btn stop-btn stop-btn-active"
+                      type="button"
+                      onClick={stopSending}
+                      title="Stop generation"
+                      aria-label="Stop generation"
+                    >
+                      Stop
+                    </button>
+                  ) : (
+                    <button
+                      className={`send-btn ${input.trim() ? 'send-btn-active' : ''}`}
+                      type="button"
+                      disabled={!input.trim()}
+                      onClick={() => void send()}
+                      title="Send message"
+                      aria-label="Send message"
+                    >
+                      Send
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           </div>

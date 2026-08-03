@@ -689,6 +689,18 @@ export const adminApi = {
     ),
 };
 
+/** key = id (API modelId), value = name (UI label) */
+export type ChatModelOption = { id: string; name: string };
+
+export type ChatModelsResponse = {
+  defaultModelId: string;
+  models: ChatModelOption[];
+};
+
+export const modelsApi = {
+  list: () => apiFetch<ChatModelsResponse>('/api/models'),
+};
+
 export const chatApi = {
   list: () => apiFetch<{ items: Conversation[] }>('/api/conversations'),
   create: (title?: string) =>
@@ -705,15 +717,24 @@ export const chatApi = {
   streamMessage: async function* (
     conversationId: string,
     content: string,
-    opts?: { knowledgeBaseIds?: string[] },
+    opts?: {
+      knowledgeBaseIds?: string[];
+      modelId?: string;
+      signal?: AbortSignal;
+    },
   ): AsyncGenerator<{ event: string; data: Record<string, unknown> }> {
     const body: {
       content: string;
       knowledgeBaseIds?: string[];
+      modelId?: string;
     } = { content };
     if (opts?.knowledgeBaseIds?.length) {
       body.knowledgeBaseIds = opts.knowledgeBaseIds;
     }
+    if (opts?.modelId?.trim()) {
+      body.modelId = opts.modelId.trim();
+    }
+    const signal = opts?.signal;
     const res = await fetch(`/api/conversations/${conversationId}/messages`, {
       method: 'POST',
       credentials: 'include',
@@ -722,6 +743,7 @@ export const chatApi = {
         'X-CSRF-Token': await requireCsrfToken(),
       },
       body: JSON.stringify(body),
+      signal,
     });
     if (!res.ok || !res.body) {
       const text = await res.text();
@@ -737,27 +759,39 @@ export const chatApi = {
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split('\n\n');
-      buffer = parts.pop() || '';
-      for (const part of parts) {
-        const lines = part.split('\n');
-        let event = 'message';
-        let data = '';
-        for (const line of lines) {
-          if (line.startsWith('event:')) event = line.slice(6).trim();
-          if (line.startsWith('data:')) data += line.slice(5).trim();
+    const onAbort = () => {
+      void reader.cancel().catch(() => undefined);
+    };
+    signal?.addEventListener('abort', onAbort);
+    try {
+      while (true) {
+        if (signal?.aborted) {
+          await reader.cancel().catch(() => undefined);
+          break;
         }
-        if (!data) continue;
-        try {
-          yield { event, data: JSON.parse(data) as Record<string, unknown> };
-        } catch {
-          yield { event, data: { raw: data } };
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const parts = buffer.split('\n\n');
+        buffer = parts.pop() || '';
+        for (const part of parts) {
+          const lines = part.split('\n');
+          let event = 'message';
+          let data = '';
+          for (const line of lines) {
+            if (line.startsWith('event:')) event = line.slice(6).trim();
+            if (line.startsWith('data:')) data += line.slice(5).trim();
+          }
+          if (!data) continue;
+          try {
+            yield { event, data: JSON.parse(data) as Record<string, unknown> };
+          } catch {
+            yield { event, data: { raw: data } };
+          }
         }
       }
+    } finally {
+      signal?.removeEventListener('abort', onAbort);
     }
   },
 };
