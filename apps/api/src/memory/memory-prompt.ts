@@ -99,7 +99,12 @@ function profileHasContent(p: ProfileForPrompt): boolean {
 
 function formatProfileSection(p: ProfileForPrompt): string {
   const lines: string[] = ['Profile:'];
-  if (p.displayName?.trim()) lines.push(`- Name: ${p.displayName.trim()}`);
+  if (p.displayName?.trim()) {
+    // Emphasize verbatim use — models often retype names with typos.
+    lines.push(
+      `- Name (verbatim, do not alter spelling): ${p.displayName.trim()}`,
+    );
+  }
   if (p.language?.trim()) lines.push(`- Language: ${p.language.trim()}`);
   if (p.responseStyle?.trim())
     lines.push(`- Style: ${p.responseStyle.trim()}`);
@@ -141,7 +146,8 @@ export function buildMemoryPromptBlock(args: {
       for (const it of items) parts.push(formatItemLine(it));
     }
     parts.push(
-      'Rules: Prefer the current user message if it conflicts. Do not invent memories not listed.',
+      'Rules: Prefer the current user message if it conflicts. Do not invent memories not listed. ' +
+        'If Profile Name is set, answer name questions with that exact string (character-for-character).',
     );
     return parts.join('\n') + '\n\n';
   };

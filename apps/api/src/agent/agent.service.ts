@@ -12,6 +12,7 @@ import {
   buildSelectedKbPromptPrefix,
   createUserTools,
   DOMAIN_SYSTEM_PROMPT,
+  type AgentToolTurnContext,
   type CitationSource,
 } from './agent.tools';
 import { importEsm } from './import-esm';
@@ -113,6 +114,14 @@ export class AgentService {
       typeof options.modelId === 'string' ? options.modelId.trim() : '';
     if (modelId) {
       session.agent.state.model = buildPiModel(modelId) as never;
+    }
+
+    // Keep tool closures in sync with this turn's user text (name spelling etc.).
+    const turnCtx = (session.agent as PooledAgent & {
+      __turnContext?: AgentToolTurnContext;
+    }).__turnContext;
+    if (turnCtx) {
+      turnCtx.latestUserMessage = userMessage;
     }
 
     // Order: memory block → selected KB prefix → user message (spec).
@@ -464,12 +473,14 @@ export class AgentService {
     const limit = Number.isFinite(historyLimit) && historyLimit > 0 ? historyLimit : 20;
     const slice = args.history.slice(-limit);
 
+    const turnContext: AgentToolTurnContext = { latestUserMessage: '' };
     const tools = createUserTools({
       userId: args.userId,
       knowledge: this.knowledge,
       ragflow: this.ragflow,
       prisma: this.prisma,
       memory: this.memory,
+      turnContext,
     });
 
     const messages = slice.map((m) => {
@@ -511,9 +522,10 @@ export class AgentService {
       getApiKey: () => bundle.getApiKey(),
       sessionId: args.conversationId,
       toolExecution: 'sequential',
-    });
+    }) as unknown as PooledAgent & { __turnContext?: AgentToolTurnContext };
 
-    return agent as unknown as PooledAgent;
+    agent.__turnContext = turnContext;
+    return agent;
   }
 }
 

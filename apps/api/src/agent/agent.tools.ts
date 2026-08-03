@@ -3,6 +3,7 @@ import { KnowledgeService } from '../knowledge/knowledge.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { MemoryService } from '../memory/memory.service';
+import { resolveDisplayNameForUpdate } from '../memory/profile-from-message';
 import type { RetrieveHit } from '../ragflow/ragflow.types';
 import { getRagRetrievalConfig } from '../rag/rag-config';
 import {
@@ -125,14 +126,21 @@ function resolveQueries(
   return [question];
 }
 
+export type AgentToolTurnContext = {
+  /** Latest user message for this prompt (set each turn before agent.prompt). */
+  latestUserMessage: string;
+};
+
 export function createUserTools(deps: {
   userId: string;
   knowledge: KnowledgeService;
   ragflow: RagflowService;
   prisma: PrismaService;
   memory: MemoryService;
+  /** Mutable; agent.service updates latestUserMessage each turn. */
+  turnContext: AgentToolTurnContext;
 }): AppAgentTool[] {
-  const { userId, knowledge, ragflow, prisma, memory } = deps;
+  const { userId, knowledge, ragflow, prisma, memory, turnContext } = deps;
   const ragCfg = getRagRetrievalConfig();
 
   const retrieve: AppAgentTool = {
@@ -519,12 +527,12 @@ export function createUserTools(deps: {
     name: 'profile_update',
     label: 'Update profile',
     description:
-      'Update the user L1 profile (stable identity & defaults): display name, language, response style, bio. Use when the user sets how to address them, default reply language, overall answer style, or short background (叫我…/以後用繁中/回答短一點/我是…). Pass only fields that should change. To clear a field, pass empty string. For free-form facts/preferences that are not these profile fields, use memory_save instead.',
+      'Update the user L1 profile (stable identity & defaults): display name, language, response style, bio. Use when the user sets how to address them, default reply language, overall answer style, or short background (叫我…/以後用繁中/回答短一點/我是…). Pass only fields that should change. To clear a field, pass empty string. For free-form facts/preferences that are not these profile fields, use memory_save instead. CRITICAL for displayName: copy the name EXACTLY as the user typed it (same letters/spelling); never "correct", transliterate, or retype from memory.',
     parameters: Type.Object({
       displayName: Type.Optional(
         Type.String({
           description:
-            'How to address the user (max 80). Empty string clears. e.g. 阿明',
+            'EXACT spelling from the user message (max 80). Empty string clears. Do not alter characters (e.g. alexhong must stay alexhong, not alekhong).',
         }),
       ),
       language: Type.Optional(
@@ -554,10 +562,16 @@ export function createUserTools(deps: {
         bio?: string;
       } = {};
       let any = false;
-      if (params.displayName !== undefined) {
+      // Prefer exact spelling from the user message (avoids model retyping typos).
+      const resolvedName = resolveDisplayNameForUpdate(
+        turnContext.latestUserMessage || '',
+        params.displayName !== undefined
+          ? String(params.displayName)
+          : undefined,
+      );
+      if (resolvedName !== undefined) {
         any = true;
-        const v = String(params.displayName);
-        dto.displayName = v.trim() === '' ? null : v;
+        dto.displayName = resolvedName.trim() === '' ? null : resolvedName;
       }
       if (params.language !== undefined) {
         any = true;
@@ -597,8 +611,9 @@ export function createUserTools(deps: {
             {
               type: 'text' as const,
               text:
-                `Updated profile:\n${lines.join('\n')}\n` +
-                `Confirm briefly to the user. Profile is injected every turn going forward.`,
+                `Updated profile (canonical values from database — quote displayName EXACTLY when confirming):\n` +
+                `${lines.join('\n')}\n` +
+                `Confirm briefly using these exact strings. Profile is injected every turn going forward.`,
             },
           ],
           details: { ok: true, profile },
@@ -849,10 +864,12 @@ Language:
 - If the user profile (injected each turn) sets a language, honor it unless they override in the current message.
 
 Personal memory tools (always available; durable across chats):
-- profile_update — L1 stable identity/defaults: displayName (叫我…), language (一律繁中/用英文), responseStyle (回答短一點/詳細), bio (我是…/背景). Pass only changed fields. Prefer this over memory_save for those fields.
+- profile_update — L1 stable identity/defaults: displayName (叫我… / should be … / my name is …), language, responseStyle, bio. Pass only changed fields. Prefer this over memory_save for those fields. displayName MUST be copied character-for-character from the user message (never retype or "fix" spelling).
 - memory_save — L2 free-form long-term facts (記住/记得/remember/記著/幫我記住) that are NOT name/language/style/bio. ONE concise sentence. category preference|fact|project|other. Pin only if they ask.
 - memory_forget — forget an L2 item (忘掉/忘记/forget). Prefer memory id; else content substring. If multiple match, ask which one.
 - memory_list — what you remember / 你還記得什麼 (lists L2 items; profile is separate and already in context when set).
+- When the user asks their name / 我叫什麼 / what is my name: use the injected Profile Name field EXACTLY (same characters). Do not invent or alter spelling. If Profile has no Name, say you do not have a stored name.
+- After profile_update, confirm using the tool result displayName string exactly as returned (DB canonical).
 - Do NOT call memory_save or profile_update for one-off instructions that only apply to the current answer.
 - Do NOT put document/PDF content into memory; use knowledge bases for documents.
 - Profile and memories can also be edited in the UI (My Memory).
