@@ -13,6 +13,7 @@ import {
   parseQuotaBytesInput,
   withUserStorageLock,
 } from '../common/storage-quota';
+import { MemoryService } from '../memory/memory.service';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -29,6 +30,7 @@ export class AdminService {
     private readonly ragflow: RagflowService,
     private readonly agentPool: AgentSessionPool,
     private readonly transcription: TranscriptionService,
+    private readonly memory: MemoryService,
   ) {}
 
   // ── Datasets (knowledge bases) ──────────────────────────────────────────
@@ -527,6 +529,28 @@ export class AdminService {
   }
 
   // ── Users ───────────────────────────────────────────────────────────────
+
+  async getUserMemory(userId: string) {
+    return this.memory.getUserMemoryBundle(userId);
+  }
+
+  async deleteUserMemoryItem(userId: string, itemId: string) {
+    return this.memory.deleteItem(userId, itemId);
+  }
+
+  async updateUserProfile(
+    userId: string,
+    dto: {
+      displayName?: string | null;
+      language?: string | null;
+      responseStyle?: string | null;
+      bio?: string;
+    },
+  ) {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) throw notFound('user not found');
+    return this.memory.updateProfile(userId, dto);
+  }
 
   async listUsers(query: {
     page?: number;

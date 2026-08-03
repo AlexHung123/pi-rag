@@ -4201,11 +4201,63 @@ button.admin-status-toggle {
   }
 }
 
-/* My Memory panel */
+/* My Memory panel — must scroll inside app-workspace (overflow:hidden) */
+.memory-page.kb-page {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 .memory-panel-body {
-  max-width: 720px;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  max-width: 800px;
+  width: 100%;
   margin: 0 auto;
-  padding: 20px 24px 48px;
+  padding: 20px 24px 64px;
+  box-sizing: border-box;
+}
+
+/* Topbar is hidden inside .app-workspace — show in-page title instead */
+.memory-page-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+  flex-wrap: wrap;
+}
+
+.memory-page-heading h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.memory-list-item.chat-source {
+  border-left: 3px solid var(--color-primary, #2563eb);
+}
+
+.memory-list-time {
+  margin: 4px 0 0;
+  font-size: 0.75rem;
+  color: var(--text-tertiary);
+}
+
+.memory-loading {
+  padding: 12px 0;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
+.memory-badge.source {
+  background: rgba(5, 150, 105, 0.12);
+  color: #047857;
 }
 
 .memory-intro {

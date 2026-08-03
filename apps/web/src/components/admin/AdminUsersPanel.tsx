@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  Brain,
   KeyRound,
   Pencil,
   Plus,
@@ -16,6 +17,7 @@ import {
   formatBytes,
   formatDateTime,
 } from './adminShared';
+import AdminMemoryPanel from './AdminMemoryPanel';
 
 const GIB = 1024 * 1024 * 1024;
 
@@ -63,6 +65,8 @@ export default function AdminUsersPanel() {
   const [editRole, setEditRole] = useState<'user' | 'admin'>('user');
   const [editQuotaGb, setEditQuotaGb] = useState('5');
 
+  const [memoryUser, setMemoryUser] = useState<AdminUser | null>(null);
+
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -91,6 +95,16 @@ export default function AdminUsersPanel() {
     setPage(1);
     setApplied({ keyword, status });
   };
+
+  if (memoryUser) {
+    return (
+      <AdminMemoryPanel
+        userId={memoryUser.id}
+        username={memoryUser.username}
+        onBack={() => setMemoryUser(null)}
+      />
+    );
+  }
 
   const toggleAll = (checked: boolean) => {
     setSelected(checked ? new Set(items.map((i) => i.id)) : new Set());
@@ -378,6 +392,15 @@ export default function AdminUsersPanel() {
                     {formatDateTime(row.createdAt)}
                   </td>
                   <td className="admin-col-actions">
+                    <button
+                      type="button"
+                      className="admin-link-btn"
+                      disabled={busy}
+                      title="View profile & memories"
+                      onClick={() => setMemoryUser(row)}
+                    >
+                      <Brain size={14} /> Memory
+                    </button>
                     <button
                       type="button"
                       className="admin-link-btn"

@@ -41,11 +41,15 @@ export class MemoryController {
   @Get('memories')
   listMemories(
     @CurrentUser() user: AuthPrincipal,
-    @Query('status') status?: 'active' | 'archived',
+    @Query('status') status?: 'active' | 'archived' | 'all',
     @Query('category') category?: string,
   ) {
+    const st =
+      status === 'archived' || status === 'all' || status === 'active'
+        ? status
+        : 'active';
     return this.memory
-      .listItems(user.userId, { status, category })
+      .listItems(user.userId, { status: st, category })
       .then((items) => ({ items }));
   }
 

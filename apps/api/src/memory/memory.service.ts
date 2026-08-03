@@ -71,18 +71,52 @@ export class MemoryService {
 
   async listItems(
     userId: string,
-    opts?: { status?: 'active' | 'archived'; category?: string },
+    opts?: { status?: 'active' | 'archived' | 'all'; category?: string },
   ) {
-    const status = opts?.status ?? 'active';
-    const where: Prisma.MemoryItemWhereInput = { userId, status };
+    const where: Prisma.MemoryItemWhereInput = { userId };
+    if (opts?.status && opts.status !== 'all') {
+      where.status = opts.status;
+    } else if (!opts?.status) {
+      where.status = 'active';
+    }
     if (opts?.category) {
       where.category = opts.category as Prisma.EnumMemoryCategoryFilter;
     }
     const rows = await this.prisma.memoryItem.findMany({
       where,
-      orderBy: { updatedAt: 'desc' },
+      orderBy: [
+        { pinned: 'desc' },
+        { importance: 'desc' },
+        { updatedAt: 'desc' },
+      ],
     });
     return rows.map((r) => this.serializeItem(r));
+  }
+
+  /** Admin / cross-user: profile + items for one user (must exist). */
+  async getUserMemoryBundle(userId: string) {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { id: true, username: true, role: true, disabledAt: true },
+    });
+    if (!user) throw notFound('user not found');
+    const profile = await this.getOrCreateProfile(userId);
+    const items = await this.listItems(userId, { status: 'all' });
+    return {
+      user: {
+        id: user.id,
+        username: user.username,
+        role: user.role,
+        disabled: Boolean(user.disabledAt),
+      },
+      profile,
+      items,
+      counts: {
+        total: items.length,
+        active: items.filter((i) => i.status === 'active').length,
+        pinned: items.filter((i) => i.pinned && i.status === 'active').length,
+      },
+    };
   }
 
   async createItem(userId: string, dto: CreateMemoryItemDto) {

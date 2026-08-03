@@ -747,6 +747,36 @@ export const adminApi = {
       '/api/admin/users/batch-delete',
       { method: 'POST', body: JSON.stringify({ ids }) },
     ),
+  getUserMemory: (userId: string) =>
+    apiFetch<{
+      user: {
+        id: string;
+        username: string;
+        role: string;
+        disabled: boolean;
+      };
+      profile: UserProfile;
+      items: MemoryItem[];
+      counts: { total: number; active: number; pinned: number };
+    }>(`/api/admin/users/${userId}/memory`),
+  updateUserMemoryProfile: (
+    userId: string,
+    body: Partial<{
+      displayName: string | null;
+      language: string | null;
+      responseStyle: string | null;
+      bio: string;
+    }>,
+  ) =>
+    apiFetch<UserProfile>(`/api/admin/users/${userId}/memory/profile`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  deleteUserMemoryItem: (userId: string, itemId: string) =>
+    apiFetch<{ ok: boolean }>(
+      `/api/admin/users/${userId}/memory/items/${itemId}`,
+      { method: 'DELETE' },
+    ),
   listAgentSessions: (params?: {
     page?: number;
     pageSize?: number;

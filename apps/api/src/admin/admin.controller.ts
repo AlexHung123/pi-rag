@@ -1,6 +1,7 @@
 import {
   Body,
   Controller,
+  Delete,
   Get,
   Param,
   Patch,
@@ -267,6 +268,34 @@ export class AdminController {
     @Body() body: { ids?: string[] },
   ) {
     return this.admin.batchDeleteUsers(actor.userId, body.ids || []);
+  }
+
+  /** Profile + all memory items for a user (admin inspect / moderate). */
+  @Get('users/:id/memory')
+  getUserMemory(@Param('id') id: string) {
+    return this.admin.getUserMemory(id);
+  }
+
+  @Patch('users/:id/memory/profile')
+  updateUserMemoryProfile(
+    @Param('id') id: string,
+    @Body()
+    body: {
+      displayName?: string | null;
+      language?: string | null;
+      responseStyle?: string | null;
+      bio?: string;
+    },
+  ) {
+    return this.admin.updateUserProfile(id, body);
+  }
+
+  @Delete('users/:id/memory/items/:itemId')
+  deleteUserMemoryItem(
+    @Param('id') id: string,
+    @Param('itemId') itemId: string,
+  ) {
+    return this.admin.deleteUserMemoryItem(id, itemId);
   }
 
   // ── Agent sessions (live pool) ──────────────────────────────────────────

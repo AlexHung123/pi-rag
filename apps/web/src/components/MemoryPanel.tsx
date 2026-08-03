@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { Brain, Pin, Plus, Trash2 } from 'lucide-react';
+import { Brain, Pin, Plus, RefreshCw, Trash2 } from 'lucide-react';
 import {
   memoryApi,
   type MemoryItem,
@@ -21,8 +21,12 @@ export default function MemoryPanel({
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [items, setItems] = useState<MemoryItem[]>([]);
   const [error, setError] = useState('');
+  const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [statusFilter, setStatusFilter] = useState<'active' | 'archived' | 'all'>(
+    'active',
+  );
 
   const [displayName, setDisplayName] = useState('');
   const [language, setLanguage] = useState('');
@@ -36,20 +40,30 @@ export default function MemoryPanel({
   const [newImportance, setNewImportance] = useState(3);
 
   const refresh = useCallback(async () => {
-    const [p, list] = await Promise.all([
-      memoryApi.getProfile(),
-      memoryApi.list({ status: 'active' }),
-    ]);
-    setProfile(p);
-    setDisplayName(p.displayName || '');
-    setLanguage(p.language || '');
-    setResponseStyle(p.responseStyle || '');
-    setBio(p.bio || '');
-    setItems(Array.isArray(list.items) ? list.items : []);
-  }, []);
+    setLoading(true);
+    setError('');
+    try {
+      const [p, list] = await Promise.all([
+        memoryApi.getProfile(),
+        memoryApi.list({ status: statusFilter }),
+      ]);
+      setProfile(p);
+      setDisplayName(p.displayName || '');
+      setLanguage(p.language || '');
+      setResponseStyle(p.responseStyle || '');
+      setBio(p.bio || '');
+      const next = Array.isArray(list?.items) ? list.items : [];
+      setItems(next);
+    } catch (e) {
+      setError(String((e as Error)?.message || e));
+      setItems([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [statusFilter]);
 
   useEffect(() => {
-    refresh().catch((e) => setError(String(e?.message || e)));
+    void refresh();
   }, [refresh]);
 
   const saveProfile = async () => {
@@ -89,7 +103,8 @@ export default function MemoryPanel({
       setNewPinned(false);
       setNewImportance(3);
       setNewCategory('preference');
-      await refresh();
+      if (statusFilter === 'archived') setStatusFilter('active');
+      else await refresh();
     } catch (e) {
       setError(String((e as Error)?.message || e));
     } finally {
@@ -108,6 +123,7 @@ export default function MemoryPanel({
   };
 
   const removeItem = async (id: string) => {
+    if (!window.confirm('Delete this memory permanently?')) return;
     setError('');
     try {
       await memoryApi.remove(id);
@@ -119,30 +135,44 @@ export default function MemoryPanel({
 
   return (
     <div className="kb-page memory-page">
-      <header className="kb-topbar">
-        <div className="kb-topbar-left">
-          <div className="kb-brand-mark">
-            <Brain size={18} />
-            <span>My Memory</span>
+      <div className="memory-panel-body">
+        <div className="memory-page-heading">
+          <h1>
+            <Brain size={22} />
+            My Memory
+          </h1>
+          <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button
+              type="button"
+              className="btn btn-secondary"
+              disabled={loading}
+              onClick={() => void refresh()}
+              title="Refresh"
+            >
+              <RefreshCw size={16} style={{ marginRight: 6, verticalAlign: 'middle' }} />
+              Refresh
+            </button>
+            {onBackToChat && (
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={onBackToChat}
+              >
+                Back to chat
+              </button>
+            )}
           </div>
         </div>
-        {onBackToChat && (
-          <button type="button" className="btn btn-secondary" onClick={onBackToChat}>
-            Back to chat
-          </button>
-        )}
-      </header>
 
-      <div className="memory-panel-body">
         <p className="field-hint memory-intro">
-          已保存的記憶不會全部進入每一輪對話；置頂與較重要的優先，每輪最多約 15
-          條。文件內容請放知識庫；這裡只記「關於你」的偏好與事實。
+          這裡可查看與管理個人 Profile（L1）與記憶條目（L2，含在 chat 裡「記住」的內容）。
+          每輪對話最多注入約 15 條；置頂與較重要的優先。
         </p>
 
         {error ? <div className="error-banner">{error}</div> : null}
 
         <section className="memory-section">
-          <h2 className="memory-section-title">Profile</h2>
+          <h2 className="memory-section-title">Profile (L1)</h2>
           <div className="field">
             <label htmlFor="mem-display-name">Display name</label>
             <input
@@ -200,7 +230,7 @@ export default function MemoryPanel({
         </section>
 
         <section className="memory-section">
-          <h2 className="memory-section-title">Add memory</h2>
+          <h2 className="memory-section-title">Add memory (L2)</h2>
           <div className="field">
             <label htmlFor="mem-content">Content (one sentence works best)</label>
             <textarea
@@ -266,37 +296,82 @@ export default function MemoryPanel({
           </button>
         </section>
 
-        <section className="memory-section">
-          <h2 className="memory-section-title">
-            Active memories ({items.length})
-          </h2>
-          {items.length === 0 ? (
-            <p className="field-hint">No memories yet. Add one above.</p>
+        <section className="memory-section" id="memory-items-list">
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              gap: 12,
+              flexWrap: 'wrap',
+              marginBottom: 12,
+            }}
+          >
+            <h2 className="memory-section-title" style={{ margin: 0 }}>
+              Memories ({loading ? '…' : items.length})
+            </h2>
+            <label className="field" style={{ marginBottom: 0, minWidth: 140 }}>
+              <span className="field-hint" style={{ marginBottom: 4 }}>
+                Status
+              </span>
+              <select
+                value={statusFilter}
+                onChange={(e) =>
+                  setStatusFilter(
+                    e.target.value as 'active' | 'archived' | 'all',
+                  )
+                }
+              >
+                <option value="active">Active</option>
+                <option value="archived">Archived</option>
+                <option value="all">All</option>
+              </select>
+            </label>
+          </div>
+
+          {loading ? (
+            <p className="memory-loading">Loading memories…</p>
+          ) : items.length === 0 ? (
+            <p className="field-hint">
+              尚無記憶條目。可在上方新增，或在 chat 說「記住：…」。
+            </p>
           ) : (
             <ul className="memory-list">
               {items.map((item) => (
-                <li key={item.id} className="memory-list-item">
+                <li
+                  key={item.id}
+                  className={`memory-list-item${item.source === 'manual' ? '' : ' chat-source'}`}
+                >
                   <div className="memory-list-main">
                     <div className="memory-list-meta">
                       <span className="memory-badge">{item.category}</span>
                       {item.pinned ? (
                         <span className="memory-badge pinned">pinned</span>
                       ) : null}
+                      {item.status !== 'active' ? (
+                        <span className="memory-badge">{item.status}</span>
+                      ) : null}
+                      <span className="memory-badge source">{item.source}</span>
                       <span className="memory-importance">
                         ★{item.importance}
                       </span>
                     </div>
                     <p className="memory-list-content">{item.content}</p>
+                    <p className="memory-list-time">
+                      {new Date(item.updatedAt).toLocaleString()}
+                    </p>
                   </div>
                   <div className="memory-list-actions">
-                    <button
-                      type="button"
-                      className="btn btn-secondary btn-icon"
-                      title={item.pinned ? 'Unpin' : 'Pin'}
-                      onClick={() => void togglePin(item)}
-                    >
-                      <Pin size={16} />
-                    </button>
+                    {item.status === 'active' ? (
+                      <button
+                        type="button"
+                        className="btn btn-secondary btn-icon"
+                        title={item.pinned ? 'Unpin' : 'Pin'}
+                        onClick={() => void togglePin(item)}
+                      >
+                        <Pin size={16} />
+                      </button>
+                    ) : null}
                     <button
                       type="button"
                       className="btn btn-secondary btn-icon"
