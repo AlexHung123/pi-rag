@@ -9,6 +9,7 @@ import { useAuth } from './contexts/AuthContext';
 import Login from './components/Login';
 import Markdown from './components/Markdown';
 import KnowledgePanel from './components/KnowledgePanel';
+import MemoryPanel from './components/MemoryPanel';
 import AppSidebar, { type WorkspaceView } from './components/AppSidebar';
 import SourceReferences from './components/SourceReferences';
 import DocumentLocateDrawer from './components/DocumentLocateDrawer';
@@ -575,6 +576,10 @@ export default function App() {
       {workspace === 'knowledge' ? (
         <div className="app-workspace knowledge-workspace">
           <KnowledgePanel onBackToChat={() => changeWorkspace('chat')} />
+        </div>
+      ) : workspace === 'memory' ? (
+        <div className="app-workspace knowledge-workspace">
+          <MemoryPanel onBackToChat={() => changeWorkspace('chat')} />
         </div>
       ) : workspace === 'admin-datasets' && user.role === 'admin' ? (
         <div className="app-workspace admin-workspace">

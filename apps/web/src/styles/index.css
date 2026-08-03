@@ -4200,3 +4200,141 @@ button.admin-status-toggle {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
+
+/* My Memory panel */
+.memory-panel-body {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 20px 24px 48px;
+}
+
+.memory-intro {
+  margin-bottom: 20px;
+}
+
+.memory-section {
+  margin-bottom: 28px;
+  padding: 18px 16px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.memory-section-title {
+  margin: 0 0 14px;
+  font-size: 1.05rem;
+  font-weight: 650;
+}
+
+.memory-add-row {
+  display: grid;
+  grid-template-columns: 1fr 120px auto;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+
+.memory-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-bottom: 12px;
+  font-size: 0.9rem;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+
+.memory-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.memory-list-item {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-primary);
+}
+
+.memory-list-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.memory-list-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
+  align-items: center;
+}
+
+.memory-badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--color-primary-soft, rgba(37, 99, 235, 0.12));
+  color: var(--text-secondary);
+}
+
+.memory-badge.pinned {
+  background: rgba(234, 88, 12, 0.15);
+  color: #c2410c;
+}
+
+.memory-importance {
+  font-size: 0.78rem;
+  color: var(--text-tertiary);
+}
+
+.memory-list-content {
+  margin: 0;
+  font-size: 0.95rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.memory-list-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.btn-icon {
+  padding: 8px 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.error-banner {
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(220, 38, 38, 0.35);
+  background: rgba(220, 38, 38, 0.08);
+  color: #b91c1c;
+  font-size: 0.9rem;
+}
+
+@media (max-width: 640px) {
+  .memory-add-row {
+    grid-template-columns: 1fr;
+  }
+
+  .memory-check {
+    padding-bottom: 0;
+  }
+}

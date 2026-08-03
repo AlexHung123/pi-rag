@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   Activity,
   BookOpen,
+  Brain,
   Database,
   FileStack,
   FolderOpen,
@@ -21,6 +22,7 @@ import type { Conversation } from '../services/api';
 export type WorkspaceView =
   | 'chat'
   | 'knowledge'
+  | 'memory'
   | 'admin-datasets'
   | 'admin-documents'
   | 'admin-tasks'
@@ -80,6 +82,7 @@ export default function AppSidebar({
   }> = [
     { id: 'chat', label: 'Chat', icon: <MessageSquare size={20} /> },
     { id: 'knowledge', label: 'My Knowledge Base', icon: <BookOpen size={20} /> },
+    { id: 'memory', label: 'My Memory', icon: <Brain size={20} /> },
     ...(isAdmin
       ? ([
           {

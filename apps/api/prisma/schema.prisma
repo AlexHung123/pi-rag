@@ -49,6 +49,23 @@ enum KnowledgeBaseRole {
   editor
 }
 
+enum MemoryCategory {
+  preference
+  fact
+  project
+  other
+}
+
+enum MemorySource {
+  manual
+  extracted
+}
+
+enum MemoryStatus {
+  active
+  archived
+}
+
 model User {
   id                 String    @id @default(uuid()) @db.Uuid
   username           String    @unique
@@ -65,6 +82,8 @@ model User {
   knowledgeBaseMembers  KnowledgeBaseMember[]
   documents             Document[]
   conversations         Conversation[]
+  profile               UserProfile?
+  memoryItems           MemoryItem[]
 
   @@map("users")
 }
@@ -210,4 +229,38 @@ model Message {
 
   @@index([conversationId])
   @@map("messages")
+}
+
+model UserProfile {
+  userId        String   @id @map("user_id") @db.Uuid
+  displayName   String?  @map("display_name")
+  language      String?
+  responseStyle String?  @map("response_style")
+  bio           String   @default("")
+  prefs         Json     @default("{}")
+  createdAt     DateTime @default(now()) @map("created_at")
+  updatedAt     DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("user_profiles")
+}
+
+model MemoryItem {
+  id         String         @id @default(uuid()) @db.Uuid
+  userId     String         @map("user_id") @db.Uuid
+  content    String
+  category   MemoryCategory @default(other)
+  pinned     Boolean        @default(false)
+  importance Int            @default(3)
+  source     MemorySource   @default(manual)
+  status     MemoryStatus   @default(active)
+  createdAt  DateTime       @default(now()) @map("created_at")
+  updatedAt  DateTime       @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status, pinned, importance, updatedAt])
+  @@index([userId, updatedAt])
+  @@map("memory_items")
 }

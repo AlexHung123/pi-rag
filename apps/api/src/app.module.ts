@@ -9,6 +9,7 @@ import { RagflowModule } from './ragflow/ragflow.module';
 import { AgentModule } from './agent/agent.module';
 import { AdminModule } from './admin/admin.module';
 import { TranscriptionModule } from './transcription/transcription.module';
+import { MemoryModule } from './memory/memory.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -16,6 +17,7 @@ import { HealthController } from './health.controller';
     ConfigModule.forRoot({ isGlobal: true }),
     PrismaModule,
     AuthModule,
+    MemoryModule,
     RagflowModule,
     KnowledgeModule,
     TranscriptionModule,

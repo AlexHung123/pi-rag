@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { KnowledgeService } from '../knowledge/knowledge.service';
+import { MemoryService } from '../memory/memory.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { PrismaService } from '../prisma/prisma.service';
 import {
@@ -59,6 +60,7 @@ export class AgentService {
 
   constructor(
     private readonly knowledge: KnowledgeService,
+    private readonly memory: MemoryService,
     private readonly ragflow: RagflowService,
     private readonly prisma: PrismaService,
     private readonly pool: AgentSessionPool,
@@ -113,6 +115,8 @@ export class AgentService {
       session.agent.state.model = buildPiModel(modelId) as never;
     }
 
+    // Order: memory block → selected KB prefix → user message (spec).
+    const memoryPrefix = await this.memory.buildPromptPrefix(userId);
     const selectedKbIds = (options.knowledgeBaseIds || []).filter(Boolean);
     let promptText = userMessage;
     if (selectedKbIds.length) {
@@ -134,6 +138,9 @@ export class AgentService {
             : undefined,
         })}${userMessage}`;
       }
+    }
+    if (memoryPrefix) {
+      promptText = `${memoryPrefix}${promptText}`;
     }
 
     const queue: AgentStreamEvent[] = [];

@@ -371,6 +371,82 @@ export const authApi = {
   },
 };
 
+export type UserProfile = {
+  userId: string;
+  displayName: string | null;
+  language: string | null;
+  responseStyle: string | null;
+  bio: string;
+  prefs: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type MemoryItem = {
+  id: string;
+  userId: string;
+  content: string;
+  category: 'preference' | 'fact' | 'project' | 'other';
+  pinned: boolean;
+  importance: number;
+  source: string;
+  status: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export const memoryApi = {
+  getProfile: () => apiFetch<UserProfile>('/api/me/profile'),
+  updateProfile: (body: Partial<{
+    displayName: string | null;
+    language: string | null;
+    responseStyle: string | null;
+    bio: string;
+    prefs: Record<string, unknown>;
+  }>) =>
+    apiFetch<UserProfile>('/api/me/profile', {
+      method: 'PUT',
+      body: JSON.stringify(body),
+    }),
+  list: (params?: { status?: string; category?: string }) => {
+    const q = new URLSearchParams();
+    if (params?.status) q.set('status', params.status);
+    if (params?.category) q.set('category', params.category);
+    const qs = q.toString();
+    return apiFetch<{ items: MemoryItem[] }>(
+      `/api/me/memories${qs ? `?${qs}` : ''}`,
+    );
+  },
+  create: (body: {
+    content: string;
+    category?: string;
+    pinned?: boolean;
+    importance?: number;
+  }) =>
+    apiFetch<MemoryItem>('/api/me/memories', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+  update: (
+    id: string,
+    body: Partial<{
+      content: string;
+      category: string;
+      pinned: boolean;
+      importance: number;
+      status: string;
+    }>,
+  ) =>
+    apiFetch<MemoryItem>(`/api/me/memories/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+  remove: (id: string) =>
+    apiFetch<{ ok: boolean }>(`/api/me/memories/${id}`, {
+      method: 'DELETE',
+    }),
+};
+
 export const kbApi = {
   list: () => apiFetch<{ items: KnowledgeBase[] }>('/api/knowledge-bases'),
   create: (body: CreateKnowledgeBaseBody) =>
