@@ -4,6 +4,7 @@ import { RagflowService } from '../ragflow/ragflow.service';
 import { PrismaService } from '../prisma/prisma.service';
 import type { MemoryService } from '../memory/memory.service';
 import { resolveDisplayNameForUpdate } from '../memory/profile-from-message';
+import { maybePolishMemoryContent } from '../memory/memory-polish';
 import type { RetrieveHit } from '../ragflow/ragflow.types';
 import { getRagRetrievalConfig } from '../rag/rag-config';
 import {
@@ -688,22 +689,32 @@ export function createUserTools(deps: {
         importance = Math.min(5, Math.max(1, Math.floor(params.importance)));
       }
       try {
+        // Chat path only: optional LLM polish → one sentence; failure keeps original.
+        const polished = await maybePolishMemoryContent(content);
         const item = await memory.createItem(userId, {
-          content,
+          content: polished.content,
           category,
           pinned: Boolean(params.pinned),
           importance,
         });
+        const polishNote = polished.polished
+          ? ' (content lightly polished for storage)'
+          : '';
         return {
           content: [
             {
               type: 'text' as const,
               text:
-                `Saved memory (id=${item.id}, category=${item.category}, pinned=${item.pinned}): ${item.content}\n` +
-                `Confirm briefly to the user. It will apply in future turns/chats (budgeted injection).`,
+                `Saved memory${polishNote} (id=${item.id}, category=${item.category}, pinned=${item.pinned}): ${item.content}\n` +
+                `Confirm briefly to the user using this exact content. It will apply in future turns/chats (budgeted injection).`,
             },
           ],
-          details: { ok: true, item },
+          details: {
+            ok: true,
+            item,
+            polished: polished.polished,
+            originalContent: content,
+          },
         };
       } catch (err) {
         const message = toolErrorMessage(err);
@@ -865,7 +876,7 @@ Language:
 
 Personal memory tools (always available; durable across chats):
 - profile_update — L1 stable identity/defaults: displayName (叫我… / should be … / my name is …), language, responseStyle, bio. Pass only changed fields. Prefer this over memory_save for those fields. displayName MUST be copied character-for-character from the user message (never retype or "fix" spelling).
-- memory_save — L2 free-form long-term facts (記住/记得/remember/記著/幫我記住) that are NOT name/language/style/bio. ONE concise sentence. category preference|fact|project|other. Pin only if they ask.
+- memory_save — L2 free-form long-term facts (記住/记得/remember/記著/幫我記住) that are NOT name/language/style/bio. Pass the user's intent as content; server may lightly polish to one sentence (proper nouns kept exact). category preference|fact|project|other. Pin only if they ask.
 - memory_forget — forget an L2 item (忘掉/忘记/forget). Prefer memory id; else content substring. If multiple match, ask which one.
 - memory_list — what you remember / 你還記得什麼 (lists L2 items; profile is separate and already in context when set).
 - When the user asks their name / 我叫什麼 / what is my name: use the injected Profile Name field EXACTLY (same characters). Do not invent or alter spelling. If Profile has no Name, say you do not have a stored name.
