@@ -515,11 +515,114 @@ export function createUserTools(deps: {
     },
   };
 
+  const profileUpdate: AppAgentTool = {
+    name: 'profile_update',
+    label: 'Update profile',
+    description:
+      'Update the user L1 profile (stable identity & defaults): display name, language, response style, bio. Use when the user sets how to address them, default reply language, overall answer style, or short background (叫我…/以後用繁中/回答短一點/我是…). Pass only fields that should change. To clear a field, pass empty string. For free-form facts/preferences that are not these profile fields, use memory_save instead.',
+    parameters: Type.Object({
+      displayName: Type.Optional(
+        Type.String({
+          description:
+            'How to address the user (max 80). Empty string clears. e.g. 阿明',
+        }),
+      ),
+      language: Type.Optional(
+        Type.String({
+          description:
+            'Default reply language (max 32). Empty clears. e.g. zh-Hant, en, 繁體中文',
+        }),
+      ),
+      responseStyle: Type.Optional(
+        Type.String({
+          description:
+            'Default length/tone/structure (max 200). Empty clears. e.g. short, detailed, bullet-first',
+        }),
+      ),
+      bio: Type.Optional(
+        Type.String({
+          description:
+            'Short background (max 2000). Role, team, main context. Empty string sets empty bio.',
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params) => {
+      const dto: {
+        displayName?: string | null;
+        language?: string | null;
+        responseStyle?: string | null;
+        bio?: string;
+      } = {};
+      let any = false;
+      if (params.displayName !== undefined) {
+        any = true;
+        const v = String(params.displayName);
+        dto.displayName = v.trim() === '' ? null : v;
+      }
+      if (params.language !== undefined) {
+        any = true;
+        const v = String(params.language);
+        dto.language = v.trim() === '' ? null : v;
+      }
+      if (params.responseStyle !== undefined) {
+        any = true;
+        const v = String(params.responseStyle);
+        dto.responseStyle = v.trim() === '' ? null : v;
+      }
+      if (params.bio !== undefined) {
+        any = true;
+        dto.bio = String(params.bio);
+      }
+      if (!any) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'profile_update failed: provide at least one of displayName, language, responseStyle, bio',
+            },
+          ],
+          details: { ok: false },
+        };
+      }
+      try {
+        const profile = await memory.updateProfile(userId, dto);
+        const lines = [
+          `displayName: ${profile.displayName ?? '(empty)'}`,
+          `language: ${profile.language ?? '(empty)'}`,
+          `responseStyle: ${profile.responseStyle ?? '(empty)'}`,
+          `bio: ${profile.bio?.trim() ? profile.bio : '(empty)'}`,
+        ];
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                `Updated profile:\n${lines.join('\n')}\n` +
+                `Confirm briefly to the user. Profile is injected every turn going forward.`,
+            },
+          ],
+          details: { ok: true, profile },
+        };
+      } catch (err) {
+        const message = toolErrorMessage(err);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `profile_update failed: ${message}`,
+            },
+          ],
+          details: { ok: false, message },
+        };
+      }
+    },
+  };
+
   const memorySave: AppAgentTool = {
     name: 'memory_save',
     label: 'Save memory',
     description:
-      'Persist a durable fact or preference about the user for future conversations (cross-chat). Use when the user says 記住/记得/remember/記著/幫我記住 or explicitly wants something stored long-term. Write ONE concise self-contained sentence in content. Do NOT use for one-off instructions for the current reply only. Do NOT dump full documents (those belong in knowledge bases).',
+      'Persist a durable L2 fact or preference as a free-form sentence for future conversations. Use when the user says 記住/记得/remember/記著/幫我記住 for something that is NOT a profile field. For name/language/overall style/bio use profile_update instead. Write ONE concise self-contained sentence in content. Do NOT use for one-off instructions for the current reply only. Do NOT dump full documents (those belong in knowledge bases).',
     parameters: Type.Object({
       content: Type.String({
         description:
@@ -729,6 +832,7 @@ export function createUserTools(deps: {
     retrieve,
     keywordSearch,
     summarizeDocument,
+    profileUpdate,
     memorySave,
     memoryForget,
     memoryList,
@@ -742,14 +846,16 @@ Language:
 - Default language is Traditional Chinese (繁體中文). Reply in Traditional Chinese unless the user writes in English.
 - If the user writes primarily in English, reply in English.
 - Match the user's language for mixed or other languages when clear; otherwise prefer Traditional Chinese.
+- If the user profile (injected each turn) sets a language, honor it unless they override in the current message.
 
 Personal memory tools (always available; durable across chats):
-- memory_save — when the user wants you to remember something long-term (記住/记得/remember/記著/幫我記住/以後都…). Store ONE concise self-contained sentence. Prefer category preference|fact|project|other. Pin only if they ask to always prioritize it.
-- memory_forget — when the user wants you to forget something (忘掉/忘记/forget/別再記得). Prefer memory id; otherwise a distinctive content substring. If multiple match, ask which one.
-- memory_list — when the user asks what you remember / 你還記得什麼 / list my memories.
-- Do NOT call memory_save for one-off instructions that only apply to the current answer.
+- profile_update — L1 stable identity/defaults: displayName (叫我…), language (一律繁中/用英文), responseStyle (回答短一點/詳細), bio (我是…/背景). Pass only changed fields. Prefer this over memory_save for those fields.
+- memory_save — L2 free-form long-term facts (記住/记得/remember/記著/幫我記住) that are NOT name/language/style/bio. ONE concise sentence. category preference|fact|project|other. Pin only if they ask.
+- memory_forget — forget an L2 item (忘掉/忘记/forget). Prefer memory id; else content substring. If multiple match, ask which one.
+- memory_list — what you remember / 你還記得什麼 (lists L2 items; profile is separate and already in context when set).
+- Do NOT call memory_save or profile_update for one-off instructions that only apply to the current answer.
 - Do NOT put document/PDF content into memory; use knowledge bases for documents.
-- Durable profile fields can also be edited in the UI (My Memory). Prefer memory_save for facts/preferences stated in chat.
+- Profile and memories can also be edited in the UI (My Memory).
 
 Retrieval tools (when knowledge bases are selected):
 - summarize_document — WHOLE-document summary / 总结整份文件 / 全文摘要 / "summarize this document". Reads all chunks in order and returns full text for you to summarize. Prefer ONE call. Pass knowledgeBaseIds; identify doc via appDocumentId, documentNameHint (filename), or omit both if the selected KB has exactly one document. Put length requests (e.g. 5000字) and topical focus into the focus parameter.
