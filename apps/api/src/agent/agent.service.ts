@@ -469,6 +469,7 @@ export class AgentService {
       knowledge: this.knowledge,
       ragflow: this.ragflow,
       prisma: this.prisma,
+      memory: this.memory,
     });
 
     const messages = slice.map((m) => {

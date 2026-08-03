@@ -60,6 +60,22 @@ export function estimateTokens(text: string): number {
   return Math.ceil((text || '').length / 4);
 }
 
+/**
+ * Match active memory items by id or case-insensitive content substring.
+ * Used by memory_forget tool.
+ */
+export function matchMemoryItemsByQuery<
+  T extends { id: string; content: string },
+>(items: T[], query: string): T[] {
+  const q = (query || '').trim();
+  if (!q) return [];
+  // Exact id match first
+  const byId = items.filter((it) => it.id === q);
+  if (byId.length) return byId;
+  const lower = q.toLowerCase();
+  return items.filter((it) => it.content.toLowerCase().includes(lower));
+}
+
 export function selectMemoryItems(
   items: MemoryItemForPrompt[],
   maxItems: number,

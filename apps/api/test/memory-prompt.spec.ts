@@ -3,6 +3,7 @@ import {
   buildMemoryPromptBlock,
   estimateTokens,
   getMemoryPromptSettings,
+  matchMemoryItemsByQuery,
   selectMemoryItems,
   type MemoryItemForPrompt,
   type ProfileForPrompt,
@@ -131,6 +132,20 @@ describe('buildMemoryPromptBlock', () => {
     expect(block).toContain('zh-Hant');
     expect(block).toContain('Use markdown tables');
     expect(block).toContain('[preference][pinned]');
+  });
+
+  it('matchMemoryItemsByQuery matches id then content substring', () => {
+    const items = [
+      { id: 'uuid-1', content: 'Prefer short answers' },
+      { id: 'uuid-2', content: 'Project pi-rag memory MVP' },
+    ];
+    expect(matchMemoryItemsByQuery(items, 'uuid-2').map((x) => x.id)).toEqual([
+      'uuid-2',
+    ]);
+    expect(
+      matchMemoryItemsByQuery(items, 'short answers').map((x) => x.id),
+    ).toEqual(['uuid-1']);
+    expect(matchMemoryItemsByQuery(items, 'nope')).toEqual([]);
   });
 
   it('drops lowest-priority items to stay under token budget', () => {

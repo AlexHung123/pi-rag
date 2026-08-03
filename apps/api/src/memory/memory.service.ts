@@ -5,6 +5,7 @@ import { badRequest, notFound } from '../common/errors';
 import {
   buildMemoryPromptBlock,
   getMemoryPromptSettings,
+  matchMemoryItemsByQuery,
   type MemoryItemForPrompt,
   type ProfileForPrompt,
 } from './memory-prompt';
@@ -150,6 +151,54 @@ export class MemoryService {
     if (!existing) throw notFound('memory item not found');
     await this.prisma.memoryItem.delete({ where: { id } });
     return { ok: true as const };
+  }
+
+  /**
+   * Agent/tool helper: forget by exact id or content substring.
+   * - 0 matches → not found message
+   * - 1 match → hard-delete
+   * - many matches → return candidates (no delete)
+   */
+  async forgetByQuery(
+    userId: string,
+    query: string,
+  ): Promise<
+    | { ok: true; deleted: ReturnType<MemoryService['serializeItem']> }
+    | {
+        ok: false;
+        reason: 'not_found' | 'ambiguous' | 'empty_query';
+        message: string;
+        candidates?: ReturnType<MemoryService['serializeItem']>[];
+      }
+  > {
+    const q = (query || '').trim();
+    if (!q) {
+      return {
+        ok: false,
+        reason: 'empty_query',
+        message: 'Forget query is empty.',
+      };
+    }
+    const active = await this.listItems(userId, { status: 'active' });
+    const matches = matchMemoryItemsByQuery(active, q);
+    if (matches.length === 0) {
+      return {
+        ok: false,
+        reason: 'not_found',
+        message: `No active memory matched: ${q}`,
+      };
+    }
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        reason: 'ambiguous',
+        message: `Multiple memories matched (${matches.length}). Use a more specific phrase or pass the memory id.`,
+        candidates: matches.slice(0, 10),
+      };
+    }
+    const target = matches[0]!;
+    await this.deleteItem(userId, target.id);
+    return { ok: true, deleted: target };
   }
 
   /**

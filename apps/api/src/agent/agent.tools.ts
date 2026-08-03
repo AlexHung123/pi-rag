@@ -2,6 +2,7 @@ import { Type } from 'typebox';
 import { KnowledgeService } from '../knowledge/knowledge.service';
 import { RagflowService } from '../ragflow/ragflow.service';
 import { PrismaService } from '../prisma/prisma.service';
+import type { MemoryService } from '../memory/memory.service';
 import type { RetrieveHit } from '../ragflow/ragflow.types';
 import { getRagRetrievalConfig } from '../rag/rag-config';
 import {
@@ -67,6 +68,24 @@ function clampPageSize(value: unknown, fallback: number, max: number): number {
   return Math.min(max, Math.max(1, Math.floor(value)));
 }
 
+/** Nest HttpException often puts the useful text in getResponse().message */
+function toolErrorMessage(err: unknown): string {
+  if (err && typeof err === 'object' && 'getResponse' in err) {
+    try {
+      const r = (err as { getResponse: () => unknown }).getResponse();
+      if (typeof r === 'string' && r.trim()) return r;
+      if (r && typeof r === 'object' && 'message' in r) {
+        const m = (r as { message: unknown }).message;
+        if (typeof m === 'string' && m.trim()) return m;
+        if (Array.isArray(m) && m.length) return m.map(String).join('; ');
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 function scopeIdsFromParams(params: Record<string, unknown>): string[] {
   const multiIds = asStringArray(params.knowledgeBaseIds);
   const singleId = params.knowledgeBaseId
@@ -111,8 +130,9 @@ export function createUserTools(deps: {
   knowledge: KnowledgeService;
   ragflow: RagflowService;
   prisma: PrismaService;
+  memory: MemoryService;
 }): AppAgentTool[] {
-  const { userId, knowledge, ragflow, prisma } = deps;
+  const { userId, knowledge, ragflow, prisma, memory } = deps;
   const ragCfg = getRagRetrievalConfig();
 
   const retrieve: AppAgentTool = {
@@ -495,7 +515,224 @@ export function createUserTools(deps: {
     },
   };
 
-  return [retrieve, keywordSearch, summarizeDocument];
+  const memorySave: AppAgentTool = {
+    name: 'memory_save',
+    label: 'Save memory',
+    description:
+      'Persist a durable fact or preference about the user for future conversations (cross-chat). Use when the user says 記住/记得/remember/記著/幫我記住 or explicitly wants something stored long-term. Write ONE concise self-contained sentence in content. Do NOT use for one-off instructions for the current reply only. Do NOT dump full documents (those belong in knowledge bases).',
+    parameters: Type.Object({
+      content: Type.String({
+        description:
+          'One concise durable fact/preference (max ~500 chars), e.g. "Prefer markdown tables for comparisons"',
+      }),
+      category: Type.Optional(
+        Type.String({
+          description:
+            'preference | fact | project | other (default preference when it is a style/habit; fact for identity; project for decisions)',
+        }),
+      ),
+      pinned: Type.Optional(
+        Type.Boolean({
+          description:
+            'true if the user wants this always prioritized (記住並置頂 / pin)',
+        }),
+      ),
+      importance: Type.Optional(
+        Type.Number({
+          description:
+            '1–5 importance (default 3; use 4–5 for strong preferences)',
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params) => {
+      const content = String(params.content || '').trim();
+      if (!content) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: 'memory_save failed: content is required',
+            },
+          ],
+          details: { ok: false },
+        };
+      }
+      const rawCat = String(params.category || 'preference').toLowerCase();
+      const allowed = ['preference', 'fact', 'project', 'other'] as const;
+      const category = (allowed as readonly string[]).includes(rawCat)
+        ? (rawCat as (typeof allowed)[number])
+        : 'preference';
+      let importance = 3;
+      if (
+        typeof params.importance === 'number' &&
+        Number.isFinite(params.importance)
+      ) {
+        importance = Math.min(5, Math.max(1, Math.floor(params.importance)));
+      }
+      try {
+        const item = await memory.createItem(userId, {
+          content,
+          category,
+          pinned: Boolean(params.pinned),
+          importance,
+        });
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text:
+                `Saved memory (id=${item.id}, category=${item.category}, pinned=${item.pinned}): ${item.content}\n` +
+                `Confirm briefly to the user. It will apply in future turns/chats (budgeted injection).`,
+            },
+          ],
+          details: { ok: true, item },
+        };
+      } catch (err) {
+        const message = toolErrorMessage(err);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `memory_save failed: ${message}`,
+            },
+          ],
+          details: { ok: false, message },
+        };
+      }
+    },
+  };
+
+  const memoryForget: AppAgentTool = {
+    name: 'memory_forget',
+    label: 'Forget memory',
+    description:
+      'Delete a previously saved personal memory when the user says 忘掉/忘记/forget/別再記得/刪除記憶. Pass query as the memory id (preferred) or a distinctive content substring. If multiple match, list them and ask the user to clarify — do not guess.',
+    parameters: Type.Object({
+      query: Type.String({
+        description:
+          'Memory id (UUID) or distinctive content substring to match an active memory',
+      }),
+    }),
+    execute: async (_toolCallId, params) => {
+      const query = String(params.query || '').trim();
+      try {
+        const result = await memory.forgetByQuery(userId, query);
+        if (result.ok) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `Forgot memory id=${result.deleted.id}: ${result.deleted.content}`,
+              },
+            ],
+            details: { ok: true, deleted: result.deleted },
+          };
+        }
+        if (result.reason === 'ambiguous' && result.candidates?.length) {
+          const lines = result.candidates
+            .map(
+              (c, i) =>
+                `${i + 1}. id=${c.id} [${c.category}] ${c.content.slice(0, 120)}`,
+            )
+            .join('\n');
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: `${result.message}\nCandidates:\n${lines}\nAsk the user which one, then call memory_forget with the id.`,
+              },
+            ],
+            details: { ...result },
+          };
+        }
+        return {
+          content: [{ type: 'text' as const, text: result.message }],
+          details: { ...result },
+        };
+      } catch (err) {
+        const message = toolErrorMessage(err);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `memory_forget failed: ${message}`,
+            },
+          ],
+          details: { ok: false, message },
+        };
+      }
+    },
+  };
+
+  const memoryList: AppAgentTool = {
+    name: 'memory_list',
+    label: 'List memories',
+    description:
+      "List the user's active personal memories (id, category, pinned, content). Use when the user asks what you remember, or before forgetting when the target is unclear. Does not return other users' data.",
+    parameters: Type.Object({
+      limit: Type.Optional(
+        Type.Number({
+          description: 'Max items to return (default 20, max 50)',
+        }),
+      ),
+    }),
+    execute: async (_toolCallId, params) => {
+      try {
+        let limit = 20;
+        if (typeof params.limit === 'number' && Number.isFinite(params.limit)) {
+          limit = Math.min(50, Math.max(1, Math.floor(params.limit)));
+        }
+        const items = await memory.listItems(userId, { status: 'active' });
+        const slice = items.slice(0, limit);
+        if (!slice.length) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'No active personal memories stored. User can add some via chat (記住…) or My Memory settings.',
+              },
+            ],
+            details: { ok: true, items: [] },
+          };
+        }
+        const lines = slice
+          .map(
+            (c, i) =>
+              `${i + 1}. id=${c.id} [${c.category}]${c.pinned ? '[pinned]' : ''} ★${c.importance} ${c.content}`,
+          )
+          .join('\n');
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `Active memories (${slice.length}${items.length > slice.length ? ` of ${items.length}` : ''}):\n${lines}`,
+            },
+          ],
+          details: { ok: true, items: slice, total: items.length },
+        };
+      } catch (err) {
+        const message = toolErrorMessage(err);
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: `memory_list failed: ${message}`,
+            },
+          ],
+          details: { ok: false, message },
+        };
+      }
+    },
+  };
+
+  return [
+    retrieve,
+    keywordSearch,
+    summarizeDocument,
+    memorySave,
+    memoryForget,
+    memoryList,
+  ];
 }
 
 export const DOMAIN_SYSTEM_PROMPT = `You are the CSB Knowledge Base Portal assistant.
@@ -506,6 +743,14 @@ Language:
 - If the user writes primarily in English, reply in English.
 - Match the user's language for mixed or other languages when clear; otherwise prefer Traditional Chinese.
 
+Personal memory tools (always available; durable across chats):
+- memory_save — when the user wants you to remember something long-term (記住/记得/remember/記著/幫我記住/以後都…). Store ONE concise self-contained sentence. Prefer category preference|fact|project|other. Pin only if they ask to always prioritize it.
+- memory_forget — when the user wants you to forget something (忘掉/忘记/forget/別再記得). Prefer memory id; otherwise a distinctive content substring. If multiple match, ask which one.
+- memory_list — when the user asks what you remember / 你還記得什麼 / list my memories.
+- Do NOT call memory_save for one-off instructions that only apply to the current answer.
+- Do NOT put document/PDF content into memory; use knowledge bases for documents.
+- Durable profile fields can also be edited in the UI (My Memory). Prefer memory_save for facts/preferences stated in chat.
+
 Retrieval tools (when knowledge bases are selected):
 - summarize_document — WHOLE-document summary / 总结整份文件 / 全文摘要 / "summarize this document". Reads all chunks in order and returns full text for you to summarize. Prefer ONE call. Pass knowledgeBaseIds; identify doc via appDocumentId, documentNameHint (filename), or omit both if the selected KB has exactly one document. Put length requests (e.g. 5000字) and topical focus into the focus parameter.
 - retrieve_chunks — concepts, mechanisms, partial topics, comparisons, open-ended factual questions (semantic/hybrid). NOT for whole-document summaries.
@@ -514,7 +759,7 @@ Retrieval tools (when knowledge bases are selected):
 
 Rules:
 - Knowledge bases are selected by the user in the UI only. Never invent or guess knowledge base ids or document ids.
-- Do NOT call retrieval tools for greetings, small talk, or meta questions about you (e.g. hello, hi, 你好, who are you, 你是誰, what can you do, 你可以做什麼, thanks). Answer those directly from this system role without tools or sources.
+- Do NOT call retrieval tools for greetings, small talk, or meta questions about you (e.g. hello, hi, 你好, who are you, 你是誰, what can you do, 你可以做什麼, thanks). Answer those directly from this system role without tools or sources. For "what do you remember about me", use memory_list instead of retrieval.
 - Whole-document summary intent (总结/摘要/概述整份/summarize this document/全文) → call summarize_document once. Do NOT chain many retrieve_chunks or keyword_search queries for that intent.
 - When the user specifies a length or depth for a summary (e.g. 5000字, 約3000字, about 2000 characters, detailed/詳細), you MUST honor it: pass that requirement in summarize_document.focus and expand the final answer to approach the requested length. Do not stop at a short outline when they asked for a long summary.
 - For non-summary Q&A, be concise and practical unless the user asks for detail or a specific length.
