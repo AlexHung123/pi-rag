@@ -11,10 +11,15 @@ export type RagflowDocument = {
   size?: number;
   run?: string | number;
   progress?: number;
-  progress_msg?: string;
+  /** String or line array depending on RAGFlow version. */
+  progress_msg?: string | string[];
   chunk_count?: number;
   chunk_method?: string;
   status?: string;
+  /** When parse started (RFC string from RAGFlow, or null). */
+  process_begin_at?: string | null;
+  /** Parse duration in seconds. */
+  process_duration?: number;
 };
 
 /**

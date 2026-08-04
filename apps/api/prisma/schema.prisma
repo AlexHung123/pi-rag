@@ -156,6 +156,10 @@ model Document {
   progressMsg         String?            @map("progress_msg")
   chunkCount          Int                @default(0) @map("chunk_count")
   errorMessage        String?            @map("error_message")
+  /// RAGFlow process_duration (seconds) last synced from document list/get.
+  processDuration     Float?             @map("process_duration")
+  /// RAGFlow process_begin_at last synced from document list/get.
+  processBeginAt      DateTime?          @map("process_begin_at")
   sourceType          DocumentSourceType @default(file) @map("source_type")
   /// Relative path under MEDIA_ROOT for original audio (audio only).
   mediaPath           String?            @map("media_path")

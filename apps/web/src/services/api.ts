@@ -135,6 +135,10 @@ export type AdminDocument = {
   progressMsg?: string | null;
   chunkCount: number;
   errorMessage?: string | null;
+  /** Parse duration in seconds (from RAGFlow process_duration / elapsed). */
+  processDuration?: number | null;
+  /** When parse started (ISO), if known. */
+  processBeginAt?: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -282,6 +286,9 @@ export type DocumentItem = {
   progressMsg?: string | null;
   chunkCount: number;
   errorMessage?: string | null;
+  /** Parse duration in seconds (RAGFlow process_duration / elapsed while running). */
+  processDuration?: number | null;
+  processBeginAt?: string | null;
   sourceType?: DocumentSourceType;
   /** MIME of original media (audio pipeline), e.g. video/mp4 */
   mediaContentType?: string | null;

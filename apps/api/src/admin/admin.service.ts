@@ -14,6 +14,11 @@ import {
   withUserStorageLock,
 } from '../common/storage-quota';
 import { MemoryService } from '../memory/memory.service';
+import {
+  effectiveProcessDuration,
+  extractProcessTiming,
+  normalizeProgressMsg,
+} from '../ragflow/process-timing';
 
 const BCRYPT_ROUNDS = 10;
 
@@ -131,11 +136,18 @@ export class AdminService {
     progressMsg: string | null;
     chunkCount: number;
     errorMessage: string | null;
+    processDuration?: number | null;
+    processBeginAt?: Date | null;
     createdAt: Date;
     updatedAt: Date;
     knowledgeBase?: { name: string };
     owner?: { username: string };
   }) {
+    const processDuration = effectiveProcessDuration({
+      status: doc.status,
+      processDuration: doc.processDuration ?? null,
+      processBeginAt: doc.processBeginAt ?? null,
+    });
     return {
       id: doc.id,
       knowledgeBaseId: doc.knowledgeBaseId,
@@ -149,6 +161,10 @@ export class AdminService {
       progressMsg: doc.progressMsg,
       chunkCount: doc.chunkCount,
       errorMessage: doc.errorMessage,
+      processDuration,
+      processBeginAt: doc.processBeginAt
+        ? doc.processBeginAt.toISOString()
+        : null,
       createdAt: doc.createdAt.toISOString(),
       updatedAt: doc.updatedAt.toISOString(),
     };
@@ -274,6 +290,8 @@ export class AdminService {
         progress: 0.05,
         progressMsg: 'Parse started',
         errorMessage: null,
+        processDuration: null,
+        processBeginAt: new Date(),
       },
     });
     return { ok: true, count: withRf.length };
@@ -300,6 +318,8 @@ export class AdminService {
           progress: 0,
           progressMsg: 'Parse stopped',
           errorMessage: null,
+          processDuration: null,
+          processBeginAt: null,
         },
       });
     }
@@ -369,14 +389,41 @@ export class AdminService {
             )
           ).total;
 
+    const timing = extractProcessTiming(rf, {
+      mapRunToStatus: (run) => this.ragflow.mapRunToStatus(run),
+    });
+    const progressMsg =
+      normalizeProgressMsg(rf.progress_msg) || doc.progressMsg;
+    // Prefer RAGFlow timestamps; keep local begin time until RF reports one.
+    const processBeginAt =
+      status === 'unstart'
+        ? null
+        : (timing.processBeginAt ?? doc.processBeginAt ?? null);
+    let processDuration: number | null =
+      status === 'unstart' ? null : timing.processDuration;
+    if (
+      processDuration == null &&
+      status === 'running' &&
+      processBeginAt
+    ) {
+      processDuration = Math.max(
+        0,
+        (Date.now() - processBeginAt.getTime()) / 1000,
+      );
+    } else if (processDuration == null && status !== 'unstart') {
+      processDuration = doc.processDuration;
+    }
+
     return this.prisma.document.update({
       where: { id: doc.id },
       data: {
         status,
         progress,
-        progressMsg: rf.progress_msg || doc.progressMsg,
+        progressMsg,
         chunkCount: chunkCount || doc.chunkCount,
         name: rf.name || doc.name,
+        processDuration,
+        processBeginAt,
       },
     });
   }
@@ -413,7 +460,7 @@ export class AdminService {
       };
     }
 
-    // Refresh some running tasks
+    // Refresh some running tasks + page rows missing parse duration (backfill)
     const running = await this.prisma.document.findMany({
       where: { status: 'running' },
       take: 15,
@@ -436,6 +483,33 @@ export class AdminService {
         },
       }),
     ]);
+
+    // Backfill timing for visible done/fail rows that never synced process_duration
+    const needTiming = rows.filter(
+      (d) =>
+        d.ragflowDocumentId &&
+        d.processDuration == null &&
+        (d.status === 'done' || d.status === 'fail' || d.status === 'running'),
+    );
+    if (needTiming.length) {
+      await Promise.all(
+        needTiming
+          .slice(0, 20)
+          .map((d) => this.refreshDocStatus(d.id).catch(() => null)),
+      );
+      const refreshed = await this.prisma.document.findMany({
+        where: { id: { in: needTiming.map((d) => d.id) } },
+        include: {
+          knowledgeBase: { select: { name: true } },
+          owner: { select: { username: true } },
+        },
+      });
+      const byId = new Map(refreshed.map((d) => [d.id, d]));
+      for (let i = 0; i < rows.length; i++) {
+        const next = byId.get(rows[i].id);
+        if (next) rows[i] = next;
+      }
+    }
 
     return {
       items: rows.map((d) => this.serializeDoc(d)),

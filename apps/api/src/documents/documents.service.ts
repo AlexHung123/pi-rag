@@ -19,6 +19,11 @@ import { MediaStorage } from '../transcription/media-storage';
 import { SttClient } from '../transcription/stt.client';
 import { TranscriptionService } from '../transcription/transcription.service';
 import { transcriptRagflowFilename } from '../transcription/transcript-format';
+import {
+  effectiveProcessDuration,
+  extractProcessTiming,
+  normalizeProgressMsg,
+} from '../ragflow/process-timing';
 
 type DocWithJob = Document & {
   transcriptionJobs?: TranscriptionJob[];
@@ -80,6 +85,14 @@ export class DocumentsService {
       progressMsg: doc.progressMsg,
       chunkCount: doc.chunkCount,
       errorMessage: doc.errorMessage,
+      processDuration: effectiveProcessDuration({
+        status: doc.status,
+        processDuration: doc.processDuration ?? null,
+        processBeginAt: doc.processBeginAt ?? null,
+      }),
+      processBeginAt: doc.processBeginAt
+        ? doc.processBeginAt.toISOString()
+        : null,
       sourceType: doc.sourceType as DocumentSourceType,
       mediaContentType: doc.mediaContentType ?? null,
       mediaExtension: mediaExt,
@@ -453,6 +466,9 @@ export class DocumentsService {
         progress: doParse ? 0.05 : 0,
         status: doParse ? 'running' : 'unstart',
         errorMessage: null,
+        ...(doParse
+          ? { processDuration: null, processBeginAt: new Date() }
+          : {}),
       },
     });
 
@@ -495,6 +511,8 @@ export class DocumentsService {
         progress: 0.05,
         progressMsg: 'Parse started',
         errorMessage: null,
+        processDuration: null,
+        processBeginAt: new Date(),
       },
     });
     return this.serialize(updated, await this.transcription.latestJob(updated.id));
@@ -533,6 +551,8 @@ export class DocumentsService {
         progress: 0.05,
         progressMsg: 'Parse started',
         errorMessage: null,
+        processDuration: null,
+        processBeginAt: new Date(),
       },
     });
     const updated = await this.prisma.document.findMany({
@@ -568,6 +588,8 @@ export class DocumentsService {
         progress: 0,
         progressMsg: 'Parse stopped',
         errorMessage: null,
+        processDuration: null,
+        processBeginAt: null,
       },
     });
     return this.serialize(updated, await this.transcription.latestJob(updated.id));
@@ -617,6 +639,8 @@ export class DocumentsService {
         progress: 0,
         progressMsg: 'Parse stopped',
         errorMessage: null,
+        processDuration: null,
+        processBeginAt: null,
       },
     });
     const updated = await this.prisma.document.findMany({
@@ -677,14 +701,40 @@ export class DocumentsService {
             })
           ).total;
 
+    const timing = extractProcessTiming(rf, {
+      mapRunToStatus: (run) => this.ragflow.mapRunToStatus(run),
+    });
+    const progressMsg =
+      normalizeProgressMsg(rf.progress_msg) || doc.progressMsg;
+    const processBeginAt =
+      status === 'unstart'
+        ? null
+        : (timing.processBeginAt ?? doc.processBeginAt ?? null);
+    let processDuration: number | null =
+      status === 'unstart' ? null : timing.processDuration;
+    if (
+      processDuration == null &&
+      status === 'running' &&
+      processBeginAt
+    ) {
+      processDuration = Math.max(
+        0,
+        (Date.now() - processBeginAt.getTime()) / 1000,
+      );
+    } else if (processDuration == null && status !== 'unstart') {
+      processDuration = doc.processDuration;
+    }
+
     const updated = await this.prisma.document.update({
       where: { id: doc.id },
       data: {
         status,
         progress,
-        progressMsg: rf.progress_msg || doc.progressMsg,
+        progressMsg,
         chunkCount: chunkCount || doc.chunkCount,
         name: doc.sourceType === 'audio' ? doc.name : rf.name || doc.name,
+        processDuration,
+        processBeginAt,
       },
     });
     return this.serialize(updated, await this.transcription.latestJob(updated.id));

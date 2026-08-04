@@ -31,18 +31,31 @@ import {
   summarizeWithChatCompletions,
   type CompactableMessage,
 } from './agent-compaction';
-
-/** Tools that may attach details.sources for the citation UI. */
-const RETRIEVAL_TOOL_NAMES = new Set([
-  'retrieve_chunks',
-  'keyword_search',
-  'summarize_document',
-]);
+import {
+  buildToolEndSummary,
+  userFacingLimitMessage,
+} from './tool-summary';
+import {
+  extractSourcesFromAgentMessages,
+  extractSourcesFromToolResult,
+  RETRIEVAL_TOOL_NAMES,
+} from './extract-sources';
 
 export type AgentStreamEvent =
   | { type: 'text_delta'; delta: string }
   | { type: 'tool_start'; name: string }
-  | { type: 'tool_end'; name: string; ok: boolean }
+  | {
+      type: 'tool_end';
+      name: string;
+      ok: boolean;
+      summary?: string;
+      hitCount?: number;
+    }
+  | {
+      type: 'agent_status';
+      kind: 'limit' | 'aborted' | 'info';
+      message: string;
+    }
   | { type: 'sources'; sources: CitationSource[] }
   | { type: 'done'; fullText: string; sources: CitationSource[]; aborted?: boolean }
   | { type: 'error'; message: string };
@@ -194,6 +207,11 @@ export class AgentService {
         this.logger.warn(
           `tool blocked conv=${conversationId} tool=${name}: ${decision.reason}`,
         );
+        push({
+          type: 'agent_status',
+          kind: 'limit',
+          message: userFacingLimitMessage(decision.reason),
+        });
         if (guard.shouldHardStop) {
           try {
             session.agent.abort();
@@ -221,6 +239,13 @@ export class AgentService {
           this.logger.warn(
             `max turns exceeded conv=${conversationId}; aborting agent`,
           );
+          push({
+            type: 'agent_status',
+            kind: 'limit',
+            message: userFacingLimitMessage(
+              'Agent run was stopped (turn or tool limit).',
+            ),
+          });
           try {
             session.agent.abort();
           } catch {
@@ -330,6 +355,16 @@ export class AgentService {
         fullText = '(stopped)';
       }
 
+      if (aborted) {
+        yield {
+          type: 'agent_status',
+          kind: 'aborted',
+          message: fullText === '(stopped)'
+            ? 'Stopped by user.'
+            : 'Run stopped; partial answer kept.',
+        };
+      }
+
       // Fallback: recover citation sources from tool results in agent history
       if (!sources.length) {
         const recovered = extractSourcesFromAgentMessages(session.agent.state.messages);
@@ -431,12 +466,20 @@ export class AgentService {
         break;
       case 'tool_execution_end': {
         const toolName = String(event.toolName || 'tool');
+        const isError = Boolean(event.isError);
+        const { summary, hitCount } = buildToolEndSummary(
+          toolName,
+          event.result,
+          isError,
+        );
         push({
           type: 'tool_end',
           name: toolName,
-          ok: !event.isError,
+          ok: !isError,
+          summary,
+          ...(hitCount !== undefined ? { hitCount } : {}),
         });
-        if (!event.isError && RETRIEVAL_TOOL_NAMES.has(toolName)) {
+        if (!isError && RETRIEVAL_TOOL_NAMES.has(toolName)) {
           const extracted = extractSourcesFromToolResult(event.result);
           if (extracted.length) onSources(extracted);
         }
@@ -527,121 +570,6 @@ export class AgentService {
     agent.__turnContext = turnContext;
     return agent;
   }
-}
-
-function mapHitsToSources(hits: unknown[]): CitationSource[] {
-  return hits.map((h, i) => {
-    const hit = (h && typeof h === 'object' ? h : {}) as Record<string, unknown>;
-    const score = typeof hit.score === 'number' ? hit.score : undefined;
-    return {
-      id: String(hit.id || `hit-${i + 1}`),
-      content: String(hit.content || ''),
-      documentName:
-        typeof hit.documentName === 'string' ? hit.documentName : undefined,
-      documentId:
-        typeof hit.documentId === 'string' ? hit.documentId : undefined,
-      appDocumentId:
-        typeof hit.appDocumentId === 'string' ? hit.appDocumentId : undefined,
-      knowledgeBaseId:
-        typeof hit.knowledgeBaseId === 'string'
-          ? hit.knowledgeBaseId
-          : undefined,
-      knowledgeBaseName:
-        typeof hit.knowledgeBaseName === 'string'
-          ? hit.knowledgeBaseName
-          : undefined,
-      score,
-      index: typeof hit.index === 'number' ? hit.index : i + 1,
-      evidenceLabel:
-        typeof hit.evidenceLabel === 'string'
-          ? hit.evidenceLabel
-          : typeof score === 'number' && score >= 0.75
-            ? 'Strong evidence'
-            : typeof score === 'number' && score >= 0.5
-              ? 'Moderate evidence'
-              : 'Evidence',
-      positions: Array.isArray(hit.positions)
-        ? (hit.positions as number[][])
-        : undefined,
-    } satisfies CitationSource;
-  });
-}
-
-function extractSourcesFromToolResult(result: unknown): CitationSource[] {
-  if (!result || typeof result !== 'object') return [];
-  const r = result as {
-    details?: unknown;
-    content?: unknown;
-  };
-
-  // Prefer structured details from retrieve_chunks
-  if (r.details && typeof r.details === 'object') {
-    const d = r.details as { sources?: unknown; hits?: unknown };
-    if (Array.isArray(d.sources) && d.sources.length) {
-      return d.sources as CitationSource[];
-    }
-    if (Array.isArray(d.hits) && d.hits.length) {
-      return mapHitsToSources(d.hits);
-    }
-  }
-
-  // Fallback: parse JSON text content from the tool result
-  if (Array.isArray(r.content)) {
-    for (const block of r.content) {
-      if (!block || typeof block !== 'object') continue;
-      const text = String((block as { text?: string }).text || '');
-      if (!text.trim()) continue;
-      try {
-        const parsed = JSON.parse(text) as unknown;
-        if (Array.isArray(parsed) && parsed.length) {
-          return mapHitsToSources(parsed);
-        }
-        if (parsed && typeof parsed === 'object') {
-          const obj = parsed as { hits?: unknown; sources?: unknown };
-          if (Array.isArray(obj.sources) && obj.sources.length) {
-            return obj.sources as CitationSource[];
-          }
-          if (Array.isArray(obj.hits) && obj.hits.length) {
-            return mapHitsToSources(obj.hits);
-          }
-        }
-      } catch {
-        /* not JSON */
-      }
-    }
-  }
-
-  return [];
-}
-
-/**
- * Scan agent message history for retrieval tool results (this turn).
- * Merges sources from retrieve_chunks / keyword_search / summarize_document.
- */
-function extractSourcesFromAgentMessages(
-  messages: Array<{ role: string; content?: unknown; details?: unknown; toolName?: string }>,
-): CitationSource[] {
-  // Walk from the end; stop when we leave the latest assistant turn's tools.
-  const batches: CitationSource[][] = [];
-  for (let i = messages.length - 1; i >= 0; i--) {
-    const m = messages[i];
-    if (!m) continue;
-    const role = String(m.role || '');
-    if (role === 'assistant' && batches.length) break;
-    if (role === 'user' && batches.length) break;
-    if (role === 'toolResult' || role === 'tool') {
-      const toolName = String(m.toolName || '');
-      if (toolName && !RETRIEVAL_TOOL_NAMES.has(toolName)) continue;
-      // If toolName missing, still try to parse details.sources
-      const fromDetails = extractSourcesFromToolResult({
-        details: m.details,
-        content: m.content,
-      });
-      if (fromDetails.length) batches.push(fromDetails);
-    }
-  }
-  if (!batches.length) return [];
-  return mergeCitationSources(...batches);
 }
 
 function messageToText(message: unknown): string {

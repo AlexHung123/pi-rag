@@ -20,6 +20,7 @@ import {
   AdminPagination,
   ProgressBar,
   StatusBadge,
+  displayProcessDuration,
   formatBytes,
   formatDateTime,
 } from './adminShared';
@@ -60,6 +61,8 @@ export default function AdminTasksPanel() {
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  /** Tick for live Duration while parse is running. */
+  const [nowTick, setNowTick] = useState(() => Date.now());
 
   // STT jobs (P1 observability)
   const [sttJobs, setSttJobs] = useState<AdminTranscriptionJob[]>([]);
@@ -119,6 +122,12 @@ export default function AdminTasksPanel() {
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [items, sttJobs, load]);
+
+  useEffect(() => {
+    if (!items.some((t) => t.status === 'running')) return;
+    const id = setInterval(() => setNowTick(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [items]);
 
   const onSearch = () => {
     setPage(1);
@@ -368,7 +377,21 @@ export default function AdminTasksPanel() {
                       <StatusBadge status={row.status} />
                     </td>
                     <td className="admin-cell-muted">—</td>
-                    <td className="admin-cell-muted">—</td>
+                    <td
+                      className="admin-cell-mono"
+                      title={
+                        row.processBeginAt
+                          ? `Started ${formatDateTime(row.processBeginAt)}`
+                          : undefined
+                      }
+                    >
+                      {displayProcessDuration({
+                        status: row.status,
+                        processDuration: row.processDuration,
+                        processBeginAt: row.processBeginAt,
+                        now: nowTick,
+                      })}
+                    </td>
                     <td>{row.chunkCount}</td>
                     <td>{row.ownerUsername || '—'}</td>
                     <td className="admin-cell-mono">

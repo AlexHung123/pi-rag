@@ -57,6 +57,8 @@ export class RagflowMockStore {
         progress: 0,
         progress_msg: '',
         chunk_count: 0,
+        process_begin_at: null,
+        process_duration: 0,
         buffer: f.buffer,
         chunks: [],
       };
@@ -80,6 +82,8 @@ export class RagflowMockStore {
       doc.progress = 0.1;
       doc.progress_msg = 'Mock parsing...';
       doc.parseStartedAt = Date.now();
+      doc.process_begin_at = new Date(doc.parseStartedAt).toUTCString();
+      doc.process_duration = 0;
       // Simulate async completion after first status poll window
       doc.parseTimer = setTimeout(() => {
         doc.parseTimer = undefined;
@@ -98,6 +102,12 @@ export class RagflowMockStore {
         doc.run = 'DONE';
         doc.progress_msg = 'Mock parse complete';
         doc.status = '1';
+        if (doc.parseStartedAt) {
+          doc.process_duration = Math.max(
+            0.1,
+            (Date.now() - doc.parseStartedAt) / 1000,
+          );
+        }
       }, 800);
     }
   }
@@ -117,6 +127,8 @@ export class RagflowMockStore {
       doc.progress = 0;
       doc.progress_msg = 'Parse stopped';
       doc.parseStartedAt = undefined;
+      doc.process_begin_at = null;
+      doc.process_duration = 0;
       // Keep any chunks already produced; in-flight mock never had partial chunks.
     }
   }
@@ -128,6 +140,8 @@ export class RagflowMockStore {
     if (String(doc.run).toUpperCase().includes('RUN') && doc.parseStartedAt) {
       const elapsed = Date.now() - doc.parseStartedAt;
       doc.progress = Math.min(0.95, 0.1 + elapsed / 1000);
+      doc.process_duration = elapsed / 1000;
+      doc.process_begin_at = new Date(doc.parseStartedAt).toUTCString();
     }
     return doc;
   }

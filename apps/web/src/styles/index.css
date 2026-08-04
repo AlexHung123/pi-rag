@@ -1778,9 +1778,67 @@ button {
   justify-content: center;
 }
 
+.agent-process-step-body {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
 .agent-process-step-label {
   min-width: 0;
   word-break: break-word;
+}
+
+.agent-process-step-detail {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--text-tertiary);
+  word-break: break-word;
+}
+
+.agent-process-step.kind-status .agent-process-step-label {
+  font-weight: 500;
+}
+
+.agent-process.has-warning {
+  border-color: color-mix(in srgb, var(--color-error) 28%, var(--border-color));
+}
+
+.agent-process-info {
+  display: inline-flex;
+  width: 15px;
+  height: 15px;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
+  color: var(--color-primary);
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 700;
+}
+
+.agent-process-info::before {
+  content: 'i';
+}
+
+.sources-evidence-counts {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.sources-ev-pill {
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .agent-process-check {

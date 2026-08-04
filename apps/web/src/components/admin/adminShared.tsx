@@ -19,6 +19,51 @@ export function formatDateTime(iso: string) {
   }
 }
 
+/** Format parse duration seconds (RAGFlow process_duration). */
+export function formatProcessDuration(
+  seconds: number | null | undefined,
+): string {
+  if (seconds == null || !Number.isFinite(seconds) || seconds <= 0) return '—';
+  if (seconds < 60) {
+    const rounded = Math.round(seconds * 10) / 10;
+    return `${rounded % 1 === 0 ? rounded.toFixed(0) : rounded.toFixed(1)}s`;
+  }
+  const total = Math.floor(seconds);
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h > 0) return `${h}h ${m}m ${s}s`;
+  return `${m}m ${s}s`;
+}
+
+/**
+ * Prefer API processDuration; while running, tick from processBeginAt when present.
+ */
+export function displayProcessDuration(row: {
+  status: string;
+  processDuration?: number | null;
+  processBeginAt?: string | null;
+  now?: number;
+}): string {
+  const now = row.now ?? Date.now();
+  let seconds =
+    typeof row.processDuration === 'number' &&
+    Number.isFinite(row.processDuration) &&
+    row.processDuration > 0
+      ? row.processDuration
+      : null;
+
+  if (row.status === 'running' && row.processBeginAt) {
+    const begin = new Date(row.processBeginAt).getTime();
+    if (!Number.isNaN(begin)) {
+      const elapsed = Math.max(0, (now - begin) / 1000);
+      seconds = Math.max(seconds ?? 0, elapsed);
+    }
+  }
+
+  return formatProcessDuration(seconds);
+}
+
 export const CHUNK_METHODS = [
   { value: 'naive', label: 'General' },
   { value: 'manual', label: 'Manual' },

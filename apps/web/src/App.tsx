@@ -14,6 +14,7 @@ import AppSidebar, { type WorkspaceView } from './components/AppSidebar';
 import SourceReferences from './components/SourceReferences';
 import DocumentLocateDrawer from './components/DocumentLocateDrawer';
 import AgentProcessPanel, {
+  applyAgentStatus,
   applyProcessDone,
   applyTextStarted,
   applyToolEnd,
@@ -400,7 +401,24 @@ export default function App() {
           } else if (frame.event === 'tool_end') {
             const name = String(frame.data.name || 'tool');
             const ok = frame.data.ok !== false;
-            setAgentProcess((p) => applyToolEnd(p, name, ok));
+            const summary =
+              typeof frame.data.summary === 'string'
+                ? frame.data.summary
+                : undefined;
+            setAgentProcess((p) => applyToolEnd(p, name, ok, summary));
+          } else if (frame.event === 'agent_status') {
+            const kindRaw = String(frame.data.kind || 'info');
+            const kind =
+              kindRaw === 'limit' || kindRaw === 'aborted' || kindRaw === 'info'
+                ? kindRaw
+                : 'info';
+            const message = String(frame.data.message || '');
+            if (message) {
+              setAgentProcess((p) => applyAgentStatus(p, kind, message));
+            }
+            if (kind === 'aborted') {
+              userStopped = true;
+            }
           } else if (frame.event === 'sources') {
             // Buffer only; show after the full assistant reply is complete
             const raw = frame.data.sources;
@@ -495,13 +513,16 @@ export default function App() {
             ...last,
             id: finalMessageId || last.id,
             content: assistantText || stoppedEmpty || last.content,
-            sources: assistantSources.length ? assistantSources : last.sources,
+            // Never inherit sources from a previous message; only this turn's list.
+            sources: assistantSources,
           };
         }
         return copy;
       });
       setAgentProcess((p) => {
-        const done = applyProcessDone(p);
+        const done = applyProcessDone(p, {
+          sourceCount: assistantSources.length,
+        });
         if (!done) return done;
         return {
           ...done,

@@ -525,6 +525,8 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
             progress: 0.05,
             progressMsg: 'Parse started',
             errorMessage: null,
+            processDuration: null,
+            processBeginAt: new Date(),
           },
         });
       } else {

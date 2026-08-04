@@ -1,10 +1,10 @@
 import { useEffect, useState } from 'react';
 
-export type AgentStepStatus = 'running' | 'done' | 'error';
+export type AgentStepStatus = 'running' | 'done' | 'error' | 'info';
 
 export type AgentProcessStep = {
   id: string;
-  kind: 'thinking' | 'tool' | 'writing';
+  kind: 'thinking' | 'tool' | 'writing' | 'status';
   label: string;
   detail?: string;
   status: AgentStepStatus;
@@ -17,6 +17,8 @@ export type AgentProcessState = {
   steps: AgentProcessStep[];
   status: 'running' | 'done';
   startedAt: number;
+  /** Citation count when known (for done summary). */
+  sourceCount?: number;
 };
 
 function formatDuration(ms: number): string {
@@ -33,17 +35,29 @@ function stepTitle(step: AgentProcessStep, now: number): string {
   if (step.kind === 'writing') {
     return step.status === 'running' ? 'Writing answer…' : 'Wrote answer';
   }
+  if (step.kind === 'status') {
+    return step.label;
+  }
   // tool
   if (step.status === 'running') return step.label;
   if (step.status === 'error') return `${step.label} (failed)`;
   return step.label;
 }
 
-function friendlyToolName(name: string): string {
-  const map: Record<string, string> = {
-    retrieve_chunks: 'Retrieve chunks',
-  };
-  return map[name] || name.replace(/_/g, ' ');
+const TOOL_LABELS: Record<string, string> = {
+  retrieve_chunks: 'Retrieve chunks',
+  keyword_search: 'Keyword search',
+  summarize_document: 'Summarize document',
+  profile_update: 'Update profile',
+  memory_save: 'Save memory',
+  memory_forget: 'Forget memory',
+  memory_list: 'List memories',
+};
+
+export function friendlyToolName(name: string): string {
+  const key = (name || '').trim();
+  if (TOOL_LABELS[key]) return TOOL_LABELS[key];
+  return key.replace(/_/g, ' ') || 'tool';
 }
 
 export function createInitialProcess(messageId: string): AgentProcessState {
@@ -102,10 +116,14 @@ export function applyToolEnd(
   prev: AgentProcessState | null,
   toolName: string,
   ok: boolean,
+  summary?: string,
 ): AgentProcessState | null {
   if (!prev || prev.status === 'done') return prev;
   const now = Date.now();
   const friendly = friendlyToolName(toolName);
+  const detailText =
+    typeof summary === 'string' && summary.trim() ? summary.trim() : undefined;
+  // Match running tools by raw name stored in detail, or by friendly label.
   let matched = false;
   const steps = [...prev.steps].reverse().map((s) => {
     if (
@@ -119,25 +137,80 @@ export function applyToolEnd(
         ...s,
         status: (ok ? 'done' : 'error') as AgentStepStatus,
         endedAt: now,
+        // Replace raw tool id with user-facing summary when present
+        detail: detailText,
       };
     }
     return s;
   });
   steps.reverse();
   if (!matched) {
-    // Fallback: close last running tool
+    // Fallback: close last running tool, or append a completed step
+    let closed = false;
     for (let i = steps.length - 1; i >= 0; i--) {
       if (steps[i].kind === 'tool' && steps[i].status === 'running') {
         steps[i] = {
           ...steps[i],
           status: ok ? 'done' : 'error',
           endedAt: now,
+          detail: detailText,
         };
+        closed = true;
         break;
       }
     }
+    if (!closed) {
+      steps.push({
+        id: `tool-${toolName}-end-${now}`,
+        kind: 'tool',
+        label: friendly,
+        detail: detailText,
+        status: ok ? 'done' : 'error',
+        startedAt: now,
+        endedAt: now,
+      });
+    }
   }
   return { ...prev, steps };
+}
+
+export function applyAgentStatus(
+  prev: AgentProcessState | null,
+  kind: 'limit' | 'aborted' | 'info',
+  message: string,
+): AgentProcessState | null {
+  if (!prev) return prev;
+  const now = Date.now();
+  const text = (message || '').trim() || 'Agent status';
+  // Dedupe identical consecutive status
+  const last = prev.steps[prev.steps.length - 1];
+  if (
+    last?.kind === 'status' &&
+    last.label === text &&
+    last.detail === kind
+  ) {
+    return prev;
+  }
+  const steps = prev.steps.map((s) =>
+    s.status === 'running' && s.kind !== 'writing'
+      ? { ...s, status: 'done' as const, endedAt: now }
+      : s,
+  );
+  return {
+    ...prev,
+    steps: [
+      ...steps,
+      {
+        id: `status-${kind}-${now}`,
+        kind: 'status',
+        label: text,
+        detail: kind,
+        status: kind === 'info' ? 'info' : 'error',
+        startedAt: now,
+        endedAt: now,
+      },
+    ],
+  };
 }
 
 export function applyTextStarted(
@@ -168,12 +241,16 @@ export function applyTextStarted(
 
 export function applyProcessDone(
   prev: AgentProcessState | null,
+  opts?: { sourceCount?: number },
 ): AgentProcessState | null {
   if (!prev) return prev;
   const now = Date.now();
   return {
     ...prev,
     status: 'done',
+    ...(typeof opts?.sourceCount === 'number'
+      ? { sourceCount: opts.sourceCount }
+      : {}),
     steps: prev.steps.map((s) =>
       s.status === 'running'
         ? { ...s, status: 'done' as const, endedAt: now }
@@ -203,17 +280,32 @@ export default function AgentProcessPanel({ process }: Props) {
   }, [running]);
 
   const stepCount = process.steps.length;
-  const summary = running
-    ? stepCount <= 1
-      ? 'Agent working…'
-      : `Running · ${stepCount} steps`
-    : `已完成 ${stepCount} 個步驟`;
+  const toolCount = process.steps.filter((s) => s.kind === 'tool').length;
+  const sourceCount = process.sourceCount ?? 0;
+  const hasError = process.steps.some((s) => s.status === 'error');
+
+  let summary: string;
+  if (running) {
+    summary =
+      stepCount <= 1
+        ? 'Agent working…'
+        : toolCount > 0
+          ? `Running · ${toolCount} tool${toolCount === 1 ? '' : 's'}`
+          : `Running · ${stepCount} steps`;
+  } else {
+    const parts = [`已完成 ${stepCount} 個步驟`];
+    if (sourceCount > 0) {
+      parts.push(`${sourceCount} 個來源`);
+    }
+    if (hasError) parts.push('含警告');
+    summary = parts.join(' · ');
+  }
 
   return (
     <div
       className={`agent-process ${running ? 'is-running' : 'is-done'} ${
         expanded ? 'is-expanded' : 'is-collapsed'
-      }`}
+      } ${hasError && !running ? 'has-warning' : ''}`}
     >
       <button
         type="button"
@@ -223,7 +315,12 @@ export default function AgentProcessPanel({ process }: Props) {
       >
         <span className="agent-process-summary">
           {running && <span className="agent-process-spinner" aria-hidden />}
-          {!running && <span className="agent-process-check" aria-hidden />}
+          {!running && !hasError && (
+            <span className="agent-process-check" aria-hidden />
+          )}
+          {!running && hasError && (
+            <span className="agent-process-x" aria-hidden />
+          )}
           <span>{summary}</span>
         </span>
         <span className="agent-process-chevron" aria-hidden>
@@ -236,19 +333,30 @@ export default function AgentProcessPanel({ process }: Props) {
           {process.steps.map((step) => (
             <li
               key={step.id}
-              className={`agent-process-step status-${step.status}`}
+              className={`agent-process-step status-${step.status} kind-${step.kind}`}
             >
               <span className="agent-process-step-icon" aria-hidden>
                 {step.status === 'running' ? (
                   <span className="agent-process-spinner sm" />
                 ) : step.status === 'error' ? (
                   <span className="agent-process-x" />
+                ) : step.status === 'info' ? (
+                  <span className="agent-process-info" />
                 ) : (
                   <span className="agent-process-check sm" />
                 )}
               </span>
-              <span className="agent-process-step-label">
-                {stepTitle(step, now)}
+              <span className="agent-process-step-body">
+                <span className="agent-process-step-label">
+                  {stepTitle(step, now)}
+                </span>
+                {step.kind === 'tool' &&
+                  step.detail &&
+                  step.status !== 'running' && (
+                    <span className="agent-process-step-detail">
+                      {step.detail}
+                    </span>
+                  )}
               </span>
             </li>
           ))}

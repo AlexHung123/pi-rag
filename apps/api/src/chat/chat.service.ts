@@ -181,7 +181,22 @@ export class ChatService {
         } else if (ev.type === 'tool_start') {
           yield { event: 'tool_start', data: { name: ev.name } };
         } else if (ev.type === 'tool_end') {
-          yield { event: 'tool_end', data: { name: ev.name, ok: ev.ok } };
+          yield {
+            event: 'tool_end',
+            data: {
+              name: ev.name,
+              ok: ev.ok,
+              ...(ev.summary ? { summary: ev.summary } : {}),
+              ...(typeof ev.hitCount === 'number'
+                ? { hitCount: ev.hitCount }
+                : {}),
+            },
+          };
+        } else if (ev.type === 'agent_status') {
+          yield {
+            event: 'agent_status',
+            data: { kind: ev.kind, message: ev.message },
+          };
         } else if (ev.type === 'sources') {
           sources = ev.sources;
           yield { event: 'sources', data: { sources: ev.sources } };

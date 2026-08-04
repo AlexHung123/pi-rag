@@ -148,7 +148,7 @@ export function createUserTools(deps: {
     name: 'retrieve_chunks',
     label: 'Retrieve chunks',
     description:
-      'Semantic/hybrid retrieval from user-selected knowledge bases. Use for concepts, mechanisms, summaries, comparisons, and open-ended factual questions. Pass knowledgeBaseIds from the selected-KB prompt (required). Prefer a clear self-contained question (or queries[] for multi-aspect). Returns ranked evidence with [n] citation indices. For error codes, clause numbers, proper nouns, or exact phrases prefer keyword_search.',
+      'Semantic/hybrid retrieval from user-selected knowledge bases. Use for concepts, mechanisms, summaries, comparisons, and open-ended factual questions. Pass knowledgeBaseIds from the selected-KB prompt (required). Prefer a clear self-contained question (or queries[] for multi-aspect). Returns ranked evidence with [n] citation indices. For error codes, clause numbers, person names, job/position titles, company names, department names, proper nouns, or exact phrases prefer keyword_search.',
     parameters: Type.Object({
       question: Type.String({
         description:
@@ -270,11 +270,11 @@ export function createUserTools(deps: {
     name: 'keyword_search',
     label: 'Keyword search',
     description:
-      'Keyword / exact-term retrieval via RAGFlow (ElasticSearch keyword matching + low vector weight). Use for error codes (e.g. ERR-xxxx), clause numbers, proper nouns, document titles, and exact phrases. Pass knowledgeBaseIds from the UI selection. For conceptual "how does X work" questions use retrieve_chunks instead. May be combined with retrieve_chunks in the same turn.',
+      'Keyword / exact-term retrieval via RAGFlow (ElasticSearch keyword matching + low vector weight). Use for error codes (e.g. ERR-xxxx), clause numbers, person names (人名), job/position titles (職位/職稱), company names (公司名), department names (部門名), proper nouns, document titles, and exact phrases. Pass knowledgeBaseIds from the UI selection. For conceptual "how does X work" questions use retrieve_chunks instead. May be combined with retrieve_chunks in the same turn.',
     parameters: Type.Object({
       query: Type.String({
         description:
-          'Short phrase, error code, clause number, proper noun, or exact title to match',
+          'Short phrase, error code, clause number, person name, job/position title, company name, department name, proper noun, or exact title to match',
       }),
       knowledgeBaseIds: Type.Array(Type.String(), {
         description:
@@ -868,11 +868,12 @@ export function createUserTools(deps: {
 export const DOMAIN_SYSTEM_PROMPT = `You are the CSB Knowledge Base Portal assistant.
 You answer the current user's questions. Knowledge bases are created, managed, and selected only in the UI; you do not create or list them.
 
-Language:
-- Default language is Traditional Chinese (繁體中文). Reply in Traditional Chinese unless the user writes in English.
-- If the user writes primarily in English, reply in English.
-- Match the user's language for mixed or other languages when clear; otherwise prefer Traditional Chinese.
-- If the user profile (injected each turn) sets a language, honor it unless they override in the current message.
+Language (priority, highest first):
+- Explicit override in the current user message (e.g. "用英文回答" / "reply in English") — honor for this turn.
+- Profile Language (injected each turn under Profile → Language when set in My Memory or via profile_update) — use as the default reply language for all turns. Do not switch just because the user wrote in another language.
+- If Profile has no Language: match the language of the user's message when clear (Chinese → Chinese, English → English, etc.).
+- If still unclear: Traditional Chinese (繁體中文).
+- Profile language can be set/changed via profile_update or the My Memory UI; after it is set, prefer it until the user changes it or overrides in a message.
 
 Personal memory tools (always available; durable across chats):
 - profile_update — L1 stable identity/defaults: displayName (叫我… / should be … / my name is …), language, responseStyle, bio. Pass only changed fields. Prefer this over memory_save for those fields. displayName MUST be copied character-for-character from the user message (never retype or "fix" spelling).
@@ -888,7 +889,7 @@ Personal memory tools (always available; durable across chats):
 Retrieval tools (when knowledge bases are selected):
 - summarize_document — WHOLE-document summary / 总结整份文件 / 全文摘要 / "summarize this document". Reads all chunks in order and returns full text for you to summarize. Prefer ONE call. Pass knowledgeBaseIds; identify doc via appDocumentId, documentNameHint (filename), or omit both if the selected KB has exactly one document. Put length requests (e.g. 5000字) and topical focus into the focus parameter.
 - retrieve_chunks — concepts, mechanisms, partial topics, comparisons, open-ended factual questions (semantic/hybrid). NOT for whole-document summaries.
-- keyword_search — error codes, clause numbers, proper nouns, exact phrases, titles. Do NOT spam keyword_search to "cover" a full document for summary.
+- keyword_search — error codes, clause numbers, person names (人名), job/position titles (職位/職稱), company names (公司名), department names (部門名), proper nouns, exact phrases, titles. Prefer this whenever the user asks about a specific person, role/title, company, or department in documents. Do NOT spam keyword_search to "cover" a full document for summary.
 - You may call retrieve_chunks and keyword_search in the same turn for non-summary Q&A when helpful (concept + exact term).
 
 Rules:
@@ -926,7 +927,7 @@ export function buildSelectedKbPromptPrefix(
     `(pass documentNameHint if they named a file; appDocumentId if known; pass focus with any length request like 5000字 and topical focus). ` +
     `Honor user-requested summary length — expand thoroughly, do not give a short outline when they asked for many characters. Do not chain keyword_search for summaries. ` +
     `If the user needs other facts from the selected knowledge bases, retrieve with knowledgeBaseIds=${ids} before answering ` +
-    `(use retrieve_chunks for concepts; keyword_search for codes/exact phrases; both if helpful). ` +
+    `(use retrieve_chunks for concepts; keyword_search for codes/exact phrases/person names/job titles/company names/department names; both if helpful). ` +
     `Base your analysis only on the retrieved evidence. Cite with [1], [2], … and mention document names.\n\n` +
     rewriteHint +
     `[User question]\n`
