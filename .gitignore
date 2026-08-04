@@ -12,3 +12,7 @@ uploads/
 tmp/
 .turbo/
 *.tsbuildinfo
+
+# PPT generation job workspaces
+data/ppt-jobs/
+
