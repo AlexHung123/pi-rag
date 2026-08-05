@@ -8,7 +8,7 @@ import {
   type KnowledgeBase,
   type KnowledgeBaseMember,
   type KnowledgeBaseMemberRole,
-  type StorageUsage,
+  type StorageUsage
 } from '../services/api'
 import DocumentPreviewPage from './DocumentPreviewPage'
 
@@ -80,14 +80,27 @@ type PdfParserValue = (typeof PDF_PARSER_OPTIONS)[number]['value']
 
 const DEFAULT_PDF_PARSER: PdfParserValue = 'mineru-from-env@MinerU'
 
+/**
+ * RAGFlow POST /api/v1/datasets `chunk_method`.
+ * value = API key, label = UI display.
+ */
+const CHUNK_METHOD_OPTIONS = [
+  { value: 'naive', label: 'General' },
+  { value: 'one', label: 'One' },
+  { value: 'table', label: 'Table' }
+] as const
+
+type ChunkMethodValue = (typeof CHUNK_METHOD_OPTIONS)[number]['value']
+
+const DEFAULT_CHUNK_METHOD: ChunkMethodValue = 'naive'
+
 /** RAGFlow parser_config.chunk_token_num range for naive chunking */
 const CHUNK_TOKEN_MIN = 1
 const CHUNK_TOKEN_MAX = 2048
 const DEFAULT_CHUNK_TOKEN_NUM = 512
 
 /** Audio extensions accepted by the Knowledge upload UI (aligned with API allowlist). */
-const AUDIO_ACCEPT =
-  '.mp3,.wav,.m4a,.mp4,.flac,.ogg,.aac,.webm,.wma,.mkv,audio/*,video/mp4,video/webm'
+const AUDIO_ACCEPT = '.mp3,.wav,.m4a,.mp4,.flac,.ogg,.aac,.webm,.wma,.mkv,audio/*,video/mp4,video/webm'
 
 /** Video / A/V containers shown with a Video tag (aligned with API VIDEO_TRANSCODE_EXTENSIONS). */
 const VIDEO_EXTENSIONS = new Set(['mp4', 'mkv', 'webm', 'mov'])
@@ -100,11 +113,7 @@ function isAudioDoc(doc: DocumentItem): boolean {
 function isVideoDoc(doc: DocumentItem): boolean {
   if (!isAudioDoc(doc)) return false
   // Display name usually strips the extension (demo.mp4 → "demo"); prefer media fields.
-  const ext = (
-    doc.mediaExtension ||
-    doc.name.split('.').pop() ||
-    ''
-  ).toLowerCase()
+  const ext = (doc.mediaExtension || doc.name.split('.').pop() || '').toLowerCase()
   if (VIDEO_EXTENSIONS.has(ext)) return true
   const mime = (doc.mediaContentType || '').toLowerCase()
   return mime.startsWith('video/')
@@ -142,6 +151,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const [newName, setNewName] = useState('')
   const [newVisibility, setNewVisibility] = useState<'private' | 'public'>('private')
   const [pdfParser, setPdfParser] = useState<PdfParserValue>(DEFAULT_PDF_PARSER)
+  const [chunkMethod, setChunkMethod] = useState<ChunkMethodValue>(DEFAULT_CHUNK_METHOD)
   const [chunkTokenNum, setChunkTokenNum] = useState(DEFAULT_CHUNK_TOKEN_NUM)
   const [createOpen, setCreateOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
@@ -205,15 +215,10 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     setMembersLoading(true)
     setShareError('')
     try {
-      const [membersRes, candidatesRes] = await Promise.all([
-        kbApi.listMembers(kbId),
-        kbApi.listShareCandidates(kbId),
-      ])
+      const [membersRes, candidatesRes] = await Promise.all([kbApi.listMembers(kbId), kbApi.listShareCandidates(kbId)])
       setMembers(membersRes.items)
       setShareCandidates(candidatesRes.items)
-      setShareUserId(prev =>
-        candidatesRes.items.some(u => u.id === prev) ? prev : candidatesRes.items[0]?.id || '',
-      )
+      setShareUserId(prev => (candidatesRes.items.some(u => u.id === prev) ? prev : candidatesRes.items[0]?.id || ''))
     } catch (e) {
       setMembers([])
       setShareCandidates([])
@@ -273,10 +278,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     if (!selectedId) return
     // Poll while parse/transcription is in progress (incl. queued audio)
     const hasActive = docs.some(
-      d =>
-        d.status === 'running' ||
-        (d.status === 'unstart' && isAudioDoc(d) && !d.ragflowDocumentId) ||
-        isTranscribing(d),
+      d => d.status === 'running' || (d.status === 'unstart' && isAudioDoc(d) && !d.ragflowDocumentId) || isTranscribing(d)
     )
     if (!hasActive) return
     const t = setInterval(() => {
@@ -302,6 +304,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     setNewName('')
     setNewVisibility('private')
     setPdfParser(DEFAULT_PDF_PARSER)
+    setChunkMethod(DEFAULT_CHUNK_METHOD)
     setChunkTokenNum(DEFAULT_CHUNK_TOKEN_NUM)
     setCreateOpen(true)
   }
@@ -318,24 +321,31 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
       setError('Please enter a name for your knowledge base.')
       return
     }
-    if (!Number.isFinite(chunkTokenNum) || chunkTokenNum < CHUNK_TOKEN_MIN || chunkTokenNum > CHUNK_TOKEN_MAX) {
+    const needsChunkSize = chunkMethod !== 'one'
+    if (needsChunkSize && (!Number.isFinite(chunkTokenNum) || chunkTokenNum < CHUNK_TOKEN_MIN || chunkTokenNum > CHUNK_TOKEN_MAX)) {
       setError(`Chunk size must be between ${CHUNK_TOKEN_MIN} and ${CHUNK_TOKEN_MAX} tokens.`)
       return
     }
     setBusy(true)
     setError('')
     try {
+      const parserConfig: Record<string, unknown> = {
+        layout_recognize: pdfParser
+      }
+      // "one" = whole document as one chunk; chunk_token_num does not apply.
+      if (needsChunkSize) {
+        parserConfig.chunk_token_num = Math.round(chunkTokenNum)
+      }
       const kb = await kbApi.create({
         name,
         visibility: newVisibility,
-        parserConfig: {
-          layout_recognize: pdfParser,
-          chunk_token_num: Math.round(chunkTokenNum)
-        }
+        chunkMethod,
+        parserConfig
       })
       setNewName('')
       setNewVisibility('private')
       setPdfParser(DEFAULT_PDF_PARSER)
+      setChunkMethod(DEFAULT_CHUNK_METHOD)
       setChunkTokenNum(DEFAULT_CHUNK_TOKEN_NUM)
       setCreateOpen(false)
       await loadKbs({ quiet: true })
@@ -385,29 +395,26 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     })
   }
 
-  const pendingTotalBytes = useMemo(
-    () => pendingFiles.reduce((s, f) => s + f.size, 0),
-    [pendingFiles],
-  )
+  const pendingTotalBytes = useMemo(() => pendingFiles.reduce((s, f) => s + f.size, 0), [pendingFiles])
 
   const storageWarning = useMemo(() => {
     if (!storage) return null
     if (storage.usageRatio >= 1 || storage.remainingBytes <= 0) {
       return {
         level: 'full' as const,
-        text: `Storage full (${formatBytes(storage.usedBytes)} / ${formatBytes(storage.quotaBytes)}). Existing files are kept, but you cannot upload more until you free space or an admin raises your quota.`,
+        text: `Storage full (${formatBytes(storage.usedBytes)} / ${formatBytes(storage.quotaBytes)}). Existing files are kept, but you cannot upload more until you free space or an admin raises your quota.`
       }
     }
     if (storage.usageRatio >= 0.95) {
       return {
         level: 'critical' as const,
-        text: `Almost full (${Math.round(storage.usageRatio * 100)}% used). Only ${formatBytes(storage.remainingBytes)} remaining.`,
+        text: `Almost full (${Math.round(storage.usageRatio * 100)}% used). Only ${formatBytes(storage.remainingBytes)} remaining.`
       }
     }
     if (storage.usageRatio >= 0.8) {
       return {
         level: 'warn' as const,
-        text: `Running low on storage (${Math.round(storage.usageRatio * 100)}% used). Total limit is for all your uploaded files combined.`,
+        text: `Running low on storage (${Math.round(storage.usageRatio * 100)}% used). Total limit is for all your uploaded files combined.`
       }
     }
     return null
@@ -426,7 +433,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     if (!selectedId || !pendingFiles.length) return
     if (storage && pendingTotalBytes > storage.remainingBytes) {
       setError(
-        `Selected files (${formatBytes(pendingTotalBytes)}) exceed remaining storage (${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total).`,
+        `Selected files (${formatBytes(pendingTotalBytes)}) exceed remaining storage (${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total).`
       )
       return
     }
@@ -436,9 +443,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
       let remaining = storage?.remainingBytes
       for (const file of pendingFiles) {
         if (remaining !== undefined && file.size > remaining) {
-          throw new Error(
-            `File "${file.name}" (${formatBytes(file.size)}) exceeds remaining storage (${formatBytes(remaining)}).`,
-          )
+          throw new Error(`File "${file.name}" (${formatBytes(file.size)}) exceeds remaining storage (${formatBytes(remaining)}).`)
         }
         // Hard timeout so UI never sticks on "Uploading…" forever
         const doc = await Promise.race([
@@ -446,14 +451,10 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           new Promise<never>((_, reject) =>
             setTimeout(
               () =>
-                reject(
-                  new Error(
-                    `Upload timed out for "${file.name}". Check API logs; if this persists, restart the API (storage lock).`,
-                  ),
-                ),
-              90_000,
-            ),
-          ),
+                reject(new Error(`Upload timed out for "${file.name}". Check API logs; if this persists, restart the API (storage lock).`)),
+              90_000
+            )
+          )
         ])
         if (remaining !== undefined) remaining -= file.size
         // Audio: STT then Review & ingest; skip parse-on-creation for audio
@@ -580,7 +581,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     try {
       await docApi.ingestTranscript(selectedId, transcriptDoc.id, {
         parse: true,
-        markdown: transcriptDirty ? transcriptMd : undefined,
+        markdown: transcriptDirty ? transcriptMd : undefined
       })
       setTranscriptDoc(null)
       setTranscriptMd('')
@@ -634,22 +635,12 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   }
 
   const parseableSelected = useMemo(
-    () =>
-      filteredDocs.filter(
-        d =>
-          selectedDocIds.has(d.id) &&
-          d.status !== 'running' &&
-          !!d.ragflowDocumentId &&
-          !isTranscribing(d),
-      ),
-    [filteredDocs, selectedDocIds],
+    () => filteredDocs.filter(d => selectedDocIds.has(d.id) && d.status !== 'running' && !!d.ragflowDocumentId && !isTranscribing(d)),
+    [filteredDocs, selectedDocIds]
   )
   const runningSelected = useMemo(
-    () =>
-      filteredDocs.filter(
-        d => selectedDocIds.has(d.id) && d.status === 'running',
-      ),
-    [filteredDocs, selectedDocIds],
+    () => filteredDocs.filter(d => selectedDocIds.has(d.id) && d.status === 'running'),
+    [filteredDocs, selectedDocIds]
   )
 
   const onBulkParse = async () => {
@@ -664,7 +655,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     try {
       const result = await docApi.batchParse(
         selectedId,
-        parseableSelected.map(d => d.id),
+        parseableSelected.map(d => d.id)
       )
       await loadDocs(selectedId, { quiet: true })
       if (result.count === 0) {
@@ -685,7 +676,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     try {
       await docApi.batchStopParse(
         selectedId,
-        runningSelected.map(d => d.id),
+        runningSelected.map(d => d.id)
       )
       await loadDocs(selectedId, { quiet: true })
     } catch (e) {
@@ -699,11 +690,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const onBulkDelete = async () => {
     if (!selectedId || selectedDocIds.size === 0 || !canEditContent) return
     const ids = [...selectedDocIds]
-    if (
-      !confirm(
-        `Delete ${ids.length} selected document${ids.length === 1 ? '' : 's'}?`,
-      )
-    ) {
+    if (!confirm(`Delete ${ids.length} selected document${ids.length === 1 ? '' : 's'}?`)) {
       return
     }
     setBusy(true)
@@ -715,9 +702,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           await docApi.remove(selectedId, docId)
         } catch (e) {
           const name = docs.find(d => d.id === docId)?.name || docId
-          failures.push(
-            `${name}: ${e instanceof Error ? e.message : String(e)}`,
-          )
+          failures.push(`${name}: ${e instanceof Error ? e.message : String(e)}`)
         }
       }
       setSelectedDocIds(new Set())
@@ -725,9 +710,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
       await loadKbs({ quiet: true })
       await loadStorage()
       if (failures.length) {
-        setError(
-          `Deleted ${ids.length - failures.length}/${ids.length}. Failed: ${failures.slice(0, 3).join('; ')}`,
-        )
+        setError(`Deleted ${ids.length - failures.length}/${ids.length}. Failed: ${failures.slice(0, 3).join('; ')}`)
       }
     } finally {
       setBusy(false)
@@ -833,21 +816,14 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           <span className="kb-storage-bar-label">Storage</span>
           <span className="kb-storage-bar-values">
             {formatBytes(storage.usedBytes)} / {formatBytes(storage.quotaBytes)}
-            <span className="kb-storage-bar-remaining">
-              · {formatBytes(storage.remainingBytes)} free
-            </span>
+            <span className="kb-storage-bar-remaining">· {formatBytes(storage.remainingBytes)} free</span>
           </span>
         </div>
         <div className="kb-storage-track" aria-hidden>
-          <div
-            className="kb-storage-fill"
-            style={{ width: `${Math.min(100, Math.round(storage.usageRatio * 100))}%` }}
-          />
+          <div className="kb-storage-fill" style={{ width: `${Math.min(100, Math.round(storage.usageRatio * 100))}%` }} />
         </div>
         <p className="kb-storage-hint">
-          {storageWarning
-            ? storageWarning.text
-            : 'Quota is the total for all your uploaded files combined, not a single-file limit.'}
+          {storageWarning ? storageWarning.text : 'Quota is the total for all your uploaded files combined, not a single-file limit.'}
         </p>
       </div>
     )
@@ -943,9 +919,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                         <span
                           className={`kb-visibility-badge ${kb.visibility === 'public' ? 'public' : 'private'}`}
                           title={
-                            kb.visibility === 'public'
-                              ? 'Public — any logged-in user can use'
-                              : 'Private — owner and people shared with'
+                            kb.visibility === 'public' ? 'Public — any logged-in user can use' : 'Private — owner and people shared with'
                           }
                         >
                           {kb.visibility === 'public' ? 'Public' : 'Private'}
@@ -1046,6 +1020,22 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 </div>
               </div>
               <div className="field">
+                <label htmlFor="kb-chunk-method">Chunk method</label>
+                <select
+                  id="kb-chunk-method"
+                  value={chunkMethod}
+                  onChange={e => setChunkMethod(e.target.value as ChunkMethodValue)}
+                  disabled={busy}
+                >
+                  {CHUNK_METHOD_OPTIONS.map(opt => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+                <p className="field-hint">How documents are split when parsed. Default General.</p>
+              </div>
+              <div className="field">
                 <label htmlFor="kb-pdf-parser">PDF parser</label>
                 <select id="kb-pdf-parser" value={pdfParser} onChange={e => setPdfParser(e.target.value as PdfParserValue)} disabled={busy}>
                   {PDF_PARSER_OPTIONS.map(opt => (
@@ -1056,26 +1046,28 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 </select>
                 <p className="field-hint">{selectedPdfParser.hint}</p>
               </div>
-              <div className="field">
-                <label htmlFor="kb-chunk-size">Chunk size (tokens)</label>
-                <input
-                  id="kb-chunk-size"
-                  type="number"
-                  min={CHUNK_TOKEN_MIN}
-                  max={CHUNK_TOKEN_MAX}
-                  step={1}
-                  value={chunkTokenNum}
-                  onChange={e => {
-                    const n = Number(e.target.value)
-                    setChunkTokenNum(Number.isFinite(n) ? n : DEFAULT_CHUNK_TOKEN_NUM)
-                  }}
-                  disabled={busy}
-                />
-                <p className="field-hint">
-                  Target tokens per chunk when documents are parsed. Default {DEFAULT_CHUNK_TOKEN_NUM}; range {CHUNK_TOKEN_MIN}–
-                  {CHUNK_TOKEN_MAX}.
-                </p>
-              </div>
+              {chunkMethod !== 'one' ? (
+                <div className="field">
+                  <label htmlFor="kb-chunk-size">Chunk size (tokens)</label>
+                  <input
+                    id="kb-chunk-size"
+                    type="number"
+                    min={CHUNK_TOKEN_MIN}
+                    max={CHUNK_TOKEN_MAX}
+                    step={1}
+                    value={chunkTokenNum}
+                    onChange={e => {
+                      const n = Number(e.target.value)
+                      setChunkTokenNum(Number.isFinite(n) ? n : DEFAULT_CHUNK_TOKEN_NUM)
+                    }}
+                    disabled={busy}
+                  />
+                  <p className="field-hint">
+                    Target tokens per chunk when documents are parsed. Default {DEFAULT_CHUNK_TOKEN_NUM}; range {CHUNK_TOKEN_MIN}–
+                    {CHUNK_TOKEN_MAX}.
+                  </p>
+                </div>
+              ) : null}
               <div className="kb-modal-actions">
                 <button className="btn btn-secondary" type="button" disabled={busy} onClick={closeCreateModal}>
                   Cancel
@@ -1127,16 +1119,12 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               </div>
               <div className="kb-detail-kb-meta">
                 {selectedKb?.documentCount ?? docs.length} {(selectedKb?.documentCount ?? docs.length) === 1 ? 'file' : 'files'}
-                {selectedKb && !selectedKb.isOwner && selectedKb.ownerUsername
-                  ? ` · by ${selectedKb.ownerUsername}`
-                  : ''}
+                {selectedKb && !selectedKb.isOwner && selectedKb.ownerUsername ? ` · by ${selectedKb.ownerUsername}` : ''}
               </div>
               <div className="kb-detail-kb-meta">Created {selectedKb ? formatDateShort(selectedKb.createdAt) : '—'}</div>
               {selectedKb ? (
                 <div className="kb-detail-kb-meta">
-                  <span
-                    className={`kb-visibility-badge ${selectedKb.visibility === 'public' ? 'public' : 'private'}`}
-                  >
+                  <span className={`kb-visibility-badge ${selectedKb.visibility === 'public' ? 'public' : 'private'}`}>
                     {selectedKb.visibility === 'public' ? 'Public' : 'Private'}
                   </span>
                 </div>
@@ -1232,9 +1220,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                         className="kb-share-role-select"
                         value={m.role}
                         disabled={busy}
-                        onChange={e =>
-                          void onChangeMemberRole(m.userId, e.target.value as KnowledgeBaseMemberRole)
-                        }
+                        onChange={e => void onChangeMemberRole(m.userId, e.target.value as KnowledgeBaseMemberRole)}
                         aria-label={`Role for ${m.username}`}
                       >
                         <option value="viewer">Viewer</option>
@@ -1307,12 +1293,8 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
             <div className="kb-bulk-bar">
               <span className="kb-bulk-count">
                 {selectedDocIds.size} selected
-                {parseableSelected.length > 0
-                  ? ` · ${parseableSelected.length} parseable`
-                  : ''}
-                {runningSelected.length > 0
-                  ? ` · ${runningSelected.length} running`
-                  : ''}
+                {parseableSelected.length > 0 ? ` · ${parseableSelected.length} parseable` : ''}
+                {runningSelected.length > 0 ? ` · ${runningSelected.length} running` : ''}
               </span>
               <button
                 className="btn btn-secondary btn-sm"
@@ -1340,20 +1322,10 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               >
                 Stop selected{runningSelected.length > 0 ? ` (${runningSelected.length})` : ''}
               </button>
-              <button
-                className="btn btn-danger btn-sm"
-                type="button"
-                disabled={busy}
-                onClick={() => void onBulkDelete()}
-              >
+              <button className="btn btn-danger btn-sm" type="button" disabled={busy} onClick={() => void onBulkDelete()}>
                 Delete selected
               </button>
-              <button
-                className="btn btn-secondary btn-sm"
-                type="button"
-                disabled={busy}
-                onClick={() => setSelectedDocIds(new Set())}
-              >
+              <button className="btn btn-secondary btn-sm" type="button" disabled={busy} onClick={() => setSelectedDocIds(new Set())}>
                 Clear
               </button>
             </div>
@@ -1413,11 +1385,19 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                           ) : null}
                           {doc.name}
                           {isVideoDoc(doc) ? (
-                            <span className="kb-visibility-badge shared" style={{ marginLeft: 6 }} title="Video source — transcript ingested after STT">
+                            <span
+                              className="kb-visibility-badge shared"
+                              style={{ marginLeft: 6 }}
+                              title="Video source — transcript ingested after STT"
+                            >
                               Video
                             </span>
                           ) : isAudioDoc(doc) ? (
-                            <span className="kb-visibility-badge shared" style={{ marginLeft: 6 }} title="Audio source — transcript ingested after STT">
+                            <span
+                              className="kb-visibility-badge shared"
+                              style={{ marginLeft: 6 }}
+                              title="Audio source — transcript ingested after STT"
+                            >
                               Audio
                             </span>
                           ) : null}
@@ -1437,25 +1417,16 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                         </label>
                       </td>
                       <td className="kb-cell-muted">{doc.chunkCount}</td>
-                      <td
-                        className="kb-cell-muted kb-meta-cell"
-                        title={doc.errorMessage || doc.progressMsg || ''}
-                      >
+                      <td className="kb-cell-muted kb-meta-cell" title={doc.errorMessage || doc.progressMsg || ''}>
                         {(() => {
-                          const meta =
-                            doc.errorMessage?.trim() ||
-                            doc.progressMsg?.trim() ||
-                            '';
-                          if (!meta) return '—';
-                          return meta.length > 20 ? `${meta.slice(0, 20)}…` : meta;
+                          const meta = doc.errorMessage?.trim() || doc.progressMsg?.trim() || ''
+                          if (!meta) return '—'
+                          return meta.length > 20 ? `${meta.slice(0, 20)}…` : meta
                         })()}
                       </td>
                       <td>
                         <div className="kb-parse-cell">
-                          <span
-                            className={`badge ${doc.status}`}
-                            title={doc.errorMessage || doc.progressMsg || doc.status}
-                          >
+                          <span className={`badge ${doc.status}`} title={doc.errorMessage || doc.progressMsg || doc.status}>
                             {parseBadgeLabel(doc)}
                           </span>
                           {canEditContent ? (
@@ -1528,11 +1499,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                               className="btn btn-secondary btn-sm"
                               type="button"
                               disabled={busy || !doc.ragflowDocumentId}
-                              title={
-                                !doc.ragflowDocumentId
-                                  ? 'Chunk preview after ingest to knowledge base'
-                                  : 'Preview'
-                              }
+                              title={!doc.ragflowDocumentId ? 'Chunk preview after ingest to knowledge base' : 'Preview'}
                               onClick={() => setPreviewDoc(doc)}
                             >
                               Preview
@@ -1561,21 +1528,10 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
       {uploadOpen && (
         <div className="kb-modal-backdrop" role="presentation" onClick={closeUploadModal}>
-          <div
-            className="kb-modal kb-upload-modal"
-            role="dialog"
-            aria-labelledby="upload-file-title"
-            onClick={e => e.stopPropagation()}
-          >
+          <div className="kb-modal kb-upload-modal" role="dialog" aria-labelledby="upload-file-title" onClick={e => e.stopPropagation()}>
             <div className="kb-upload-modal-header">
               <h2 id="upload-file-title">Upload file</h2>
-              <button
-                type="button"
-                className="kb-upload-modal-close"
-                aria-label="Close"
-                disabled={busy}
-                onClick={closeUploadModal}
-              >
+              <button type="button" className="kb-upload-modal-close" aria-label="Close" disabled={busy} onClick={closeUploadModal}>
                 <X size={18} />
               </button>
             </div>
@@ -1599,10 +1555,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                   </span>
                 </div>
                 <div className="kb-storage-track" aria-hidden>
-                  <div
-                    className="kb-storage-fill"
-                    style={{ width: `${Math.min(100, Math.round(storage.usageRatio * 100))}%` }}
-                  />
+                  <div className="kb-storage-fill" style={{ width: `${Math.min(100, Math.round(storage.usageRatio * 100))}%` }} />
                 </div>
                 <p className="kb-storage-hint">
                   Total for all files you upload. Remaining: {formatBytes(storage.remainingBytes)}.
@@ -1614,12 +1567,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
             <div className="kb-upload-parse-row">
               <span className="kb-upload-parse-label">Parse on creation</span>
               <label className="kb-switch" title="Start parsing immediately after upload">
-                <input
-                  type="checkbox"
-                  checked={parseOnCreation}
-                  disabled={busy}
-                  onChange={e => setParseOnCreation(e.target.checked)}
-                />
+                <input type="checkbox" checked={parseOnCreation} disabled={busy} onChange={e => setParseOnCreation(e.target.checked)} />
                 <span className="kb-switch-slider" />
               </label>
             </div>
@@ -1693,17 +1641,12 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 <Upload size={28} strokeWidth={1.5} />
               </div>
               <p className="kb-upload-dropzone-title">
-                {uploadMode === 'folder'
-                  ? 'Drag and drop a folder here to upload'
-                  : 'Drag and drop your file here to upload'}
+                {uploadMode === 'folder' ? 'Drag and drop a folder here to upload' : 'Drag and drop your file here to upload'}
               </p>
               <p className="kb-upload-dropzone-hint">
-                Documents (PDF, TXT, MD, Office…), audio (MP3, M4A, WAV, FLAC…), and video (MP4, MKV, WebM…).
-                Audio and video are transcribed first — review the transcript, then ingest to chat.
-                Click to browse{uploadMode === 'folder' ? ' a folder' : ''}.
-                {storage
-                  ? ` Storage remaining: ${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total.`
-                  : ''}
+                Documents (PDF, TXT, MD, Office…), audio (MP3, M4A, WAV, FLAC…), and video (MP4, MKV, WebM…). Audio and video are
+                transcribed first — review the transcript, then ingest to chat. Click to browse{uploadMode === 'folder' ? ' a folder' : ''}.
+                {storage ? ` Storage remaining: ${formatBytes(storage.remainingBytes)} of ${formatBytes(storage.quotaBytes)} total.` : ''}
               </p>
             </div>
 
@@ -1806,13 +1749,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           >
             <div className="kb-upload-modal-header">
               <h2 id="transcript-review-title">Review transcript</h2>
-              <button
-                type="button"
-                className="kb-upload-modal-close"
-                aria-label="Close"
-                disabled={busy}
-                onClick={closeTranscriptReview}
-              >
+              <button type="button" className="kb-upload-modal-close" aria-label="Close" disabled={busy} onClick={closeTranscriptReview}>
                 <X size={18} />
               </button>
             </div>
@@ -1838,7 +1775,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                   lineHeight: 1.45,
                   padding: 12,
                   resize: 'vertical',
-                  boxSizing: 'border-box',
+                  boxSizing: 'border-box'
                 }}
                 value={transcriptMd}
                 disabled={busy}
@@ -1850,12 +1787,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
               />
             )}
             <div className="kb-modal-actions" style={{ marginTop: 12 }}>
-              <button
-                className="btn btn-secondary"
-                type="button"
-                disabled={busy}
-                onClick={closeTranscriptReview}
-              >
+              <button className="btn btn-secondary" type="button" disabled={busy} onClick={closeTranscriptReview}>
                 Close
               </button>
               <button

@@ -9,9 +9,10 @@ export class CreateKnowledgeBaseDto {
   @IsString()
   description?: string;
 
+  /** RAGFlow dataset chunk_method key (e.g. naive / one / table). */
   @IsOptional()
-  @IsString()
-  chunkMethod?: string;
+  @IsIn(['naive', 'one', 'table'])
+  chunkMethod?: 'naive' | 'one' | 'table';
 
   @IsOptional()
   @IsObject()
