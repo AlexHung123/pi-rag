@@ -95,6 +95,7 @@ export class ChatService {
     knowledgeBaseIds?: string[],
     signal?: AbortSignal,
     modelId?: string,
+    documentIds?: string[],
   ) {
     if (typeof content !== 'string' || !content.trim()) {
       throw badRequest('content is required');
@@ -107,9 +108,14 @@ export class ChatService {
     const resolvedModelId = this.resolveModelId(modelId);
     const c = await this.getOwned(userId, conversationId);
     const selectedIds = (knowledgeBaseIds || []).filter(Boolean);
+    const selectedDocIds = (documentIds || []).filter(Boolean);
+    if (selectedDocIds.length && !selectedIds.length) {
+      throw badRequest('documentIds require knowledgeBaseIds');
+    }
 
     const userMeta: Record<string, unknown> = {};
     if (selectedIds.length) userMeta.knowledgeBaseIds = selectedIds;
+    if (selectedDocIds.length) userMeta.documentIds = selectedDocIds;
 
     const userMsg = await this.prisma.message.create({
       data: {
@@ -167,6 +173,7 @@ export class ChatService {
         content,
         {
           knowledgeBaseIds: selectedIds,
+          documentIds: selectedDocIds,
           signal,
           modelId: resolvedModelId,
         },
@@ -226,6 +233,7 @@ export class ChatService {
     const metadata: Record<string, unknown> = {};
     if (sources.length) metadata.sources = sources;
     if (selectedIds.length) metadata.knowledgeBaseIds = selectedIds;
+    if (selectedDocIds.length) metadata.documentIds = selectedDocIds;
     if (aborted) metadata.aborted = true;
 
     const assistantContent =

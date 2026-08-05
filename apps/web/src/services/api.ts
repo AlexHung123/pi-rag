@@ -581,10 +581,21 @@ export const docApi = {
   },
   /** Blob URL for inline file preview (revoke when done). */
   fetchFileBlob: async (kbId: string, docId: string): Promise<{ blob: Blob; objectUrl: string }> => {
-    const res = await fetch(
-      `${API_BASE}/api/knowledge-bases/${kbId}/documents/${docId}/file`,
-      { credentials: 'include' },
-    );
+    let res: Response;
+    try {
+      res = await fetch(
+        `${API_BASE}/api/knowledge-bases/${kbId}/documents/${docId}/file`,
+        { credentials: 'include' },
+      );
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      // Browser surfaces network/header aborts as "Failed to fetch"
+      throw new Error(
+        msg === 'Failed to fetch'
+          ? 'Could not download the original file (network or server error). Try again, or open the file from the knowledge base.'
+          : msg,
+      );
+    }
     if (!res.ok) {
       const text = await res.text();
       let message = text || `HTTP ${res.status}`;
@@ -832,6 +843,7 @@ export const chatApi = {
     content: string,
     opts?: {
       knowledgeBaseIds?: string[];
+      documentIds?: string[];
       modelId?: string;
       signal?: AbortSignal;
     },
@@ -839,10 +851,14 @@ export const chatApi = {
     const body: {
       content: string;
       knowledgeBaseIds?: string[];
+      documentIds?: string[];
       modelId?: string;
     } = { content };
     if (opts?.knowledgeBaseIds?.length) {
       body.knowledgeBaseIds = opts.knowledgeBaseIds;
+    }
+    if (opts?.documentIds?.length) {
+      body.documentIds = opts.documentIds;
     }
     if (opts?.modelId?.trim()) {
       body.modelId = opts.modelId.trim();

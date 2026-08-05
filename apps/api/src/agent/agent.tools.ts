@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { Type } from 'typebox';
 import { KnowledgeService } from '../knowledge/knowledge.service';
 import { RagflowService } from '../ragflow/ragflow.service';
@@ -29,6 +30,32 @@ import {
 
 export type { CitationSource };
 export { evidenceLabelFromScore };
+
+const toolsLogger = new Logger('AgentTools');
+
+/** Compact retrieval summary for Nest logs (no full chunk dump). */
+function logEvidenceForLlm(
+  tool: string,
+  hits: MappedHit[],
+  text: string,
+  meta?: { query?: string; path?: string; insufficient?: boolean },
+): void {
+  const scores = hits
+    .map((h) =>
+      typeof h.score === 'number' && Number.isFinite(h.score)
+        ? h.score.toFixed(3)
+        : '-',
+    )
+    .join(', ');
+  toolsLogger.log(
+    `[${tool}] evidence → LLM: hits=${hits.length}` +
+      (meta?.query != null ? ` query="${meta.query}"` : '') +
+      (meta?.path ? ` path=${meta.path}` : '') +
+      (meta?.insufficient ? ' insufficient=true' : '') +
+      (scores ? ` scores=[${scores}]` : '') +
+      ` evidenceChars=${text.length}`,
+  );
+}
 
 /** pi-agent-core AgentTool shape (TypeBox parameters). */
 export type AppAgentTool = {
@@ -130,6 +157,16 @@ function resolveQueries(
 export type AgentToolTurnContext = {
   /** Latest user message for this prompt (set each turn before agent.prompt). */
   latestUserMessage: string;
+  /**
+   * UI-selected knowledge base UUIDs for this turn (server-enforced).
+   * When non-empty, retrieval tools prefer these over model-supplied ids.
+   */
+  knowledgeBaseIds: string[];
+  /**
+   * Optional UI-selected document UUIDs for this turn.
+   * Empty = whole selected KBs. Mapped to RAGFlow document_ids server-side.
+   */
+  documentIds: string[];
 };
 
 export function createUserTools(deps: {
@@ -138,11 +175,29 @@ export function createUserTools(deps: {
   ragflow: RagflowService;
   prisma: PrismaService;
   memory: MemoryService;
-  /** Mutable; agent.service updates latestUserMessage each turn. */
+  /** Mutable; agent.service updates selection + latestUserMessage each turn. */
   turnContext: AgentToolTurnContext;
 }): AppAgentTool[] {
   const { userId, knowledge, ragflow, prisma, memory, turnContext } = deps;
   const ragCfg = getRagRetrievalConfig();
+
+  /** Prefer UI KB selection; always apply UI document filter when set. */
+  function resolveScopeKbIds(params: Record<string, unknown>): string[] {
+    if (turnContext.knowledgeBaseIds.length) {
+      return turnContext.knowledgeBaseIds;
+    }
+    return scopeIdsFromParams(params);
+  }
+
+  async function retrievalScopeForTurn(params: Record<string, unknown>) {
+    return resolveRetrievalScope(
+      userId,
+      resolveScopeKbIds(params),
+      knowledge,
+      prisma,
+      { documentIds: turnContext.documentIds },
+    );
+  }
 
   const retrieve: AppAgentTool = {
     name: 'retrieve_chunks',
@@ -173,17 +228,12 @@ export function createUserTools(deps: {
       ),
       topK: Type.Optional(
         Type.Number({
-          description: `Max evidence chunks returned (default ${ragCfg.pageSize}, max 20)`,
+          description: `Max evidence chunks returned (default ${ragCfg.pageSize}, max 50)`,
         }),
       ),
     }),
     execute: async (_id, params) => {
-      const scope = await resolveRetrievalScope(
-        userId,
-        scopeIdsFromParams(params),
-        knowledge,
-        prisma,
-      );
+      const scope = await retrievalScopeForTurn(params);
       if (!scope.ok) {
         return {
           content: [{ type: 'text', text: scope.message }],
@@ -191,7 +241,7 @@ export function createUserTools(deps: {
         };
       }
 
-      const pageSize = clampPageSize(params.topK, ragCfg.pageSize, 20);
+      const pageSize = clampPageSize(params.topK, ragCfg.pageSize, 50);
       const topK = Math.max(pageSize, ragCfg.topK);
       const queries = resolveQueries(
         params,
@@ -216,6 +266,8 @@ export function createUserTools(deps: {
           similarityThreshold: ragCfg.similarityThreshold,
           vectorSimilarityWeight: ragCfg.vectorSimilarityWeight,
           rerankId: ragCfg.rerankId,
+          // RAGFlow POST /api/v1/retrieval document_ids (optional hard filter)
+          documentIds: scope.ragflowDocumentIds,
         });
         for (const h of hits) {
           allHits.push({ ...scope.mapHit(h), sourceQuery: q });
@@ -249,6 +301,12 @@ export function createUserTools(deps: {
             : undefined,
       });
 
+      logEvidenceForLlm('retrieve_chunks', merged, text, {
+        query: queries.join(' | '),
+        path: 'semantic',
+        insufficient,
+      });
+
       return {
         content: [{ type: 'text', text }],
         details: {
@@ -270,7 +328,7 @@ export function createUserTools(deps: {
     name: 'keyword_search',
     label: 'Keyword search',
     description:
-      'Keyword / exact-term retrieval via RAGFlow (ElasticSearch keyword matching + low vector weight). Use for error codes (e.g. ERR-xxxx), clause numbers, person names (人名), job/position titles (職位/職稱), company names (公司名), department names (部門名), proper nouns, document titles, and exact phrases. Pass knowledgeBaseIds from the UI selection. For conceptual "how does X work" questions use retrieve_chunks instead. May be combined with retrieve_chunks in the same turn.',
+      'Keyword / exact-term retrieval via RAGFlow /api/v1/retrieval (vector_similarity_weight=0, highlight). Use for error codes (e.g. ERR-xxxx), clause numbers, person names (人名), job/position titles (職位/職稱), company names (公司名), department names (部門名), proper nouns, document titles, and exact phrases. Pass knowledgeBaseIds from the UI selection. For conceptual "how does X work" questions use retrieve_chunks instead. May be combined with retrieve_chunks in the same turn. Do not pass a result limit — server returns up to the configured page size.',
     parameters: Type.Object({
       query: Type.String({
         description:
@@ -280,11 +338,6 @@ export function createUserTools(deps: {
         description:
           'User-selected app knowledge base UUIDs (from the UI selection)',
       }),
-      topK: Type.Optional(
-        Type.Number({
-          description: `Max evidence chunks returned (default ${ragCfg.pageSize}, max 20)`,
-        }),
-      ),
     }),
     execute: async (_id, params) => {
       const query = String(params.query || '').trim();
@@ -296,12 +349,7 @@ export function createUserTools(deps: {
         };
       }
 
-      const scope = await resolveRetrievalScope(
-        userId,
-        asStringArray(params.knowledgeBaseIds),
-        knowledge,
-        prisma,
-      );
+      const scope = await retrievalScopeForTurn(params);
       if (!scope.ok) {
         return {
           content: [{ type: 'text', text: scope.message }],
@@ -309,68 +357,90 @@ export function createUserTools(deps: {
         };
       }
 
-      const pageSize = clampPageSize(params.topK, ragCfg.pageSize, 20);
-      const topK = Math.max(pageSize, ragCfg.topK);
+      // Always use server RAG_PAGE_SIZE — models often pass topK=10 and cap every search.
+      const pageSize = ragCfg.pageSize;
+      const candidateTopK = Math.max(pageSize, ragCfg.keywordTopK);
       const thr = ragCfg.keywordSimilarityThreshold;
-      const vWeight = ragCfg.keywordVectorWeight;
 
-      // Primary path: same POST /api/v1/retrieval with keyword-biased params.
-      // keyword=true → RAGFlow ElasticSearch term matching; low vector weight
-      // prefers term_similarity over pure embedding similarity.
-      const hits = await ragflow.retrieve({
-        datasetIds: scope.datasetIds,
-        question: query,
-        pageSize,
-        topK,
-        similarityThreshold: thr,
-        vectorSimilarityWeight: vWeight,
-        keyword: ragCfg.keywordEnableEs,
-        // Skip rerank on keyword path — keeps literal ranking stable.
-        rerankId: undefined,
-      });
-
-      let merged = dedupeHitsById(hits.map((h) => scope.mapHit(h)));
-      merged = filterHitsByThreshold(merged, thr);
-      merged = merged.slice(0, pageSize);
-      merged = await expandAdjacentHits(merged, {
-        listChunks: (datasetId, documentId, o) =>
-          ragflow.listChunks(datasetId, documentId, o),
-      });
-
-      const maxScore = merged.reduce(
-        (m, h) => Math.max(m, typeof h.score === 'number' ? h.score : 0),
-        0,
-      );
-      const insufficient =
-        merged.length === 0 || (maxScore > 0 && maxScore < thr + 0.1);
-
-      const sources = mappedHitsToCitationSources(merged);
-      const text = formatEvidenceForModel(merged, {
-        maxChunkChars: ragCfg.maxChunkChars,
-        query,
-        insufficient,
-        message:
-          merged.length === 0
-            ? 'No keyword matches found. Try a shorter exact term or use retrieve_chunks for conceptual search.'
-            : undefined,
-      });
-
-      return {
-        content: [{ type: 'text', text }],
-        details: {
-          hits: merged,
-          sources,
-          query,
+      try {
+        // RAGFlow POST /api/v1/retrieval with term ranking (v_weight=0, highlight).
+        const hits = await ragflow.keywordSearch({
+          datasetIds: scope.datasetIds,
+          question: query,
           pageSize,
-          topK,
-          similarityThreshold: thr,
-          vectorSimilarityWeight: vWeight,
-          keyword: ragCfg.keywordEnableEs,
+          topK: candidateTopK,
+          documentIds: scope.ragflowDocumentIds,
+        });
+
+        let merged = dedupeHitsById(hits.map((h) => scope.mapHit(h)));
+        merged = filterHitsByThreshold(merged, thr);
+        merged = merged.slice(0, pageSize);
+        merged = await expandAdjacentHits(merged, {
+          listChunks: (datasetId, documentId, o) =>
+            ragflow.listChunks(datasetId, documentId, o),
+        });
+
+        const maxScore = merged.reduce(
+          (m, h) => Math.max(m, typeof h.score === 'number' ? h.score : 0),
+          0,
+        );
+        // Keyword matches are high-confidence; only mark insufficient when empty
+        // or after-normalization scores are all very weak.
+        const insufficient =
+          merged.length === 0 || (maxScore > 0 && maxScore < thr + 0.1);
+
+        const sources = mappedHitsToCitationSources(merged);
+        const text = formatEvidenceForModel(merged, {
+          maxChunkChars: ragCfg.maxChunkChars,
+          query,
           insufficient,
-          path: 'keyword',
-          adjacentExpand: ragCfg.adjacentExpandEnabled,
-        },
-      };
+          message:
+            merged.length === 0
+              ? 'No keyword matches found. Try a shorter exact term or use retrieve_chunks for conceptual search.'
+              : undefined,
+        });
+
+        const path = 'ragflow_retrieval_term';
+        logEvidenceForLlm('keyword_search', merged, text, {
+          query,
+          path,
+          insufficient,
+        });
+
+        return {
+          content: [{ type: 'text', text }],
+          details: {
+            hits: merged,
+            sources,
+            query,
+            pageSize,
+            topK: candidateTopK,
+            similarityThreshold: thr,
+            vectorSimilarityWeight: ragCfg.keywordVectorWeight,
+            path,
+            adjacentExpand: ragCfg.adjacentExpandEnabled,
+          },
+        };
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        toolsLogger.warn(`keyword_search error: ${message}`);
+        return {
+          content: [
+            {
+              type: 'text',
+              text: `keyword_search failed: ${message}. Try a shorter exact term or use retrieve_chunks.`,
+            },
+          ],
+          details: {
+            hits: [],
+            sources: [],
+            query,
+            message,
+            path: 'ragflow_retrieval_term',
+          },
+          // Soft failure so the agent can continue / fall back instead of hard tool error.
+        };
+      }
     },
   };
 
@@ -404,12 +474,7 @@ export function createUserTools(deps: {
       ),
     }),
     execute: async (_id, params) => {
-      const scope = await resolveRetrievalScope(
-        userId,
-        asStringArray(params.knowledgeBaseIds),
-        knowledge,
-        prisma,
-      );
+      const scope = await retrievalScopeForTurn(params);
       if (!scope.ok) {
         return {
           content: [{ type: 'text', text: scope.message }],
@@ -444,15 +509,16 @@ export function createUserTools(deps: {
             },
           };
         }
-        // Must still be inside the selected KB set.
+        // Must still be inside the selected KB + optional document filter.
         const inScope = scope.accessible.some(
           (kb) =>
             kb.id === docScope.knowledgeBaseId &&
             kb.documents.some((d) => d.id === docScope.appDocumentId),
         );
         if (!inScope) {
-          const message =
-            'Document is not in the currently selected knowledge bases. Ask the user to select the right KB.';
+          const message = scope.ragflowDocumentIds?.length
+            ? 'Document is not in the currently selected documents. Ask the user to adjust the document selection in the UI.'
+            : 'Document is not in the currently selected knowledge bases. Ask the user to select the right KB.';
           return {
             content: [{ type: 'text', text: message }],
             details: { sources: [], message, path: 'summarize' },
@@ -910,7 +976,13 @@ Rules:
 /** Build a prompt prefix when the UI has knowledge bases selected. */
 export function buildSelectedKbPromptPrefix(
   selected: Array<{ id: string; name: string }>,
-  opts?: { rewriteQuery?: string },
+  opts?: {
+    rewriteQuery?: string;
+    /** Explicit UI document filter (names for the model; enforcement is server-side). */
+    documents?: Array<{ id: string; name: string; knowledgeBaseId?: string }>;
+    /** KB ids that remain whole-KB under mixed expansion. */
+    entireKbIds?: string[];
+  },
 ): string {
   if (!selected.length) return '';
   const lines = selected.map((k) => `- ${k.name} (id: ${k.id})`).join('\n');
@@ -920,8 +992,25 @@ export function buildSelectedKbPromptPrefix(
       `You may pass this as retrieve_chunks.question or keyword_search.query (or refine it). ` +
       `Do not treat length/format instructions as retrieval terms; put those in summarize_document.focus or the final answer.\n\n`
     : '';
+
+  const docs = opts?.documents || [];
+  const entireKbIds = new Set(opts?.entireKbIds || []);
+  let docBlock = '';
+  if (docs.length) {
+    const entireLines = selected
+      .filter((k) => entireKbIds.has(k.id))
+      .map((k) => `- ${k.name}: all indexed documents`);
+    const explicitLines = docs.map((d) => `- ${d.name} (id: ${d.id})`);
+    docBlock =
+      `[Selected documents (retrieval is limited to this scope)]\n` +
+      [...entireLines, ...explicitLines].join('\n') +
+      `\n` +
+      `Do not retrieve or invent content from other documents. Prefer appDocumentId from this list when summarizing.\n\n`;
+  }
+
   return (
     `[Selected knowledge bases for this question]\n${lines}\n\n` +
+    docBlock +
     `If this is a greeting, small talk, or a question about you / your capabilities (not document facts), answer directly WITHOUT calling retrieval tools. ` +
     `If the user wants a whole-document summary (总结/摘要/summarize this document), call summarize_document once with knowledgeBaseIds=${ids} ` +
     `(pass documentNameHint if they named a file; appDocumentId if known; pass focus with any length request like 5000字 and topical focus). ` +

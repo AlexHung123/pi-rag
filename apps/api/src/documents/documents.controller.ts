@@ -18,7 +18,10 @@ import { CurrentUser } from '../auth/current-user.decorator';
 import { AuthPrincipal } from '../auth/auth.types';
 import { DocumentsService } from './documents.service';
 import { badRequest } from '../common/errors';
-import { fixMulterOriginalName } from '../common/filename';
+import {
+  contentDispositionHeader,
+  fixMulterOriginalName,
+} from '../common/filename';
 import { MediaStorage } from '../transcription/media-storage';
 
 /** Max of document + audio caps so multer does not reject large audio early. */
@@ -224,10 +227,10 @@ export class DocumentsController {
     @Param('docId') docId: string,
   ): Promise<StreamableFile> {
     const file = await this.documents.downloadFile(user.userId, kbId, docId);
-    const safeName = file.filename.replace(/[\\/"]/g, '_');
     return new StreamableFile(file.buffer, {
-      type: file.contentType,
-      disposition: `inline; filename="${safeName}"`,
+      type: file.contentType || 'application/octet-stream',
+      // Must be ASCII-safe; non-ASCII filename= crashes Node headers → Failed to fetch
+      disposition: contentDispositionHeader(file.filename || 'document.bin', 'inline'),
       length: file.buffer.length,
     });
   }

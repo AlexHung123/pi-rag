@@ -1232,8 +1232,8 @@ button {
   left: 0;
   bottom: calc(100% + 8px);
   z-index: 35;
-  width: min(360px, 85vw);
-  max-height: 280px;
+  width: min(380px, 90vw);
+  max-height: 360px;
   overflow: auto;
   border: 1px solid var(--border-color);
   border-radius: 12px;
@@ -1276,13 +1276,16 @@ button {
   padding: 6px;
 }
 
+.kb-select-item {
+  margin: 0;
+}
+
 .kb-select-option {
   display: flex;
   align-items: flex-start;
-  gap: 10px;
-  padding: 8px 10px;
+  gap: 4px;
+  padding: 6px 8px;
   border-radius: 8px;
-  cursor: pointer;
 }
 
 .kb-select-option:hover {
@@ -1293,9 +1296,38 @@ button {
   background: var(--color-primary-soft);
 }
 
+.kb-select-option-label {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  cursor: pointer;
+}
+
 .kb-select-option input {
   margin-top: 3px;
   accent-color: var(--color-primary);
+}
+
+.kb-expand-btn {
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  margin-top: 1px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+}
+
+.kb-expand-btn:hover {
+  background: var(--color-sidebar-hover);
+  color: var(--text-primary);
 }
 
 .kb-option-text {
@@ -1309,6 +1341,10 @@ button {
   font-size: 13px;
   font-weight: 600;
   color: var(--text-primary);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 
 .kb-option-desc {
@@ -1319,7 +1355,92 @@ button {
   white-space: nowrap;
 }
 
+.kb-doc-count-badge {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--color-primary);
+  background: var(--color-primary-soft);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
 
+.kb-chip-docs {
+  cursor: default;
+  opacity: 0.9;
+}
+
+.kb-doc-select {
+  margin: 0 8px 8px 28px;
+  padding: 4px 0 4px 8px;
+  border-left: 2px solid var(--border-subtle);
+}
+
+.kb-doc-select-actions {
+  display: flex;
+  gap: 8px;
+  padding: 2px 4px 6px;
+}
+
+.kb-doc-select-actions button {
+  border: 0;
+  background: transparent;
+  color: var(--color-primary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  padding: 0 2px;
+}
+
+.kb-doc-select-actions button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.kb-doc-select-empty {
+  margin: 0;
+  padding: 6px 4px 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.kb-doc-select-options {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 160px;
+  overflow: auto;
+}
+
+.kb-doc-select-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 5px 6px;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.kb-doc-select-option:hover {
+  background: var(--color-sidebar-hover);
+}
+
+.kb-doc-select-option.checked {
+  background: var(--color-primary-soft);
+}
+
+.kb-doc-select-option input {
+  margin-top: 2px;
+  accent-color: var(--color-primary);
+}
+
+.kb-doc-option-name {
+  font-size: 12px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
 
 /* ── Source references (chat citations) ── */
 .sources-panel {

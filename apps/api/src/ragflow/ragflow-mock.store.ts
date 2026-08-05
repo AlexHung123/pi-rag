@@ -189,6 +189,8 @@ export class RagflowMockStore {
       similarityThreshold?: number;
       keyword?: boolean;
       vectorSimilarityWeight?: number;
+      /** RAGFlow document_ids hard filter */
+      documentIds?: string[];
     } = {},
   ): RetrieveHit[] {
     const threshold =
@@ -201,18 +203,22 @@ export class RagflowMockStore {
       keywordMode ||
       (typeof opts.vectorSimilarityWeight === 'number' &&
         opts.vectorSimilarityWeight <= 0.25);
+    const docFilter = opts.documentIds;
+    const allowDocs =
+      docFilter && docFilter.length > 0 ? new Set(docFilter) : null;
     const q = question.toLowerCase().trim();
     const hits: RetrieveHit[] = [];
     for (const dsId of datasetIds) {
       const map = this.docsByDataset.get(dsId);
       if (!map) continue;
       for (const doc of map.values()) {
+        if (allowDocs && !allowDocs.has(doc.id)) continue;
         for (const chunk of doc.chunks) {
           const content = chunk.content || '';
           const lower = content.toLowerCase();
           let score: number;
           if (preferKeyword) {
-            // Exact substring / phrase bias (ES keyword stand-in).
+            // Exact substring / phrase bias (term / keyword path stand-in).
             if (q && lower.includes(q)) {
               score = 0.95;
             } else {
@@ -268,7 +274,7 @@ function overlapScore(q: string, content: string): number {
   return hit / terms.length / 3;
 }
 
-/** Stricter term match for keyword/ES path mock. */
+/** Stricter term match for keyword path mock. */
 function keywordOverlapScore(q: string, content: string): number {
   // Split on whitespace and common code/phrase separators.
   const terms = q

@@ -98,6 +98,7 @@ export class ChatController {
         body.knowledgeBaseIds,
         abort.signal,
         resolvedModelId,
+        body.documentIds,
       )) {
         if (abort.signal.aborted || res.writableEnded || res.destroyed) {
           continue;

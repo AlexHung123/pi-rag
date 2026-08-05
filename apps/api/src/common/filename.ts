@@ -48,3 +48,28 @@ export function decodeMojibakeUtf8(value: string): string {
 
   return value;
 }
+
+/**
+ * Build a Content-Disposition value that Node's HTTP stack will accept.
+ * Non-ASCII (e.g. Chinese) in `filename="..."` throws:
+ *   Invalid character in header content ["Content-Disposition"]
+ * which can abort the response and surface as browser "Failed to fetch".
+ *
+ * Uses RFC 5987 `filename*=UTF-8''...` for the real name and a pure-ASCII
+ * `filename=` fallback for older clients.
+ */
+export function contentDispositionHeader(
+  filename: string,
+  type: 'inline' | 'attachment' = 'inline',
+): string {
+  const raw = (filename || 'download.bin').replace(/[\r\n]/g, '').trim() || 'download.bin';
+  // ASCII fallback: strip non-latin1-safe header chars
+  const ascii =
+    raw
+      .replace(/[^\x20-\x7E]/g, '_')
+      .replace(/["\\]/g, '_')
+      .replace(/\s+/g, ' ')
+      .trim() || 'download.bin';
+  const encoded = encodeURIComponent(raw).replace(/['()]/g, escape);
+  return `${type}; filename="${ascii}"; filename*=UTF-8''${encoded}`;
+}

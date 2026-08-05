@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  contentDispositionHeader,
   decodeMojibakeUtf8,
   fixMulterOriginalName,
 } from '../src/common/filename';
@@ -47,5 +48,48 @@ describe('decodeMojibakeUtf8', () => {
     const french = 'résumé.pdf';
     // "résumé" as real UTF-8 should stay (decode path returns same or better)
     expect(decodeMojibakeUtf8(french)).toBe(french);
+  });
+});
+
+describe('contentDispositionHeader', () => {
+  it('uses ASCII fallback + RFC 5987 for Chinese names', () => {
+    const h = contentDispositionHeader('政策文件.pdf', 'inline');
+    expect(h.startsWith('inline; filename=')).toBe(true);
+    expect(h).toContain("filename*=UTF-8''");
+    expect(h).toContain(encodeURIComponent('政策文件.pdf'));
+    // ASCII filename= part must not contain raw CJK
+    const asciiPart = h.match(/filename="([^"]*)"/)?.[1] || '';
+    expect(asciiPart).not.toMatch(/[\u4e00-\u9fff]/);
+  });
+
+  it('keeps pure ASCII filenames readable', () => {
+    const h = contentDispositionHeader('report v1.pdf', 'attachment');
+    expect(h).toBe(
+      'attachment; filename="report v1.pdf"; filename*=UTF-8\'\'report%20v1.pdf',
+    );
+  });
+
+  it('is accepted by Node setHeader (no throw)', () => {
+    const http = require('http') as typeof import('http');
+    const h = contentDispositionHeader('測試 檔案.pptx', 'inline');
+    const server = http.createServer((req, res) => {
+      res.setHeader('Content-Disposition', h);
+      res.end('ok');
+    });
+    return new Promise<void>((resolve, reject) => {
+      server.listen(0, async () => {
+        try {
+          const port = (server.address() as { port: number }).port;
+          const r = await fetch(`http://127.0.0.1:${port}`);
+          expect(r.status).toBe(200);
+          expect(await r.text()).toBe('ok');
+          resolve();
+        } catch (e) {
+          reject(e);
+        } finally {
+          server.close();
+        }
+      });
+    });
   });
 });

@@ -61,20 +61,29 @@ export function dedupeHitsById(hits: MappedHit[]): MappedHit[] {
   return Array.from(map.values()).sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
 }
 
+/**
+ * Truncate chunk body for optional display caps.
+ * maxChars <= 0 means no truncation (full text).
+ */
 export function truncateChunk(text: string, maxChars: number): string {
   const t = (text || '').trim();
-  if (t.length <= maxChars) return t;
+  if (maxChars <= 0 || t.length <= maxChars) return t;
   return `${t.slice(0, maxChars)}…`;
 }
 
 /**
  * Human-readable evidence block for the model (not raw JSON dump).
  * Citation indices match CitationSource.index (1-based).
+ *
+ * By default sends full chunk bodies (no per-chunk truncation) so keyword /
+ * retrieve evidence is not cut mid-table or mid-sentence.
+ * Pass maxChunkChars > 0 only when an explicit cap is required.
  */
 export function formatEvidenceForModel(
   hits: MappedHit[],
   opts: {
-    maxChunkChars: number;
+    /** <= 0 or omit = full chunk body (default). */
+    maxChunkChars?: number;
     query?: string;
     insufficient?: boolean;
     message?: string;
@@ -99,13 +108,16 @@ export function formatEvidenceForModel(
     .filter(Boolean)
     .join('\n');
 
+  // 0 / omitted = unlimited — do not starve the model of evidence.
+  const maxChunkChars = opts.maxChunkChars ?? 0;
+
   const blocks = hits.map((h, i) => {
     const n = i + 1;
     const doc = h.documentName || h.documentId || 'unknown document';
     const kb = h.knowledgeBaseName ? ` | KB: ${h.knowledgeBaseName}` : '';
     const score =
       typeof h.score === 'number' ? ` | score=${h.score.toFixed(3)}` : '';
-    const body = truncateChunk(h.content || '', opts.maxChunkChars);
+    const body = truncateChunk(h.content || '', maxChunkChars);
     return `[${n}] ${doc}${kb}${score}\n${body}`;
   });
 

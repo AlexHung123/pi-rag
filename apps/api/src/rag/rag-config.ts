@@ -38,7 +38,10 @@ export type RagRetrievalConfig = {
   vectorSimilarityWeight: number;
   /** Optional RAGFlow rerank model id. */
   rerankId: string | undefined;
-  /** Max characters of each chunk body in the tool text payload. */
+  /**
+   * Max characters of each chunk body in retrieve/keyword tool text.
+   * 0 = unlimited (send full chunk content to the LLM).
+   */
   maxChunkChars: number;
   /** Enable multi-query fan-out from a single agent question. */
   multiQueryEnabled: boolean;
@@ -47,17 +50,16 @@ export type RagRetrievalConfig = {
   /** LLM query rewrite before agent prompt (multi-turn). */
   queryRewriteEnabled: boolean;
   /**
-   * Keyword path: low vector weight → prefer term/ES similarity
-   * (RAGFlow: score = w * vector + (1-w) * term).
+   * Keyword path: RAGFlow vector_similarity_weight (0 = pure term ranking).
+   * Default 0 — matches POST /api/v1/retrieval keyword-style retrieval.
    */
   keywordVectorWeight: number;
-  /** Slightly lower threshold for literal / keyword hits. */
+  /** Drop keyword hits below this similarity (default 0). */
   keywordSimilarityThreshold: number;
   /**
-   * Pass RAGFlow `keyword: true` so retrieval uses ElasticSearch keyword matching
-   * in addition to hybrid ranking.
+   * Keyword path candidate pool (RAGFlow top_k). Default 1024.
    */
-  keywordEnableEs: boolean;
+  keywordTopK: number;
   /**
    * P1d: attach previous/next chunk from listChunks order for top hits.
    * Uses document list order (stable); fail-open if chunk not found.
@@ -72,9 +74,13 @@ export type RagRetrievalConfig = {
 };
 
 export function getRagRetrievalConfig(): RagRetrievalConfig {
-  const pageSize = Math.min(20, Math.max(1, envInt('RAG_PAGE_SIZE', 10)));
-  // Over-retrieve: default ~3x page size, cap 50 (RAGFlow-friendly).
-  const topK = Math.min(50, Math.max(pageSize, envInt('RAG_TOP_K', pageSize * 3)));
+  // Evidence chunks returned to the LLM (retrieve/keyword after filter).
+  const pageSize = Math.min(50, Math.max(1, envInt('RAG_PAGE_SIZE', 50)));
+  // Over-retrieve candidate pool for semantic path (must be >= pageSize).
+  const topK = Math.min(
+    150,
+    Math.max(pageSize, envInt('RAG_TOP_K', Math.min(150, pageSize * 3))),
+  );
   return {
     pageSize,
     topK,
@@ -87,24 +93,33 @@ export function getRagRetrievalConfig(): RagRetrievalConfig {
       Math.max(0, envFloat('RAG_VECTOR_SIMILARITY_WEIGHT', 0.7)),
     ),
     rerankId: (process.env.RAG_RERANK_ID || '').trim() || undefined,
-    maxChunkChars: Math.min(
-      8000,
-      Math.max(200, envInt('RAG_MAX_CHUNK_CHARS', 1200)),
-    ),
+    // 0 = no per-chunk truncation for tool evidence (full body to LLM).
+    // Set RAG_MAX_CHUNK_CHARS>0 only if you need a hard cap (legacy).
+    maxChunkChars: Math.max(0, envInt('RAG_MAX_CHUNK_CHARS', 0)),
     multiQueryEnabled: envBool('RAG_MULTI_QUERY', true),
     multiQueryMax: Math.min(5, Math.max(1, envInt('RAG_MULTI_QUERY_MAX', 3))),
     // Off by default: agent builds its own retrieval questions from history.
     queryRewriteEnabled: envBool('RAG_QUERY_REWRITE', false),
     keywordVectorWeight: Math.min(
       1,
-      Math.max(0, envFloat('RAG_KEYWORD_VECTOR_WEIGHT', 0.1)),
+      Math.max(0, envFloat('RAG_KEYWORD_VECTOR_WEIGHT', 0)),
     ),
     keywordSimilarityThreshold: Math.min(
       1,
-      Math.max(0, envFloat('RAG_KEYWORD_SIMILARITY_THRESHOLD', 0.1)),
+      Math.max(0, envFloat('RAG_KEYWORD_SIMILARITY_THRESHOLD', 0)),
     ),
-    keywordEnableEs: envBool('RAG_KEYWORD_ENABLE_ES', true),
-    adjacentExpandEnabled: envBool('RAG_ADJACENT_EXPAND', true),
+    // Prefer RAG_KEYWORD_TOP_K; accept legacy RAG_KEYWORD_ES_TOP_K as alias.
+    keywordTopK: Math.min(
+      5000,
+      Math.max(
+        1,
+        envInt(
+          'RAG_KEYWORD_TOP_K',
+          envInt('RAG_KEYWORD_ES_TOP_K', 1024),
+        ),
+      ),
+    ),
+    adjacentExpandEnabled: envBool('RAG_ADJACENT_EXPAND', false),
     adjacentExpandMaxHits: Math.min(
       10,
       Math.max(1, envInt('RAG_ADJACENT_EXPAND_MAX_HITS', 3)),

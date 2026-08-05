@@ -52,7 +52,14 @@ export type RetrieveHit = {
   content: string;
   documentId?: string;
   documentName?: string;
+  /** Overall similarity (RAGFlow `similarity` / `score`). */
   score?: number;
+  /** Term/full-text similarity when RAGFlow returns `term_similarity`. */
+  termSimilarity?: number;
+  /** Vector similarity when RAGFlow returns `vector_similarity`. */
+  vectorSimilarity?: number;
+  /** Highlight HTML with matched terms in <em> (when highlight=true). */
+  highlight?: string;
   datasetId?: string;
   /** PDF highlight boxes when returned by retrieval. */
   positions?: RagflowChunkPosition[];
@@ -62,6 +69,8 @@ export type RetrieveHit = {
 export type RetrieveOptions = {
   datasetIds: string[];
   question: string;
+  /** 1-based page (RAGFlow `page`). */
+  page?: number;
   /** Final page size (chunks returned after RAGFlow ranking). */
   pageSize?: number;
   /**
@@ -78,8 +87,26 @@ export type RetrieveOptions = {
   /** Optional RAGFlow rerank model id. */
   rerankId?: string;
   /**
-   * When true, RAGFlow enables ElasticSearch keyword-based matching
+   * When true, RAGFlow enables extra keyword-based matching
    * (`keyword: true` on POST /api/v1/retrieval).
    */
   keyword?: boolean;
+  /** When true, RAGFlow wraps matched terms in the returned content. */
+  highlight?: boolean;
+};
+
+/**
+ * Options for keyword_search via RAGFlow POST /api/v1/retrieval
+ * (pure term ranking: vector_similarity_weight=0, highlight=true).
+ */
+export type KeywordSearchOptions = {
+  datasetIds: string[];
+  /** Keyword / name / code / phrase to match. */
+  question: string;
+  /** Optional RAGFlow document ids hard filter. */
+  documentIds?: string[];
+  /** Chunks returned (RAGFlow page_size). */
+  pageSize?: number;
+  /** Candidate pool (RAGFlow top_k, default RAG_KEYWORD_TOP_K). */
+  topK?: number;
 };

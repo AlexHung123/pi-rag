@@ -35,11 +35,20 @@ async function resolveDocument(
   const kbId = source.knowledgeBaseId;
   if (!kbId) return null;
 
+  // Prefer direct get via list match; list is cheap and needed for name fallback.
   const { items } = await docApi.list(kbId);
 
   if (source.appDocumentId) {
     const byId = items.find((d) => d.id === source.appDocumentId);
     if (byId) return { kbId, document: byId };
+  }
+
+  // RAGFlow document id (from retrieval hit) → app document
+  if (source.documentId) {
+    const byRf = items.find(
+      (d) => d.ragflowDocumentId === source.documentId || d.id === source.documentId,
+    );
+    if (byRf) return { kbId, document: byRf };
   }
 
   if (source.documentName) {

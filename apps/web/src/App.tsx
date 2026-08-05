@@ -29,11 +29,13 @@ import AdminUsersPanel from './components/admin/AdminUsersPanel';
 import AdminAgentSessionsPanel from './components/admin/AdminAgentSessionsPanel';
 import {
   chatApi,
+  docApi,
   kbApi,
   modelsApi,
   type ChatMessage,
   type CitationSource,
   type Conversation,
+  type DocumentItem,
   type KnowledgeBase,
 } from './services/api';
 
@@ -62,6 +64,14 @@ export default function App() {
   const [error, setError] = useState('');
   const [knowledgeBases, setKnowledgeBases] = useState<KnowledgeBase[]>([]);
   const [selectedKbIds, setSelectedKbIds] = useState<string[]>([]);
+  const [selectedDocIds, setSelectedDocIds] = useState<string[]>([]);
+  const [expandedKbIds, setExpandedKbIds] = useState<string[]>([]);
+  const [kbDocCache, setKbDocCache] = useState<Record<string, DocumentItem[]>>(
+    {},
+  );
+  const [kbDocsLoading, setKbDocsLoading] = useState<Record<string, boolean>>(
+    {},
+  );
   const [kbPickerOpen, setKbPickerOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [availableModels, setAvailableModels] = useState<
@@ -144,6 +154,10 @@ export default function App() {
     setAgentProcess(null);
     setKnowledgeBases([]);
     setSelectedKbIds([]);
+    setSelectedDocIds([]);
+    setExpandedKbIds([]);
+    setKbDocCache({});
+    setKbDocsLoading({});
     setKbPickerOpen(false);
     setModelPickerOpen(false);
     setAvailableModels([]);
@@ -301,13 +315,85 @@ export default function App() {
     }
   }, [user, workspace]);
 
+  /** Indexed / ready for chat — only these are selectable. */
+  const isDocReady = (d: DocumentItem) =>
+    d.status === 'done' &&
+    (d.ragflowDocumentId != null || d.chunkCount > 0);
+
+  const readyDocsForKb = (kbId: string) =>
+    (kbDocCache[kbId] || []).filter(isDocReady);
+
+  const loadKbDocuments = useCallback(async (kbId: string) => {
+    setKbDocsLoading((prev) => ({ ...prev, [kbId]: true }));
+    try {
+      const res = await docApi.list(kbId);
+      setKbDocCache((prev) => ({
+        ...prev,
+        [kbId]: Array.isArray(res.items) ? res.items : [],
+      }));
+    } catch {
+      setKbDocCache((prev) => ({ ...prev, [kbId]: prev[kbId] || [] }));
+    } finally {
+      setKbDocsLoading((prev) => ({ ...prev, [kbId]: false }));
+    }
+  }, []);
+
+  const toggleKbExpand = (kbId: string) => {
+    setExpandedKbIds((prev) => {
+      const open = prev.includes(kbId);
+      if (open) return prev.filter((x) => x !== kbId);
+      if (!kbDocCache[kbId] && !kbDocsLoading[kbId]) {
+        void loadKbDocuments(kbId);
+      } else {
+        // Refresh list on expand so newly indexed docs appear.
+        void loadKbDocuments(kbId);
+      }
+      return [...prev, kbId];
+    });
+  };
+
   const toggleKb = (id: string) => {
+    setSelectedKbIds((prev) => {
+      if (prev.includes(id)) {
+        const docs = kbDocCache[id] || [];
+        if (docs.length) {
+          const remove = new Set(docs.map((d) => d.id));
+          setSelectedDocIds((dprev) => dprev.filter((x) => !remove.has(x)));
+        }
+        return prev.filter((x) => x !== id);
+      }
+      return [...prev, id];
+    });
+  };
+
+  const toggleDoc = (kbId: string, docId: string) => {
+    setSelectedDocIds((prev) => {
+      if (prev.includes(docId)) return prev.filter((x) => x !== docId);
+      return [...prev, docId];
+    });
     setSelectedKbIds((prev) =>
-      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id],
+      prev.includes(kbId) ? prev : [...prev, kbId],
     );
   };
 
-  const clearKbSelection = () => setSelectedKbIds([]);
+  const selectAllDocs = (kbId: string) => {
+    const ready = readyDocsForKb(kbId).map((d) => d.id);
+    if (!ready.length) return;
+    setSelectedDocIds((prev) => [...new Set([...prev, ...ready])]);
+    setSelectedKbIds((prev) =>
+      prev.includes(kbId) ? prev : [...prev, kbId],
+    );
+  };
+
+  const clearDocs = (kbId: string) => {
+    const all = new Set((kbDocCache[kbId] || []).map((d) => d.id));
+    setSelectedDocIds((prev) => prev.filter((id) => !all.has(id)));
+  };
+
+  const clearKbSelection = () => {
+    setSelectedKbIds([]);
+    setSelectedDocIds([]);
+  };
 
   const selectAllKbs = () =>
     setSelectedKbIds(knowledgeBases.map((k) => k.id));
@@ -362,11 +448,15 @@ export default function App() {
       const modelForSend = selectedModelId.trim();
       const streamOpts: {
         knowledgeBaseIds?: string[];
+        documentIds?: string[];
         modelId?: string;
         signal: AbortSignal;
       } = { signal: ac.signal };
       if (selectedKbIds.length > 0) {
         streamOpts.knowledgeBaseIds = selectedKbIds;
+      }
+      if (selectedDocIds.length > 0 && selectedKbIds.length > 0) {
+        streamOpts.documentIds = selectedDocIds;
       }
       if (modelForSend) {
         streamOpts.modelId = modelForSend;
@@ -558,6 +648,19 @@ export default function App() {
   const selectedKbNames = knowledgeBases
     .filter((k) => selectedKbIds.includes(k.id))
     .map((k) => k.name);
+  const knowledgePillLabel = (() => {
+    if (selectedKbIds.length === 0) return 'Knowledge';
+    if (selectedDocIds.length > 0) {
+      if (selectedKbIds.length === 1) {
+        const name = selectedKbNames[0] || '1 KB';
+        const short = name.length > 18 ? `${name.slice(0, 16)}…` : name;
+        return `${short} · ${selectedDocIds.length} doc${selectedDocIds.length === 1 ? '' : 's'}`;
+      }
+      return `${selectedDocIds.length} doc${selectedDocIds.length === 1 ? '' : 's'}`;
+    }
+    if (selectedKbIds.length === 1) return selectedKbNames[0] || '1 KB';
+    return `${selectedKbIds.length} KBs`;
+  })();
   const activeModelId = selectedModelId || defaultModelId;
   const activeModelName =
     availableModels.find((m) => m.id === activeModelId)?.name ||
@@ -724,6 +827,12 @@ export default function App() {
                       <span aria-hidden>×</span>
                     </button>
                   ))}
+                  {selectedDocIds.length > 0 && (
+                    <span className="kb-chip kb-chip-docs" title="Document filter active">
+                      {selectedDocIds.length} doc
+                      {selectedDocIds.length === 1 ? '' : 's'}
+                    </span>
+                  )}
                   <button
                     type="button"
                     className="kb-chip-clear"
@@ -765,7 +874,7 @@ export default function App() {
                 <div className="composer-toolbar-left" ref={kbPickerRef}>
                   <button
                     type="button"
-                    className={`composer-tool-pill ${selectedKbIds.length ? 'has-selection' : ''}`}
+                    className={`composer-tool-pill ${selectedKbIds.length || selectedDocIds.length ? 'has-selection' : ''}`}
                     onClick={() => {
                       setKbPickerOpen((v) => !v);
                       setModelPickerOpen(false);
@@ -774,7 +883,7 @@ export default function App() {
                     disabled={sending}
                     aria-expanded={kbPickerOpen}
                     aria-haspopup="listbox"
-                    title="Select knowledge bases"
+                    title="Select knowledge bases and documents"
                   >
                     <span className="composer-tool-icon" aria-hidden>
                       <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
@@ -787,11 +896,7 @@ export default function App() {
                       </svg>
                     </span>
                     <span className="composer-tool-label">
-                      {selectedKbIds.length === 0
-                        ? 'Knowledge'
-                        : selectedKbIds.length === 1
-                          ? selectedKbNames[0] || '1 KB'
-                          : `${selectedKbIds.length} KBs`}
+                      {knowledgePillLabel}
                     </span>
                     <span className="composer-tool-chevron" aria-hidden>
                       ▾
@@ -815,7 +920,7 @@ export default function App() {
                         <button
                           type="button"
                           onClick={clearKbSelection}
-                          disabled={!selectedKbIds.length}
+                          disabled={!selectedKbIds.length && !selectedDocIds.length}
                         >
                           Clear
                         </button>
@@ -828,42 +933,130 @@ export default function App() {
                         <ul className="kb-select-options">
                           {knowledgeBases.map((kb) => {
                             const checked = selectedKbIds.includes(kb.id);
+                            const expanded = expandedKbIds.includes(kb.id);
+                            const readyDocs = readyDocsForKb(kb.id);
+                            const selectedInKb = readyDocs.filter((d) =>
+                              selectedDocIds.includes(d.id),
+                            ).length;
+                            const loading = Boolean(kbDocsLoading[kb.id]);
                             return (
-                              <li key={kb.id}>
-                                <label
+                              <li key={kb.id} className="kb-select-item">
+                                <div
                                   className={`kb-select-option ${checked ? 'checked' : ''}`}
                                 >
-                                  <input
-                                    type="checkbox"
-                                    checked={checked}
-                                    onChange={() => toggleKb(kb.id)}
-                                  />
-                                  <span className="kb-option-text">
-                                    <span className="kb-option-name">
-                                      {kb.name}
-                                      <span
-                                        className={`kb-visibility-badge sm ${kb.visibility === 'public' ? 'public' : 'private'}`}
-                                      >
-                                        {kb.visibility === 'public'
-                                          ? 'Public'
-                                          : 'Private'}
+                                  <button
+                                    type="button"
+                                    className="kb-expand-btn"
+                                    aria-expanded={expanded}
+                                    aria-label={
+                                      expanded
+                                        ? `Collapse documents in ${kb.name}`
+                                        : `Expand documents in ${kb.name}`
+                                    }
+                                    onClick={(e) => {
+                                      e.preventDefault();
+                                      e.stopPropagation();
+                                      toggleKbExpand(kb.id);
+                                    }}
+                                  >
+                                    {expanded ? '▾' : '▸'}
+                                  </button>
+                                  <label className="kb-select-option-label">
+                                    <input
+                                      type="checkbox"
+                                      checked={checked}
+                                      onChange={() => toggleKb(kb.id)}
+                                    />
+                                    <span className="kb-option-text">
+                                      <span className="kb-option-name">
+                                        {kb.name}
+                                        <span
+                                          className={`kb-visibility-badge sm ${kb.visibility === 'public' ? 'public' : 'private'}`}
+                                        >
+                                          {kb.visibility === 'public'
+                                            ? 'Public'
+                                            : 'Private'}
+                                        </span>
+                                        {selectedInKb > 0 && (
+                                          <span className="kb-doc-count-badge">
+                                            {selectedInKb} doc
+                                            {selectedInKb === 1 ? '' : 's'}
+                                          </span>
+                                        )}
                                       </span>
+                                      {kb.description ? (
+                                        <span className="kb-option-desc">
+                                          {kb.description}
+                                        </span>
+                                      ) : !kb.isOwner && kb.ownerUsername ? (
+                                        <span className="kb-option-desc">
+                                          by {kb.ownerUsername}
+                                          {kb.myRole === 'editor' ||
+                                          kb.myRole === 'viewer'
+                                            ? ` · ${kb.myRole}`
+                                            : ''}
+                                        </span>
+                                      ) : null}
                                     </span>
-                                    {kb.description ? (
-                                      <span className="kb-option-desc">
-                                        {kb.description}
-                                      </span>
-                                    ) : !kb.isOwner && kb.ownerUsername ? (
-                                      <span className="kb-option-desc">
-                                        by {kb.ownerUsername}
-                                        {kb.myRole === 'editor' ||
-                                        kb.myRole === 'viewer'
-                                          ? ` · ${kb.myRole}`
-                                          : ''}
-                                      </span>
-                                    ) : null}
-                                  </span>
-                                </label>
+                                  </label>
+                                </div>
+                                {expanded && (
+                                  <div className="kb-doc-select">
+                                    <div className="kb-doc-select-actions">
+                                      <button
+                                        type="button"
+                                        onClick={() => selectAllDocs(kb.id)}
+                                        disabled={loading || !readyDocs.length}
+                                      >
+                                        Select all
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => clearDocs(kb.id)}
+                                        disabled={!selectedInKb}
+                                      >
+                                        Clear
+                                      </button>
+                                    </div>
+                                    {loading && !kbDocCache[kb.id] ? (
+                                      <p className="kb-doc-select-empty">
+                                        Loading documents…
+                                      </p>
+                                    ) : readyDocs.length === 0 ? (
+                                      <p className="kb-doc-select-empty">
+                                        No indexed documents yet.
+                                      </p>
+                                    ) : (
+                                      <ul className="kb-doc-select-options">
+                                        {readyDocs.map((doc) => {
+                                          const docChecked =
+                                            selectedDocIds.includes(doc.id);
+                                          return (
+                                            <li key={doc.id}>
+                                              <label
+                                                className={`kb-doc-select-option ${docChecked ? 'checked' : ''}`}
+                                              >
+                                                <input
+                                                  type="checkbox"
+                                                  checked={docChecked}
+                                                  onChange={() =>
+                                                    toggleDoc(kb.id, doc.id)
+                                                  }
+                                                />
+                                                <span
+                                                  className="kb-doc-option-name"
+                                                  title={doc.name}
+                                                >
+                                                  {doc.name}
+                                                </span>
+                                              </label>
+                                            </li>
+                                          );
+                                        })}
+                                      </ul>
+                                    )}
+                                  </div>
+                                )}
                               </li>
                             );
                           })}

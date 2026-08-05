@@ -62,6 +62,8 @@ export type AgentStreamEvent =
 
 export type AgentRunOptions = {
   knowledgeBaseIds?: string[];
+  /** Optional UI document filter (portal UUIDs); server-enforced via RAGFlow document_ids. */
+  documentIds?: string[];
   /** Client disconnect / Stop button — aborts the in-flight agent run. */
   signal?: AbortSignal;
   /** Allowlisted model id for this prompt (defaults to OPENAI_MODEL). */
@@ -129,17 +131,20 @@ export class AgentService {
       session.agent.state.model = buildPiModel(modelId) as never;
     }
 
-    // Keep tool closures in sync with this turn's user text (name spelling etc.).
+    // Keep tool closures in sync with this turn's UI selection + user text.
+    const selectedKbIds = (options.knowledgeBaseIds || []).filter(Boolean);
+    const selectedDocIds = (options.documentIds || []).filter(Boolean);
     const turnCtx = (session.agent as PooledAgent & {
       __turnContext?: AgentToolTurnContext;
     }).__turnContext;
     if (turnCtx) {
       turnCtx.latestUserMessage = userMessage;
+      turnCtx.knowledgeBaseIds = selectedKbIds;
+      turnCtx.documentIds = selectedDocIds;
     }
 
     // Order: memory block → selected KB prefix → user message (spec).
     const memoryPrefix = await this.memory.buildPromptPrefix(userId);
-    const selectedKbIds = (options.knowledgeBaseIds || []).filter(Boolean);
     let promptText = userMessage;
     if (selectedKbIds.length) {
       const owned = await this.knowledge.list(userId);
@@ -154,10 +159,38 @@ export class AgentService {
             `query rewrite: "${rewritten.original.slice(0, 60)}" → "${rewritten.rewriteQuery.slice(0, 60)}"`,
           );
         }
+
+        let promptDocs:
+          | Array<{ id: string; name: string; knowledgeBaseId?: string }>
+          | undefined;
+        let entireKbIds: string[] | undefined;
+        if (selectedDocIds.length) {
+          const docs = await this.prisma.document.findMany({
+            where: {
+              id: { in: selectedDocIds },
+              knowledgeBaseId: { in: selected.map((k) => k.id) },
+              status: 'done',
+              ragflowDocumentId: { not: null },
+            },
+            select: { id: true, name: true, knowledgeBaseId: true },
+          });
+          promptDocs = docs.map((d) => ({
+            id: d.id,
+            name: d.name,
+            knowledgeBaseId: d.knowledgeBaseId,
+          }));
+          const kbsWithExplicit = new Set(docs.map((d) => d.knowledgeBaseId));
+          entireKbIds = selected
+            .map((k) => k.id)
+            .filter((id) => !kbsWithExplicit.has(id));
+        }
+
         promptText = `${buildSelectedKbPromptPrefix(selected, {
           rewriteQuery: rewritten.rewritten
             ? rewritten.rewriteQuery
             : undefined,
+          documents: promptDocs,
+          entireKbIds,
         })}${userMessage}`;
       }
     }
@@ -516,7 +549,11 @@ export class AgentService {
     const limit = Number.isFinite(historyLimit) && historyLimit > 0 ? historyLimit : 20;
     const slice = args.history.slice(-limit);
 
-    const turnContext: AgentToolTurnContext = { latestUserMessage: '' };
+    const turnContext: AgentToolTurnContext = {
+      latestUserMessage: '',
+      knowledgeBaseIds: [],
+      documentIds: [],
+    };
     const tools = createUserTools({
       userId: args.userId,
       knowledge: this.knowledge,
