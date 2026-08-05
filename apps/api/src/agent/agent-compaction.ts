@@ -1,10 +1,14 @@
 /**
  * Lightweight context compaction for bare pi-agent-core Agent.
- * Runs before prompt (not mid-turn): estimate tokens → summarize older
- * messages → replace agent.state.messages with summary + recent tail.
+ *
+ * Runs before every LLM call via `transformContext` (including mid-run after
+ * tool results): estimate tokens → cap oversized tool results → summarize
+ * older messages → keep recent tail.
  *
  * Does not use AgentHarness / session tree. Postgres history is unchanged.
  */
+
+import { clipTextToBudget } from '../rag/evidence';
 
 export type CompactableMessage = {
   role: string;
@@ -50,6 +54,21 @@ export function getAgentCompactionSettings(
       500_000,
     ),
   };
+}
+
+/**
+ * Hard cap on a single toolResult message body (chars) during mid-run
+ * transformContext. Defaults to RAG_EVIDENCE_MAX_CHARS (120k) so a single
+ * oversized result that slipped past tool formatting cannot blow the window.
+ */
+export function getMaxToolResultChars(
+  env: NodeJS.ProcessEnv = process.env,
+): number {
+  const fromAgent = envPositiveIntOptional(env.AGENT_MAX_TOOL_RESULT_CHARS);
+  if (fromAgent !== undefined) return fromAgent;
+  const fromRag = envPositiveIntOptional(env.RAG_EVIDENCE_MAX_CHARS);
+  if (fromRag !== undefined) return fromRag;
+  return 120_000;
 }
 
 function envPositiveInt(
@@ -269,10 +288,83 @@ export type CompactResult = {
   hardDrop: boolean;
 };
 
+export type MidRunGuardResult = CompactResult & {
+  /** true when one or more toolResult bodies were head/tail clipped */
+  toolResultsCapped: boolean;
+  /** true when messages array content changed (cap and/or compact) */
+  changed: boolean;
+};
+
 export type SummarizeFn = (
   messagesToSummarize: CompactableMessage[],
   signal?: AbortSignal,
 ) => Promise<string | null>;
+
+/**
+ * Clip individual toolResult / tool message bodies that exceed maxChars.
+ * Returns a new array only when at least one message was modified.
+ */
+export function capOversizedToolResults(
+  messages: CompactableMessage[],
+  maxChars: number,
+): { messages: CompactableMessage[]; capped: boolean } {
+  if (maxChars <= 0 || messages.length === 0) {
+    return { messages, capped: false };
+  }
+
+  let capped = false;
+  const next = messages.map((m) => {
+    if (!isToolResult(m)) return m;
+    const text = textFromContent(m.content);
+    if (text.length <= maxChars) return m;
+    capped = true;
+    const clipped = clipTextToBudget(text, maxChars);
+    return {
+      ...m,
+      content: [{ type: 'text', text: clipped }],
+    };
+  });
+
+  return { messages: capped ? next : messages, capped };
+}
+
+/**
+ * Mid-run / pre-LLM guard used by transformContext:
+ * 1) cap oversized tool results
+ * 2) compact older history when over the token threshold
+ */
+export async function applyMidRunContextGuard(args: {
+  messages: CompactableMessage[];
+  contextWindow: number;
+  settings: AgentCompactionSettings;
+  summarize: SummarizeFn;
+  maxToolResultChars?: number;
+  signal?: AbortSignal;
+}): Promise<MidRunGuardResult> {
+  const maxToolChars =
+    args.maxToolResultChars ?? getMaxToolResultChars();
+  const { messages: afterCap, capped } = capOversizedToolResults(
+    args.messages,
+    maxToolChars,
+  );
+
+  const compact = await compactMessagesIfNeeded({
+    messages: afterCap,
+    contextWindow: args.contextWindow,
+    settings: args.settings,
+    summarize: args.summarize,
+    signal: args.signal,
+  });
+
+  return {
+    ...compact,
+    // tokensBefore should reflect the pre-guard transcript (pre-cap).
+    tokensBefore: estimateMessagesTokens(args.messages),
+    tokensAfter: compact.tokensAfter,
+    toolResultsCapped: capped,
+    changed: capped || compact.compacted,
+  };
+}
 
 /**
  * If over threshold, summarize messages[0..firstKept) and keep the tail.

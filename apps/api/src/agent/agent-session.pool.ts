@@ -47,6 +47,14 @@ export type PooledAgent = {
       }
     | undefined
   >;
+  /**
+   * pi-agent-core: prune/compact AgentMessage[] before each LLM convertToLlm.
+   * Wired at createAgent for mid-run context budget (after tool results).
+   */
+  transformContext?: (
+    messages: Array<{ role: string; content?: unknown }>,
+    signal?: AbortSignal,
+  ) => Promise<Array<{ role: string; content?: unknown }>>;
 };
 
 export type AgentPoolEvent = {

@@ -5,6 +5,7 @@
 
 import type { RagflowChunk } from '../ragflow/ragflow.types';
 import {
+  clipTextToBudget,
   formatEvidenceForModel,
   mappedHitsToCitationSources,
   type CitationSource,
@@ -348,11 +349,25 @@ export async function runSummarizeDocument(opts: {
 
   const body = formatEvidenceForModel(hits, {
     maxChunkChars: cfg.summarizeMaxChunkChars,
+    // Leave room for the header inside the total summarize budget.
+    maxTotalChars:
+      cfg.summarizeMaxTotalChars > 0
+        ? Math.max(1_000, cfg.summarizeMaxTotalChars - header.length - 1)
+        : 0,
     query: `summarize ${opts.doc.documentName}`,
   });
 
+  let text = `${header}\n${body}`;
+  // Final safety clip so one summarize call cannot blow the model context.
+  if (
+    cfg.summarizeMaxTotalChars > 0 &&
+    text.length > cfg.summarizeMaxTotalChars
+  ) {
+    text = clipTextToBudget(text, cfg.summarizeMaxTotalChars);
+  }
+
   return {
-    text: `${header}\n${body}`,
+    text,
     sources,
     details: {
       path: 'full_text',

@@ -26,8 +26,9 @@ import { rewriteQueryForRetrieval } from '../rag/query-rewrite';
 import { mergeCitationSources } from '../rag/evidence';
 import { AgentRunToolGuard } from './agent-run-limits';
 import {
-  compactMessagesIfNeeded,
+  applyMidRunContextGuard,
   getAgentCompactionSettings,
+  getMaxToolResultChars,
   summarizeWithChatCompletions,
   type CompactableMessage,
 } from './agent-compaction';
@@ -320,13 +321,8 @@ export class AgentService {
     session.agent.onPayload = llmDebug.onPayload;
     session.agent.onResponse = llmDebug.onResponse;
 
-    // Lightweight memory compaction (bare Agent; does not touch Postgres).
-    if (!clientAborted && !externalSignal?.aborted) {
-      await this.maybeCompactAgent(session.agent, {
-        conversationId,
-        signal: externalSignal,
-      });
-    }
+    // Context budget: transformContext (wired in createAgent) runs before every
+    // LLM call, including mid-run after tool results — no separate pre-prompt pass.
 
     const promptPromise = session.agent
       .prompt(promptText)
@@ -423,66 +419,6 @@ export class AgentService {
       session.agent.afterToolCall = prevAfter;
       unsubscribe();
       this.pool.release(conversationId);
-    }
-  }
-
-  /**
-   * If in-memory transcript is over the token threshold, summarize older
-   * messages and keep a recent tail on the pooled Agent.
-   */
-  private async maybeCompactAgent(
-    agent: PooledAgent,
-    opts: { conversationId: string; signal?: AbortSignal },
-  ): Promise<void> {
-    const settings = getAgentCompactionSettings();
-    if (!settings.enabled) return;
-
-    const model = agent.state.model as
-      | { id?: string; baseUrl?: string; contextWindow?: number }
-      | undefined;
-    const contextWindow =
-      typeof model?.contextWindow === 'number' && model.contextWindow > 0
-        ? model.contextWindow
-        : 256_000;
-    const baseUrl = String(
-      model?.baseUrl || process.env.OPENAI_BASE_URL || '',
-    ).replace(/\/$/, '');
-    const modelId = String(
-      model?.id || process.env.OPENAI_MODEL || '',
-    ).trim();
-    const apiKey = (process.env.OPENAI_API_KEY || '').trim();
-
-    const current = (agent.state.messages || []) as CompactableMessage[];
-    if (current.length < 4) return;
-
-    try {
-      const result = await compactMessagesIfNeeded({
-        messages: current,
-        contextWindow,
-        settings,
-        signal: opts.signal,
-        summarize: (toSum, signal) =>
-          summarizeWithChatCompletions({
-            baseUrl,
-            apiKey: apiKey || undefined,
-            model: modelId,
-            messagesToSummarize: toSum,
-            signal,
-          }),
-      });
-
-      if (!result.compacted) return;
-
-      agent.state.messages = result.messages as typeof agent.state.messages;
-      this.logger.log(
-        `compaction conv=${opts.conversationId} tokens ${result.tokensBefore}→${result.tokensAfter} ` +
-          `keptFrom=${result.firstKeptIndex} hardDrop=${result.hardDrop}`,
-      );
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      this.logger.warn(
-        `compaction skipped conv=${opts.conversationId}: ${message}`,
-      );
     }
   }
 
@@ -602,7 +538,71 @@ export class AgentService {
       getApiKey: () => bundle.getApiKey(),
       sessionId: args.conversationId,
       toolExecution: 'sequential',
-    }) as unknown as PooledAgent & { __turnContext?: AgentToolTurnContext };
+    }) as unknown as PooledAgent & {
+      __turnContext?: AgentToolTurnContext;
+      transformContext?: (
+        messages: CompactableMessage[],
+        signal?: AbortSignal,
+      ) => Promise<CompactableMessage[]>;
+    };
+
+    // Gate B: before every LLM call (including after tool results mid-run),
+    // cap oversized tool bodies and compact history if over threshold.
+    // transformContext only changes the view for convertToLlm unless we also
+    // write back to agent.state — we do both so the pool stays bounded.
+    agent.transformContext = async (msgs, signal) => {
+      const settings = getAgentCompactionSettings();
+      const model = agent.state.model as
+        | { id?: string; baseUrl?: string; contextWindow?: number }
+        | undefined;
+      const contextWindow =
+        typeof model?.contextWindow === 'number' && model.contextWindow > 0
+          ? model.contextWindow
+          : 256_000;
+      const baseUrl = String(
+        model?.baseUrl || process.env.OPENAI_BASE_URL || '',
+      ).replace(/\/$/, '');
+      const modelId = String(
+        model?.id || process.env.OPENAI_MODEL || '',
+      ).trim();
+      const apiKey = (process.env.OPENAI_API_KEY || '').trim();
+
+      try {
+        const result = await applyMidRunContextGuard({
+          messages: (msgs || []) as CompactableMessage[],
+          contextWindow,
+          settings,
+          maxToolResultChars: getMaxToolResultChars(),
+          signal,
+          summarize: (toSum, sig) =>
+            summarizeWithChatCompletions({
+              baseUrl,
+              apiKey: apiKey || undefined,
+              model: modelId,
+              messagesToSummarize: toSum,
+              signal: sig,
+            }),
+        });
+
+        if (result.changed) {
+          // Persist on the pooled agent so subsequent user turns start clean.
+          agent.state.messages = result.messages as typeof agent.state.messages;
+          this.logger.log(
+            `context-guard conv=${args.conversationId} mid-run` +
+              ` tokens ${result.tokensBefore}→${result.tokensAfter}` +
+              ` compacted=${result.compacted} toolCap=${result.toolResultsCapped}` +
+              ` keptFrom=${result.firstKeptIndex} hardDrop=${result.hardDrop}`,
+          );
+        }
+        return result.messages as CompactableMessage[];
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        this.logger.warn(
+          `context-guard mid-run skipped conv=${args.conversationId}: ${message}`,
+        );
+        return msgs as CompactableMessage[];
+      }
+    };
 
     agent.__turnContext = turnContext;
     return agent;

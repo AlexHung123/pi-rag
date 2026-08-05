@@ -1,11 +1,14 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
+  applyMidRunContextGuard,
   buildSummaryUserMessage,
+  capOversizedToolResults,
   compactMessagesIfNeeded,
   estimateMessageTokens,
   estimateMessagesTokens,
   findFirstKeptIndex,
   getAgentCompactionSettings,
+  getMaxToolResultChars,
   resolveCompactionThreshold,
   shouldCompact,
   type CompactableMessage,
@@ -257,5 +260,95 @@ describe('estimateMessagesTokens', () => {
     expect(estimateMessagesTokens(msgs)).toBe(
       estimateMessageTokens(msgs[0]) + estimateMessageTokens(msgs[1]),
     );
+  });
+});
+
+describe('capOversizedToolResults', () => {
+  it('no-ops when under maxChars', () => {
+    const msgs = [user('hi'), toolResult('small')];
+    const { messages, capped } = capOversizedToolResults(msgs, 1000);
+    expect(capped).toBe(false);
+    expect(messages).toBe(msgs);
+  });
+
+  it('clips toolResult bodies over maxChars', () => {
+    const big = 'HEAD' + 'z'.repeat(5000) + 'TAIL';
+    const msgs = [user('q'), assistant('call'), toolResult(big)];
+    const { messages, capped } = capOversizedToolResults(msgs, 200);
+    expect(capped).toBe(true);
+    expect(messages).not.toBe(msgs);
+    const text = String(
+      Array.isArray(messages[2].content)
+        ? (messages[2].content as Array<{ text?: string }>)[0]?.text
+        : messages[2].content,
+    );
+    expect(text.length).toBeLessThanOrEqual(200);
+    expect(text).toContain('truncated');
+    expect(text.startsWith('HEAD')).toBe(true);
+    expect(text.endsWith('TAIL')).toBe(true);
+  });
+});
+
+describe('getMaxToolResultChars', () => {
+  it('defaults to 120000 when unset', () => {
+    expect(getMaxToolResultChars({})).toBe(120_000);
+  });
+
+  it('prefers AGENT_MAX_TOOL_RESULT_CHARS over RAG_EVIDENCE_MAX_CHARS', () => {
+    expect(
+      getMaxToolResultChars({
+        AGENT_MAX_TOOL_RESULT_CHARS: '50000',
+        RAG_EVIDENCE_MAX_CHARS: '90000',
+      }),
+    ).toBe(50_000);
+  });
+});
+
+describe('applyMidRunContextGuard', () => {
+  it('caps tool results even when under compaction threshold', async () => {
+    const big = 'x'.repeat(10_000);
+    const messages = [user('q'), assistant('t'), toolResult(big)];
+    const summarize = vi.fn(async () => 'SUMMARY');
+    const result = await applyMidRunContextGuard({
+      messages,
+      contextWindow: 256_000,
+      settings: {
+        enabled: true,
+        reserveTokens: 16_384,
+        keepRecentTokens: 20_000,
+        thresholdTokens: 1_000_000, // never compact
+      },
+      maxToolResultChars: 500,
+      summarize,
+    });
+    expect(result.toolResultsCapped).toBe(true);
+    expect(result.compacted).toBe(false);
+    expect(result.changed).toBe(true);
+    expect(summarize).not.toHaveBeenCalled();
+    expect(result.tokensAfter).toBeLessThan(result.tokensBefore);
+  });
+
+  it('compacts when over threshold after cap', async () => {
+    const messages = [
+      user(padTokens(8_000)),
+      assistant(padTokens(8_000)),
+      user('latest'),
+      assistant('answer'),
+    ];
+    const result = await applyMidRunContextGuard({
+      messages,
+      contextWindow: 256_000,
+      settings: {
+        enabled: true,
+        reserveTokens: 1_000,
+        keepRecentTokens: 200,
+        thresholdTokens: 100,
+      },
+      maxToolResultChars: 50_000,
+      summarize: async () => '## User goals\n- mid-run',
+    });
+    expect(result.changed).toBe(true);
+    expect(result.compacted).toBe(true);
+    expect(String(result.messages[0].content)).toContain('mid-run');
   });
 });

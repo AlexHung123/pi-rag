@@ -72,18 +72,39 @@ export function truncateChunk(text: string, maxChars: number): string {
 }
 
 /**
+ * Head+tail clip for a single oversized text blob (tool results / summarize).
+ * maxChars <= 0 means no truncation.
+ */
+export function clipTextToBudget(text: string, maxChars: number): string {
+  const t = text || '';
+  if (maxChars <= 0 || t.length <= maxChars) return t;
+  if (maxChars < 64) return `${t.slice(0, maxChars)}…`;
+  const marker = '\n\n…[truncated to fit context budget]…\n\n';
+  const budget = maxChars - marker.length;
+  const head = Math.floor(budget * 0.6);
+  const tail = Math.max(0, budget - head);
+  return `${t.slice(0, head)}${marker}${t.slice(t.length - tail)}`;
+}
+
+/**
  * Human-readable evidence block for the model (not raw JSON dump).
  * Citation indices match CitationSource.index (1-based).
  *
- * By default sends full chunk bodies (no per-chunk truncation) so keyword /
- * retrieve evidence is not cut mid-table or mid-sentence.
- * Pass maxChunkChars > 0 only when an explicit cap is required.
+ * Applies per-chunk maxChunkChars and optional maxTotalChars so a single
+ * retrieve/keyword tool result cannot blow the model context window.
+ * maxChunkChars / maxTotalChars <= 0 means no cap on that dimension.
  */
 export function formatEvidenceForModel(
   hits: MappedHit[],
   opts: {
-    /** <= 0 or omit = full chunk body (default). */
+    /** <= 0 or omit = full chunk body. */
     maxChunkChars?: number;
+    /**
+     * Hard cap on total formatted evidence characters (header + blocks).
+     * When exceeded, later hits are omitted and a truncation note is appended.
+     * <= 0 or omit = no total budget.
+     */
+    maxTotalChars?: number;
     query?: string;
     insufficient?: boolean;
     message?: string;
@@ -108,20 +129,63 @@ export function formatEvidenceForModel(
     .filter(Boolean)
     .join('\n');
 
-  // 0 / omitted = unlimited — do not starve the model of evidence.
   const maxChunkChars = opts.maxChunkChars ?? 0;
+  const maxTotalChars = opts.maxTotalChars ?? 0;
 
-  const blocks = hits.map((h, i) => {
+  const blocks: string[] = [];
+  let used = header.length;
+  let omitted = 0;
+
+  for (let i = 0; i < hits.length; i++) {
+    const h = hits[i]!;
     const n = i + 1;
     const doc = h.documentName || h.documentId || 'unknown document';
     const kb = h.knowledgeBaseName ? ` | KB: ${h.knowledgeBaseName}` : '';
     const score =
       typeof h.score === 'number' ? ` | score=${h.score.toFixed(3)}` : '';
-    const body = truncateChunk(h.content || '', maxChunkChars);
-    return `[${n}] ${doc}${kb}${score}\n${body}`;
-  });
+    let body = truncateChunk(h.content || '', maxChunkChars);
+    let block = `[${n}] ${doc}${kb}${score}\n${body}`;
+    const sep = blocks.length ? 2 : 1; // \n\n between blocks, or one \n after header
 
-  return `${header}\n${blocks.join('\n\n')}`;
+    if (maxTotalChars > 0 && used + sep + block.length > maxTotalChars) {
+      // Try to keep a partial first/current block if nothing fits yet.
+      const room = maxTotalChars - used - sep;
+      if (blocks.length === 0 && room > 80) {
+        const meta = `[${n}] ${doc}${kb}${score}\n`;
+        const bodyRoom = Math.max(0, room - meta.length - 1);
+        body = truncateChunk(h.content || '', Math.min(
+          maxChunkChars > 0 ? maxChunkChars : bodyRoom,
+          bodyRoom,
+        ));
+        block = `${meta}${body}`;
+        if (block.length > room) {
+          block = clipTextToBudget(block, room);
+        }
+        blocks.push(block);
+        used += sep + block.length;
+        omitted = hits.length - 1;
+      } else {
+        omitted = hits.length - i;
+      }
+      break;
+    }
+
+    blocks.push(block);
+    used += sep + block.length;
+  }
+
+  let out = `${header}\n${blocks.join('\n\n')}`;
+  if (omitted > 0) {
+    const note =
+      `\n\n… truncated ${omitted} more chunk(s) to fit context budget` +
+      (maxTotalChars > 0 ? ` (max ~${maxTotalChars} chars).` : '.');
+    if (maxTotalChars <= 0 || out.length + note.length <= maxTotalChars) {
+      out += note;
+    } else {
+      out = clipTextToBudget(out + note, maxTotalChars);
+    }
+  }
+  return out;
 }
 
 export function mappedHitsToCitationSources(hits: MappedHit[]): CitationSource[] {

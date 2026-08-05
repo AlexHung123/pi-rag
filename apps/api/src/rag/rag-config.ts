@@ -43,6 +43,12 @@ export type RagRetrievalConfig = {
    * 0 = unlimited (send full chunk content to the LLM).
    */
   maxChunkChars: number;
+  /**
+   * Hard cap on total characters of formatted evidence in one tool result
+   * (retrieve_chunks / keyword_search). Hits beyond the budget are omitted.
+   * 0 = no total budget (only per-chunk maxChunkChars applies).
+   */
+  evidenceMaxChars: number;
   /** Enable multi-query fan-out from a single agent question. */
   multiQueryEnabled: boolean;
   /** Max number of search queries (original + expansions). */
@@ -60,17 +66,15 @@ export type RagRetrievalConfig = {
    * Keyword path candidate pool (RAGFlow top_k). Default 1024.
    */
   keywordTopK: number;
-  /**
-   * P1d: attach previous/next chunk from listChunks order for top hits.
-   * Uses document list order (stable); fail-open if chunk not found.
-   */
-  adjacentExpandEnabled: boolean;
-  /** Max primary hits to expand with neighbors. */
-  adjacentExpandMaxHits: number;
   /** listChunks page size when loading a full document for summarize. */
   summarizeListPageSize: number;
   /** Per-chunk body cap when formatting full-text evidence for the agent. */
   summarizeMaxChunkChars: number;
+  /**
+   * Hard cap on total characters of summarize_document tool text
+   * (header + all chunks). 0 = no total budget.
+   */
+  summarizeMaxTotalChars: number;
 };
 
 export function getRagRetrievalConfig(): RagRetrievalConfig {
@@ -93,9 +97,13 @@ export function getRagRetrievalConfig(): RagRetrievalConfig {
       Math.max(0, envFloat('RAG_VECTOR_SIMILARITY_WEIGHT', 0.7)),
     ),
     rerankId: (process.env.RAG_RERANK_ID || '').trim() || undefined,
-    // 0 = no per-chunk truncation for tool evidence (full body to LLM).
-    // Set RAG_MAX_CHUNK_CHARS>0 only if you need a hard cap (legacy).
-    maxChunkChars: Math.max(0, envInt('RAG_MAX_CHUNK_CHARS', 0)),
+    // Per-chunk body cap for retrieve/keyword tool text (default 4000).
+    // Set RAG_MAX_CHUNK_CHARS=0 only if you intentionally want full chunks.
+    maxChunkChars: Math.max(0, envInt('RAG_MAX_CHUNK_CHARS', 4000)),
+    // Total tool-result budget so one keyword/retrieve call cannot blow the
+    // model context window (≈ chars; 120k chars ≈ 30k–60k tokens depending
+    // on language/HTML density). 0 disables the total cap.
+    evidenceMaxChars: Math.max(0, envInt('RAG_EVIDENCE_MAX_CHARS', 120_000)),
     multiQueryEnabled: envBool('RAG_MULTI_QUERY', true),
     multiQueryMax: Math.min(5, Math.max(1, envInt('RAG_MULTI_QUERY_MAX', 3))),
     // Off by default: agent builds its own retrieval questions from history.
@@ -119,11 +127,6 @@ export function getRagRetrievalConfig(): RagRetrievalConfig {
         ),
       ),
     ),
-    adjacentExpandEnabled: envBool('RAG_ADJACENT_EXPAND', false),
-    adjacentExpandMaxHits: Math.min(
-      10,
-      Math.max(1, envInt('RAG_ADJACENT_EXPAND_MAX_HITS', 3)),
-    ),
     summarizeListPageSize: Math.min(
       100,
       Math.max(10, envInt('RAG_SUMMARIZE_LIST_PAGE_SIZE', 50)),
@@ -131,6 +134,11 @@ export function getRagRetrievalConfig(): RagRetrievalConfig {
     summarizeMaxChunkChars: Math.min(
       16_000,
       Math.max(500, envInt('RAG_SUMMARIZE_MAX_CHUNK_CHARS', 4000)),
+    ),
+    // Full-document summarize body budget (default 80k chars).
+    summarizeMaxTotalChars: Math.max(
+      0,
+      envInt('RAG_SUMMARIZE_MAX_TOTAL_CHARS', 80_000),
     ),
   };
 }
