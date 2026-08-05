@@ -75,8 +75,9 @@ Browser → NestJS (auth, ownership) → RAGFlow (parse / chunk / embed / retrie
 | Track | Theme | Spec |
 |-------|--------|------|
 | **Workspace + Analyze** | Session scratch workspace; materialize/query tables; routing for 最/统计/排名 | [`2026-08-06-session-workspace-analyze-design.md`](./2026-08-06-session-workspace-analyze-design.md) · [plan](../plans/2026-08-06-session-workspace-analyze.md) |
+| **Agent positioning** | A = Q&A · B = KB problem solver · C = general Computer agent (out of default scope) | [`2026-08-06-agent-product-positioning.md`](./2026-08-06-agent-product-positioning.md) |
 
-This track complements P0–P3: retrieval stays for prose/lookup; analyze tools cover global aggregates that top-k chunks cannot compute.
+This track complements P0–P3: retrieval stays for prose/lookup; analyze tools cover global aggregates that top-k chunks cannot compute. pi-rag upgrades toward **B**, not Manus-style **C**, by default.
 
 Suggested cadence (flexible):
 

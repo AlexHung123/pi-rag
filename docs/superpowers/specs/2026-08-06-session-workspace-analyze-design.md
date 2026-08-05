@@ -4,7 +4,8 @@
 **Status:** Draft (ready for implementation planning)  
 **Product:** CSB Knowledge Base Portal (`pi-rag`)  
 **Depends on:** Agent tools ([`2026-07-23-pi-rag-design.md`](./2026-07-23-pi-rag-design.md)), pool ([`2026-07-24-pi-agent-pool-design.md`](./2026-07-24-pi-agent-pool-design.md)), RAG quality P0/P1 ([`2026-07-28-rag-quality-roadmap.md`](./2026-07-28-rag-quality-roadmap.md)), compaction ([`2026-08-03-agent-compaction-design.md`](./2026-08-03-agent-compaction-design.md))  
-**Plan checklist:** [`../plans/2026-08-06-session-workspace-analyze.md`](../plans/2026-08-06-session-workspace-analyze.md)
+**Plan checklist:** [`../plans/2026-08-06-session-workspace-analyze.md`](../plans/2026-08-06-session-workspace-analyze.md)  
+**Product positioning (vs Manus-style Computer agent):** [`2026-08-06-agent-product-positioning.md`](./2026-08-06-agent-product-positioning.md)
 
 ---
 
