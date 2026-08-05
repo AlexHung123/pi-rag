@@ -70,6 +70,14 @@ Browser → NestJS (auth, ownership) → RAGFlow (parse / chunk / embed / retrie
 | **P2** | Ingest quality (chunk presets, parse health) | Planned |
 | **P3** | Eval set, retrieval debug, observability | Planned |
 
+### Related track (not a RAGFlow retrieval phase)
+
+| Track | Theme | Spec |
+|-------|--------|------|
+| **Workspace + Analyze** | Session scratch workspace; materialize/query tables; routing for 最/统计/排名 | [`2026-08-06-session-workspace-analyze-design.md`](./2026-08-06-session-workspace-analyze-design.md) · [plan](../plans/2026-08-06-session-workspace-analyze.md) |
+
+This track complements P0–P3: retrieval stays for prose/lookup; analyze tools cover global aggregates that top-k chunks cannot compute.
+
 Suggested cadence (flexible):
 
 ```text
@@ -77,6 +85,7 @@ P0  (done)   hybrid + evidence + rewrite
 P1  (~1–2w)  tools (keyword/list/expand); agent-only
 P2  (~1w)    chunk presets + parse health
 P3  (~1w)    golden set + debug panel
+Analyze P1   session workspace + xlsx/csv query_table (parallel when ready)
 ```
 
 ---

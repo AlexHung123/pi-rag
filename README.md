@@ -14,6 +14,7 @@ Design:
 
 - [`docs/superpowers/specs/2026-07-23-pi-rag-design.md`](docs/superpowers/specs/2026-07-23-pi-rag-design.md)
 - [`docs/superpowers/specs/2026-07-24-pi-agent-pool-design.md`](docs/superpowers/specs/2026-07-24-pi-agent-pool-design.md)
+- [`docs/superpowers/specs/2026-08-06-session-workspace-analyze-design.md`](docs/superpowers/specs/2026-08-06-session-workspace-analyze-design.md) — session workspace + analyze tools (knowledge problem solver)
 
 ## Prerequisites
 
