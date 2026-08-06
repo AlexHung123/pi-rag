@@ -52,7 +52,12 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [sending, setSending] = useState(false);
+  /**
+   * Conversation id currently receiving an SSE stream (null if idle).
+   * Stop / tool panel / composer lock apply only when this matches activeId —
+   * switching chats must not steal the streaming UI into a different thread.
+   */
+  const [streamingConvId, setStreamingConvId] = useState<string | null>(null);
   /** Live + last-turn pi-agent process panel (one overlay per reply). */
   const [agentProcess, setAgentProcess] = useState<AgentProcessState | null>(
     null,
@@ -90,9 +95,63 @@ export default function App() {
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
   /** Monotonic id so slower / out-of-order list responses cannot wipe newer state. */
   const listRequestIdRef = useRef(0);
+  /** True while any conversation has an in-flight stream (for list-refresh guards). */
   const sendingRef = useRef(false);
   /** In-flight chat SSE; Stop aborts this controller. */
   const abortRef = useRef<AbortController | null>(null);
+  /** Mirrors activeId for stream handlers (avoid stale closure / cross-chat writes). */
+  const activeIdRef = useRef<string | null>(null);
+  /** Mirrors messages so send() can seed inflight before React flushes setState. */
+  const messagesRef = useRef<ChatMessage[]>([]);
+  const streamingConvIdRef = useRef<string | null>(null);
+  /**
+   * Live messages + process panel for the streaming conversation.
+   * Survives openConversation / newChat so switching away does not drop the panel
+   * or let SSE updates rewrite another thread's messages.
+   */
+  const inflightRef = useRef<
+    Map<
+      string,
+      { messages: ChatMessage[]; agentProcess: AgentProcessState | null }
+    >
+  >(new Map());
+
+  const selectConversation = useCallback((id: string | null) => {
+    activeIdRef.current = id;
+    setActiveId(id);
+  }, []);
+
+  // Keep messagesRef in sync for synchronous inflight seeding inside send().
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  /** Patch live stream cache; push to React state only when that chat is visible. */
+  const patchInflight = useCallback(
+    (
+      convId: string,
+      patch: (prev: {
+        messages: ChatMessage[];
+        agentProcess: AgentProcessState | null;
+      }) => {
+        messages: ChatMessage[];
+        agentProcess: AgentProcessState | null;
+      },
+    ) => {
+      const prev = inflightRef.current.get(convId) ?? {
+        messages: [],
+        agentProcess: null,
+      };
+      const next = patch(prev);
+      inflightRef.current.set(convId, next);
+      if (activeIdRef.current === convId) {
+        messagesRef.current = next.messages;
+        setMessages(next.messages);
+        setAgentProcess(next.agentProcess);
+      }
+    },
+    [],
+  );
 
   const refreshConversations = useCallback(async () => {
     const reqId = ++listRequestIdRef.current;
@@ -106,9 +165,11 @@ export default function App() {
     if (!sendingRef.current) {
       setActiveId((current) => {
         if (current && !items.some((c) => c.id === current)) {
+          activeIdRef.current = null;
           // Defer message clear to avoid setState-during-setState.
           Promise.resolve().then(() => {
             setMessages((msgs) => (msgs.length ? [] : msgs));
+            setAgentProcess(null);
           });
           return null;
         }
@@ -147,6 +208,7 @@ export default function App() {
   useLayoutEffect(() => {
     listRequestIdRef.current += 1;
     setConversations([]);
+    activeIdRef.current = null;
     setActiveId(null);
     setMessages([]);
     setInput('');
@@ -166,8 +228,10 @@ export default function App() {
     setLocateSource(null);
     setAdminDataset(null);
     setWorkspace('chat');
-    setSending(false);
+    streamingConvIdRef.current = null;
+    setStreamingConvId(null);
     sendingRef.current = false;
+    inflightRef.current.clear();
     abortRef.current?.abort();
     abortRef.current = null;
   }, [userId]);
@@ -187,7 +251,7 @@ export default function App() {
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, sending, agentProcess?.steps.length, agentProcess?.status]);
+  }, [messages, streamingConvId, agentProcess?.steps.length, agentProcess?.status]);
 
   useEffect(() => {
     if (!kbPickerOpen && !modelPickerOpen) return;
@@ -220,24 +284,40 @@ export default function App() {
         return preferredId;
       } catch {
         // Stale or not owned — drop selection; create a fresh conversation below.
-        setActiveId(null);
+        selectConversation(null);
         setMessages([]);
         setAgentProcess(null);
       }
     }
     const c = await chatApi.create();
-    setActiveId(c.id);
+    selectConversation(c.id);
     await refreshConversations();
     return c.id;
   };
 
   const openConversation = async (id: string) => {
     setError('');
-    setAgentProcess(null);
     setWorkspace('chat');
+    // Restore live stream UI if this thread is still generating in the background.
+    const live = inflightRef.current.get(id);
+    if (live && streamingConvIdRef.current === id) {
+      selectConversation(id);
+      setMessages(live.messages);
+      setAgentProcess(live.agentProcess);
+      return;
+    }
+    selectConversation(id);
+    setAgentProcess(null);
     try {
       const detail = await chatApi.get(id);
-      setActiveId(id);
+      // User may have switched away (or stream started) while the fetch was in flight.
+      if (activeIdRef.current !== id) return;
+      const liveAfter = inflightRef.current.get(id);
+      if (liveAfter && streamingConvIdRef.current === id) {
+        setMessages(liveAfter.messages);
+        setAgentProcess(liveAfter.agentProcess);
+        return;
+      }
       setMessages(
         (detail.messages as ChatMessage[]).map((m) => ({
           ...m,
@@ -245,8 +325,10 @@ export default function App() {
         })),
       );
     } catch (e) {
-      setActiveId(null);
+      if (activeIdRef.current !== id) return;
+      selectConversation(null);
       setMessages([]);
+      setAgentProcess(null);
       setError(e instanceof Error ? e.message : String(e));
       await refreshConversations().catch(() => undefined);
     }
@@ -255,10 +337,11 @@ export default function App() {
   const newChat = async () => {
     try {
       setError('');
-      setAgentProcess(null);
+      // Do not abort or clear another chat's in-flight stream / process panel.
       const c = await chatApi.create();
-      setActiveId(c.id);
+      selectConversation(c.id);
       setMessages([]);
+      setAgentProcess(null);
       setWorkspace('chat');
       if (!sidebarOpen) setSidebarOpen(true);
       await refreshConversations();
@@ -269,9 +352,13 @@ export default function App() {
 
   const deleteChat = async (id: string) => {
     try {
+      if (streamingConvIdRef.current === id) {
+        abortRef.current?.abort();
+      }
       await chatApi.remove(id);
-      if (activeId === id) {
-        setActiveId(null);
+      inflightRef.current.delete(id);
+      if (activeIdRef.current === id) {
+        selectConversation(null);
         setMessages([]);
         setAgentProcess(null);
       }
@@ -399,16 +486,18 @@ export default function App() {
     setSelectedKbIds(knowledgeBases.map((k) => k.id));
 
   const stopSending = () => {
-    abortRef.current?.abort();
+    // Only the conversation currently being viewed can stop its own stream.
+    if (streamingConvIdRef.current && streamingConvIdRef.current === activeIdRef.current) {
+      abortRef.current?.abort();
+    }
   };
 
   const send = async () => {
     const content = input.trim();
-    if (!content || sending) return;
+    if (!content || sendingRef.current) return;
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
-    setSending(true);
     sendingRef.current = true;
     setError('');
     setInput('');
@@ -427,7 +516,7 @@ export default function App() {
     try {
       // Ensure we stream against a conversation that still exists for this user.
       // Fixes "conversation not found" when activeId is stale (deleted / desynced).
-      convId = await ensureConversationId(activeId);
+      convId = await ensureConversationId(activeIdRef.current);
 
       const tempUser: ChatMessage = {
         id: `tmp-user-${Date.now()}`,
@@ -442,8 +531,24 @@ export default function App() {
         createdAt: new Date().toISOString(),
       };
       finalMessageId = tempAssistant.id;
-      setAgentProcess(createInitialProcess(tempAssistant.id));
-      setMessages((prev) => [...prev, tempUser, tempAssistant]);
+      const initialProcess = createInitialProcess(tempAssistant.id);
+
+      // Seed inflight synchronously (before any SSE frame) from the visible thread.
+      const seedMessages =
+        activeIdRef.current === convId
+          ? [...messagesRef.current, tempUser, tempAssistant]
+          : [tempUser, tempAssistant];
+      inflightRef.current.set(convId, {
+        messages: seedMessages,
+        agentProcess: initialProcess,
+      });
+      streamingConvIdRef.current = convId;
+      setStreamingConvId(convId);
+      if (activeIdRef.current === convId) {
+        messagesRef.current = seedMessages;
+        setMessages(seedMessages);
+        setAgentProcess(initialProcess);
+      }
 
       const modelForSend = selectedModelId.trim();
       const streamOpts: {
@@ -469,13 +574,16 @@ export default function App() {
           if (frame.event === 'text_delta') {
             if (!sawText) {
               sawText = true;
-              setAgentProcess((p) => applyTextStarted(p));
+              patchInflight(id, (prev) => ({
+                ...prev,
+                agentProcess: applyTextStarted(prev.agentProcess),
+              }));
             }
             assistantText += String(frame.data.delta || '');
             const text = assistantText;
             // Stream text only — never attach Sources mid-stream
-            setMessages((prev) => {
-              const copy = [...prev];
+            patchInflight(id, (prev) => {
+              const copy = [...prev.messages];
               const last = copy[copy.length - 1];
               if (last?.role === 'assistant') {
                 copy[copy.length - 1] = {
@@ -483,11 +591,14 @@ export default function App() {
                   content: text,
                 };
               }
-              return copy;
+              return { ...prev, messages: copy };
             });
           } else if (frame.event === 'tool_start') {
             const name = String(frame.data.name || 'tool');
-            setAgentProcess((p) => applyToolStart(p, name));
+            patchInflight(id, (prev) => ({
+              ...prev,
+              agentProcess: applyToolStart(prev.agentProcess, name),
+            }));
           } else if (frame.event === 'tool_end') {
             const name = String(frame.data.name || 'tool');
             const ok = frame.data.ok !== false;
@@ -495,7 +606,10 @@ export default function App() {
               typeof frame.data.summary === 'string'
                 ? frame.data.summary
                 : undefined;
-            setAgentProcess((p) => applyToolEnd(p, name, ok, summary));
+            patchInflight(id, (prev) => ({
+              ...prev,
+              agentProcess: applyToolEnd(prev.agentProcess, name, ok, summary),
+            }));
           } else if (frame.event === 'agent_status') {
             const kindRaw = String(frame.data.kind || 'info');
             const kind =
@@ -504,7 +618,10 @@ export default function App() {
                 : 'info';
             const message = String(frame.data.message || '');
             if (message) {
-              setAgentProcess((p) => applyAgentStatus(p, kind, message));
+              patchInflight(id, (prev) => ({
+                ...prev,
+                agentProcess: applyAgentStatus(prev.agentProcess, kind, message),
+              }));
             }
             if (kind === 'aborted') {
               userStopped = true;
@@ -524,30 +641,36 @@ export default function App() {
               assistantSources = raw as CitationSource[];
             }
             if (frame.data.aborted === true) userStopped = true;
-            setMessages((prev) => {
-              const copy = [...prev];
+            const midId = finalMessageId;
+            patchInflight(id, (prev) => {
+              const copy = [...prev.messages];
               const last = copy[copy.length - 1];
               if (last?.role === 'assistant') {
                 copy[copy.length - 1] = {
                   ...last,
-                  id: finalMessageId,
+                  id: midId,
                   content: finalContent,
-                  // Still hide until stream ends (sending → false below)
+                  // Still hide until stream ends
                   sources: undefined,
                 };
               }
-              return copy;
+              return {
+                messages: copy,
+                agentProcess: prev.agentProcess
+                  ? {
+                      ...prev.agentProcess,
+                      messageId: midId || prev.agentProcess.messageId,
+                    }
+                  : prev.agentProcess,
+              };
             });
-            setAgentProcess((p) =>
-              p ? { ...p, messageId: finalMessageId || p.messageId } : p,
-            );
           } else if (frame.event === 'done') {
             if (frame.data.aborted === true) userStopped = true;
           } else if (frame.event === 'error') {
             const msg = String(frame.data.message || 'stream error');
             if (/conversation not found/i.test(msg)) {
               sawConversationMissing = true;
-            } else {
+            } else if (activeIdRef.current === id) {
               setError(msg);
             }
           }
@@ -560,13 +683,21 @@ export default function App() {
       // Do not recover after the user explicitly stopped.
       if (missing && !assistantText && !ac.signal.aborted) {
         setError('');
+        // Move inflight cache from the missing id to the fresh conversation.
+        const oldLive = inflightRef.current.get(convId);
         const fresh = await ensureConversationId(null);
+        if (oldLive) {
+          inflightRef.current.delete(convId);
+          inflightRef.current.set(fresh, oldLive);
+        }
+        streamingConvIdRef.current = fresh;
+        setStreamingConvId(fresh);
         convId = fresh;
         missing = await runStream(fresh);
-        if (missing) {
+        if (missing && activeIdRef.current === fresh) {
           setError('conversation not found');
         }
-      } else if (missing && !ac.signal.aborted) {
+      } else if (missing && !ac.signal.aborted && activeIdRef.current === convId) {
         setError('conversation not found');
       }
 
@@ -583,7 +714,7 @@ export default function App() {
         ac.signal.aborted;
       if (aborted) {
         userStopped = true;
-      } else {
+      } else if (!convId || activeIdRef.current === convId) {
         setError(e instanceof Error ? e.message : String(e));
       }
     } finally {
@@ -592,34 +723,44 @@ export default function App() {
       if (defaultModelId) {
         setSelectedModelId(defaultModelId);
       }
-      // Attach Sources only after the stream is fully done (with sending cleared)
+      // Attach Sources only after the stream is fully done.
       const stoppedEmpty =
         userStopped && !assistantText.trim() ? '(stopped)' : '';
-      setMessages((prev) => {
-        const copy = [...prev];
-        const last = copy[copy.length - 1];
-        if (last?.role === 'assistant') {
-          copy[copy.length - 1] = {
-            ...last,
-            id: finalMessageId || last.id,
-            content: assistantText || stoppedEmpty || last.content,
-            // Never inherit sources from a previous message; only this turn's list.
-            sources: assistantSources,
+      const doneConvId = convId;
+      if (doneConvId) {
+        patchInflight(doneConvId, (prev) => {
+          const copy = [...prev.messages];
+          const last = copy[copy.length - 1];
+          if (last?.role === 'assistant') {
+            copy[copy.length - 1] = {
+              ...last,
+              id: finalMessageId || last.id,
+              content: assistantText || stoppedEmpty || last.content,
+              // Never inherit sources from a previous message; only this turn's list.
+              sources: assistantSources,
+            };
+          }
+          const done = applyProcessDone(prev.agentProcess, {
+            sourceCount: assistantSources.length,
+          });
+          return {
+            messages: copy,
+            agentProcess: done
+              ? {
+                  ...done,
+                  messageId: finalMessageId || done.messageId,
+                }
+              : done,
           };
-        }
-        return copy;
-      });
-      setAgentProcess((p) => {
-        const done = applyProcessDone(p, {
-          sourceCount: assistantSources.length,
         });
-        if (!done) return done;
-        return {
-          ...done,
-          messageId: finalMessageId || done.messageId,
-        };
-      });
-      setSending(false);
+        // Stream finished — server has the final messages; drop live cache.
+        // Keep React process panel if still viewing this chat (already applied).
+        inflightRef.current.delete(doneConvId);
+      }
+      if (streamingConvIdRef.current === doneConvId) {
+        streamingConvIdRef.current = null;
+        setStreamingConvId(null);
+      }
       sendingRef.current = false;
     }
   };
@@ -643,6 +784,13 @@ export default function App() {
 
   const activeTitle =
     conversations.find((c) => c.id === activeId)?.title || 'New conversation';
+
+  /** Composer Stop + process panel only for the chat that is actually streaming. */
+  const isActiveStreaming =
+    streamingConvId !== null && streamingConvId === activeId;
+  /** Another thread is generating — block starting a second concurrent stream. */
+  const isOtherStreaming =
+    streamingConvId !== null && streamingConvId !== activeId;
 
   const chatOpen = workspace === 'chat' && sidebarOpen;
   const selectedKbNames = knowledgeBases
@@ -771,7 +919,7 @@ export default function App() {
                   const sources = sourcesFromMessage(m);
                   // Hide Sources on the in-flight reply until streaming finishes
                   const isStreamingReply =
-                    sending &&
+                    isActiveStreaming &&
                     m.role === 'assistant' &&
                     idx === messages.length - 1;
                   const showSources = !isStreamingReply && sources.length > 0;
@@ -821,7 +969,7 @@ export default function App() {
                       className="kb-chip"
                       onClick={() => toggleKb(selectedKbIds[i])}
                       title={`Remove ${name}`}
-                      disabled={sending}
+                      disabled={isActiveStreaming}
                     >
                       {name}
                       <span aria-hidden>×</span>
@@ -837,7 +985,7 @@ export default function App() {
                     type="button"
                     className="kb-chip-clear"
                     onClick={clearKbSelection}
-                    disabled={sending}
+                    disabled={isActiveStreaming}
                   >
                     Clear
                   </button>
@@ -866,7 +1014,7 @@ export default function App() {
                     void send();
                   }
                 }}
-                disabled={sending}
+                disabled={isActiveStreaming}
                 rows={1}
               />
 
@@ -880,7 +1028,7 @@ export default function App() {
                       setModelPickerOpen(false);
                       if (!knowledgeBases.length) void refreshKnowledgeBases();
                     }}
-                    disabled={sending}
+                    disabled={isActiveStreaming}
                     aria-expanded={kbPickerOpen}
                     aria-haspopup="listbox"
                     title="Select knowledge bases and documents"
@@ -1082,7 +1230,7 @@ export default function App() {
                           setModelPickerOpen((v) => !v);
                           setKbPickerOpen(false);
                         }}
-                        disabled={sending}
+                        disabled={isActiveStreaming}
                         aria-expanded={modelPickerOpen}
                         aria-haspopup="listbox"
                         title={activeModelName}
@@ -1130,7 +1278,7 @@ export default function App() {
                     </div>
                   )}
 
-                  {sending ? (
+                  {isActiveStreaming ? (
                     <button
                       className="send-btn stop-btn stop-btn-active"
                       type="button"
@@ -1142,11 +1290,15 @@ export default function App() {
                     </button>
                   ) : (
                     <button
-                      className={`send-btn ${input.trim() ? 'send-btn-active' : ''}`}
+                      className={`send-btn ${input.trim() && !isOtherStreaming ? 'send-btn-active' : ''}`}
                       type="button"
-                      disabled={!input.trim()}
+                      disabled={!input.trim() || isOtherStreaming}
                       onClick={() => void send()}
-                      title="Send message"
+                      title={
+                        isOtherStreaming
+                          ? 'Wait for the other chat to finish, or open it and press Stop'
+                          : 'Send message'
+                      }
                       aria-label="Send message"
                     >
                       Send

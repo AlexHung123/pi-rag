@@ -155,6 +155,8 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   const [chunkTokenNum, setChunkTokenNum] = useState(DEFAULT_CHUNK_TOKEN_NUM)
   const [createOpen, setCreateOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
+  const [emptyOpen, setEmptyOpen] = useState(false)
+  const [emptyName, setEmptyName] = useState('')
   const [uploadMode, setUploadMode] = useState<'files' | 'folder'>('files')
   const [parseOnCreation, setParseOnCreation] = useState(false)
   const [pendingFiles, setPendingFiles] = useState<File[]>([])
@@ -377,6 +379,46 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
     if (fileRef.current) fileRef.current.value = ''
     if (folderRef.current) folderRef.current.value = ''
   }
+
+  const openEmptyModal = () => {
+    setError('')
+    setEmptyName('')
+    setEmptyOpen(true)
+  }
+
+  const closeEmptyModal = () => {
+    if (busy) return
+    setEmptyOpen(false)
+    setEmptyName('')
+    setError('')
+  }
+
+  const saveEmptyDocument = async () => {
+    if (!selectedId) return
+    const name = emptyName.trim()
+    if (!name) {
+      setError('Name is required')
+      return
+    }
+    setBusy(true)
+    setError('')
+    try {
+      const doc = await docApi.createEmpty(selectedId, name)
+      setEmptyOpen(false)
+      setEmptyName('')
+      await loadDocs(selectedId, { quiet: true })
+      await loadKbs({ quiet: true })
+      if (doc?.id) setPreviewDoc(doc)
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  /** Empty virtual docs (0 bytes) use manual chunks — parse is not useful. */
+  const isEmptyVirtualDoc = (doc: DocumentItem) =>
+    doc.sourceType !== 'audio' && (doc.sizeBytes === 0 || !doc.sizeBytes)
 
   const mergePendingFiles = (incoming: FileList | File[]) => {
     const next = Array.from(incoming).filter(f => f && f.size > 0)
@@ -635,7 +677,15 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
   }
 
   const parseableSelected = useMemo(
-    () => filteredDocs.filter(d => selectedDocIds.has(d.id) && d.status !== 'running' && !!d.ragflowDocumentId && !isTranscribing(d)),
+    () =>
+      filteredDocs.filter(
+        d =>
+          selectedDocIds.has(d.id) &&
+          d.status !== 'running' &&
+          !!d.ragflowDocumentId &&
+          !isTranscribing(d) &&
+          !isEmptyVirtualDoc(d)
+      ),
     [filteredDocs, selectedDocIds]
   )
   const runningSelected = useMemo(
@@ -1085,7 +1135,21 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
 
   /* ── Document preview (full page) ── */
   if (previewDoc && selectedId) {
-    return <DocumentPreviewPage kbId={selectedId} document={previewDoc} onBack={() => setPreviewDoc(null)} />
+    return (
+      <DocumentPreviewPage
+        kbId={selectedId}
+        document={previewDoc}
+        canEdit={canEditContent}
+        onBack={() => {
+          setPreviewDoc(null)
+          void loadDocs(selectedId, { quiet: true })
+        }}
+        onDocumentChange={doc => {
+          setPreviewDoc(doc)
+          setDocs(prev => prev.map(d => (d.id === doc.id ? { ...d, ...doc } : d)))
+        }}
+      />
+    )
   }
 
   /* ── My Knowledge Base detail: files table (full page) ── */
@@ -1268,26 +1332,37 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                 onChange={e => setDocSearch(e.target.value)}
               />
               {canEditContent ? (
-                <button
-                  className="btn"
-                  type="button"
-                  disabled={busy || (!!storage && storage.remainingBytes <= 0)}
-                  onClick={openUploadModal}
-                  title={
-                    storage && storage.remainingBytes <= 0
-                      ? 'Storage full — delete files or ask an admin to raise your quota'
-                      : 'Upload files'
-                  }
-                >
-                  + Add file
-                </button>
+                <>
+                  <button
+                    className="btn btn-secondary"
+                    type="button"
+                    disabled={busy}
+                    onClick={openEmptyModal}
+                    title="Create an empty file and add chunks manually"
+                  >
+                    + Empty file
+                  </button>
+                  <button
+                    className="btn"
+                    type="button"
+                    disabled={busy || (!!storage && storage.remainingBytes <= 0)}
+                    onClick={openUploadModal}
+                    title={
+                      storage && storage.remainingBytes <= 0
+                        ? 'Storage full — delete files or ask an admin to raise your quota'
+                        : 'Upload files'
+                    }
+                  >
+                    + Add file
+                  </button>
+                </>
               ) : null}
             </div>
           </div>
 
           {canEditContent ? renderStorageBar() : null}
 
-          {error && !uploadOpen && <p className="error-text">{error}</p>}
+          {error && !uploadOpen && !emptyOpen && <p className="error-text">{error}</p>}
 
           {canEditContent && selectedDocIds.size > 0 && (
             <div className="kb-bulk-bar">
@@ -1469,7 +1544,7 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                               >
                                 Stop
                               </button>
-                            ) : doc.ragflowDocumentId ? (
+                            ) : doc.ragflowDocumentId && !isEmptyVirtualDoc(doc) ? (
                               <button
                                 className="btn btn-secondary btn-sm"
                                 type="button"
@@ -1478,6 +1553,10 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
                               >
                                 {doc.status === 'done' ? 'Re-parse' : 'Parse'}
                               </button>
+                            ) : isEmptyVirtualDoc(doc) ? (
+                              <span className="kb-muted" title="Add chunks in Preview">
+                                Manual
+                              </span>
                             ) : null
                           ) : null}
                         </div>
@@ -1525,6 +1604,53 @@ export default function KnowledgePanel({ onBackToChat }: { onBackToChat: () => v
           </div>
         </section>
       </div>
+
+      {emptyOpen && (
+        <div className="kb-modal-backdrop" role="presentation" onClick={closeEmptyModal}>
+          <div
+            className="kb-modal"
+            role="dialog"
+            aria-labelledby="empty-file-title"
+            onClick={e => e.stopPropagation()}
+          >
+            <h2 id="empty-file-title">Create empty file</h2>
+            <p className="field-hint">
+              Creates a virtual document with no file bytes. Open Preview to add chunks manually for retrieval.
+            </p>
+            {error && emptyOpen && <p className="error-text">{error}</p>}
+            <label className="field">
+              <span>Name</span>
+              <input
+                type="text"
+                value={emptyName}
+                onChange={e => setEmptyName(e.target.value)}
+                placeholder="e.g. notes.md"
+                disabled={busy}
+                autoFocus
+                onKeyDown={e => {
+                  if (e.key === 'Enter') {
+                    e.preventDefault()
+                    void saveEmptyDocument()
+                  }
+                }}
+              />
+            </label>
+            <div className="kb-modal-actions">
+              <button className="btn btn-secondary" type="button" disabled={busy} onClick={closeEmptyModal}>
+                Cancel
+              </button>
+              <button
+                className="btn"
+                type="button"
+                disabled={busy || !emptyName.trim()}
+                onClick={() => void saveEmptyDocument()}
+              >
+                {busy ? 'Creating…' : 'Create'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {uploadOpen && (
         <div className="kb-modal-backdrop" role="presentation" onClick={closeUploadModal}>

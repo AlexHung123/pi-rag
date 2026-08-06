@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  Patch,
   Post,
   Query,
   StreamableFile,
@@ -87,6 +88,20 @@ export class DocumentsController {
       },
       { language: language?.trim() || null },
     );
+  }
+
+  /**
+   * Create empty virtual document (no file upload) for manual chunks.
+   * Static path must be registered before :docId routes.
+   */
+  @Post('empty')
+  async createEmpty(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Body() body: { name?: string },
+  ) {
+    if (!body?.name?.trim()) throw badRequest('name is required');
+    return this.documents.createEmpty(user.userId, kbId, body.name);
   }
 
   /** Batch parse — static path must be registered before :docId routes. */
@@ -208,6 +223,50 @@ export class DocumentsController {
       pageSize: pageSize ? Number(pageSize) : 20,
       keywords,
     });
+  }
+
+  /** Add a manual chunk to a document. */
+  @Post(':docId/chunks')
+  async addChunk(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+    @Body() body: { content?: string; importantKeywords?: string[] },
+  ) {
+    if (!body?.content?.trim()) throw badRequest('content is required');
+    return this.documents.addChunk(user.userId, kbId, docId, {
+      content: body.content,
+      importantKeywords: body.importantKeywords,
+    });
+  }
+
+  /** Update a chunk (content / keywords / availability). */
+  @Patch(':docId/chunks/:chunkId')
+  async updateChunk(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+    @Param('chunkId') chunkId: string,
+    @Body()
+    body: {
+      content?: string;
+      importantKeywords?: string[];
+      available?: boolean;
+    },
+  ) {
+    return this.documents.updateChunk(user.userId, kbId, docId, chunkId, body || {});
+  }
+
+  /** Delete one or more chunks. Body: { chunkIds: string[] } */
+  @Delete(':docId/chunks')
+  async deleteChunks(
+    @CurrentUser() user: AuthPrincipal,
+    @Param('kbId') kbId: string,
+    @Param('docId') docId: string,
+    @Body() body: { chunkIds?: string[] },
+  ) {
+    if (!body?.chunkIds?.length) throw badRequest('chunkIds is required');
+    return this.documents.deleteChunks(user.userId, kbId, docId, body.chunkIds);
   }
 
   @Get(':docId/preview')

@@ -1,11 +1,22 @@
 /**
- * Lightweight context compaction for bare pi-agent-core Agent.
+ * Kode-style context compression for bare pi-agent-core Agent.
  *
  * Runs before every LLM call via `transformContext` (including mid-run after
- * tool results): estimate tokens → cap oversized tool results → summarize
- * older messages → keep recent tail.
+ * tool results): estimate tokens → cap oversized tool results → drop older
+ * messages with a local summary → keep recent tail (≥ minKeepRatio by count).
  *
- * Does not use AgentHarness / session tree. Postgres history is unchanged.
+ * Adapted from kode-agent-sdk ContextManager:
+ * - maxTokens / compressToTokens thresholds
+ * - keep ≥ 60% of messages (tail) by default
+ * - local generateSummary (no extra LLM call)
+ * - optional multimodal keepRecent
+ *
+ * Pi adaptations (not in kode):
+ * - cap oversized toolResult bodies (RAG)
+ * - snap cut so toolResult batches stay with their assistant
+ * - summary is a user message (bare Agent convertToLlm) with _compaction
+ *
+ * Postgres history is unchanged.
  */
 
 import { clipTextToBudget } from '../rag/evidence';
@@ -23,18 +34,32 @@ export type AgentCompactionSettings = {
   /** Master switch (default true). */
   enabled: boolean;
   /**
-   * Compact when estimated tokens exceed this.
-   * Default: contextWindow - reserveTokens (clamped ≥ keepRecentTokens + 1).
+   * Compress when estimated tokens exceed this (kode maxTokens).
+   * Default 50_000. Env: AGENT_COMPACTION_MAX_TOKENS or
+   * AGENT_COMPACTION_THRESHOLD_TOKENS (compat).
    */
-  thresholdTokens?: number;
-  /** Tokens reserved near the model window (default 16384). */
-  reserveTokens: number;
-  /** Approximate recent tail to keep after compact (default 20000). */
-  keepRecentTokens: number;
+  maxTokens: number;
+  /**
+   * Target residual budget used to compute keep ratio
+   * (kode compressToTokens). Default 30_000.
+   */
+  compressToTokens: number;
+  /**
+   * Minimum fraction of messages to retain by count (default 0.6).
+   * Floor matches kode: keepCount = ceil(n * max(targetRatio, minKeepRatio)).
+   */
+  minKeepRatio: number;
+  /**
+   * Keep at least this many recent multimodal (image) messages when cutting.
+   * Default 3 (kode multimodalRetention.keepRecent).
+   */
+  keepRecentMultimodal: number;
 };
 
-export type CompactionConfig = AgentCompactionSettings & {
-  contextWindow: number;
+export type ContextUsage = {
+  totalTokens: number;
+  messageCount: number;
+  shouldCompress: boolean;
 };
 
 export function getAgentCompactionSettings(
@@ -43,30 +68,44 @@ export function getAgentCompactionSettings(
   const enabledRaw = (env.AGENT_COMPACTION_ENABLED ?? 'true').trim().toLowerCase();
   const enabled = !(enabledRaw === '0' || enabledRaw === 'false' || enabledRaw === 'off');
 
+  // Prefer MAX_TOKENS; fall back to THRESHOLD_TOKENS for existing .env files.
+  const maxFromEnv =
+    envPositiveIntOptional(env.AGENT_COMPACTION_MAX_TOKENS) ??
+    envPositiveIntOptional(env.AGENT_COMPACTION_THRESHOLD_TOKENS);
+
   return {
     enabled,
-    thresholdTokens: envPositiveIntOptional(env.AGENT_COMPACTION_THRESHOLD_TOKENS),
-    reserveTokens: envPositiveInt(env.AGENT_COMPACTION_RESERVE_TOKENS, 16_384, 1_024, 500_000),
-    keepRecentTokens: envPositiveInt(
-      env.AGENT_COMPACTION_KEEP_RECENT_TOKENS,
-      20_000,
-      1_024,
-      500_000,
+    maxTokens: maxFromEnv ?? 50_000,
+    compressToTokens: envPositiveInt(
+      env.AGENT_COMPACTION_COMPRESS_TO_TOKENS,
+      30_000,
+      256,
+      2_000_000,
+    ),
+    minKeepRatio: envRatio(env.AGENT_COMPACTION_MIN_KEEP_RATIO, 0.6, 0.1, 0.95),
+    keepRecentMultimodal: envPositiveInt(
+      env.AGENT_COMPACTION_KEEP_RECENT_MULTIMODAL,
+      3,
+      0,
+      50,
     ),
   };
 }
 
 /**
  * Hard cap on a single toolResult message body (chars) during mid-run
- * transformContext. Defaults to RAG_EVIDENCE_MAX_CHARS (120k) so a single
- * oversized result that slipped past tool formatting cannot blow the window.
+ * transformContext.
+ * - AGENT_MAX_TOOL_RESULT_CHARS if set (including 0 = unlimited)
+ * - else RAG_EVIDENCE_MAX_CHARS if set (including 0 = unlimited)
+ * - else default 120_000
+ * maxChars <= 0 means no mid-run toolResult clipping.
  */
 export function getMaxToolResultChars(
   env: NodeJS.ProcessEnv = process.env,
 ): number {
-  const fromAgent = envPositiveIntOptional(env.AGENT_MAX_TOOL_RESULT_CHARS);
+  const fromAgent = envNonNegIntOptional(env.AGENT_MAX_TOOL_RESULT_CHARS);
   if (fromAgent !== undefined) return fromAgent;
-  const fromRag = envPositiveIntOptional(env.RAG_EVIDENCE_MAX_CHARS);
+  const fromRag = envNonNegIntOptional(env.RAG_EVIDENCE_MAX_CHARS);
   if (fromRag !== undefined) return fromRag;
   return 120_000;
 }
@@ -89,59 +128,103 @@ function envPositiveIntOptional(raw: string | undefined): number | undefined {
   return Math.floor(n);
 }
 
-/**
- * Resolve absolute threshold from settings + model context window.
- *
- * Default (no env override): min(contextWindow - reserveTokens, 150_000)
- * so RAG sessions compact before a 256k window is full, without being too eager.
- * Set AGENT_COMPACTION_THRESHOLD_TOKENS to pin an exact value.
- */
-export function resolveCompactionThreshold(cfg: CompactionConfig): number {
-  if (cfg.thresholdTokens !== undefined && cfg.thresholdTokens > 0) {
-    return cfg.thresholdTokens;
-  }
-  const fromWindow = Math.max(1, cfg.contextWindow - cfg.reserveTokens);
-  const practicalCap = 150_000;
-  return Math.max(
-    cfg.keepRecentTokens + 1,
-    Math.min(fromWindow, practicalCap),
-  );
+/** Like envPositiveIntOptional but allows 0 (unlimited / disabled caps). */
+function envNonNegIntOptional(raw: string | undefined): number | undefined {
+  if (raw === undefined || raw === '') return undefined;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return undefined;
+  return Math.floor(n);
 }
 
-export function shouldCompact(
-  contextTokens: number,
-  cfg: CompactionConfig,
-): boolean {
-  if (!cfg.enabled) return false;
-  return contextTokens > resolveCompactionThreshold(cfg);
+function envRatio(
+  raw: string | undefined,
+  fallback: number,
+  min: number,
+  max: number,
+): number {
+  const n = Number(raw ?? fallback);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.min(max, Math.max(min, n));
 }
 
 /**
- * Conservative token estimate (≈ chars/4), aligned with pi-agent-core heuristics.
+ * Conservative token estimate (≈ chars/4), aligned with kode + pi heuristics.
+ * Multimodal image blocks use a flat 500-token estimate (kode).
  */
 export function estimateMessageTokens(message: CompactableMessage): number {
-  let chars = 0;
+  let tokens = 0;
   const role = message.role;
 
-  if (role === 'user' || role === 'toolResult' || role === 'tool') {
-    chars += textFromContent(message.content).length;
-    if (typeof message.toolName === 'string') chars += message.toolName.length;
-  } else if (role === 'assistant') {
-    chars += textFromContent(message.content).length;
-  } else if (role === 'compactionSummary' && typeof message.summary === 'string') {
-    chars += message.summary.length + 80;
-  } else {
-    chars += textFromContent(message.content).length;
-    if (typeof message.summary === 'string') chars += message.summary.length;
+  if (role === 'compactionSummary' && typeof message.summary === 'string') {
+    return Math.max(1, Math.ceil((message.summary.length + 80) / 4));
   }
 
-  return Math.max(1, Math.ceil(chars / 4));
+  if (role === 'user' || role === 'toolResult' || role === 'tool') {
+    tokens += estimateContentTokens(message.content);
+    if (typeof message.toolName === 'string') {
+      tokens += Math.ceil(message.toolName.length / 4);
+    }
+  } else if (role === 'assistant') {
+    tokens += estimateContentTokens(message.content);
+  } else {
+    tokens += estimateContentTokens(message.content);
+    if (typeof message.summary === 'string') {
+      tokens += Math.ceil(message.summary.length / 4);
+    }
+  }
+
+  return Math.max(1, tokens);
 }
 
 export function estimateMessagesTokens(messages: CompactableMessage[]): number {
   let total = 0;
   for (const m of messages) total += estimateMessageTokens(m);
   return total;
+}
+
+function estimateContentTokens(content: unknown): number {
+  if (typeof content === 'string') return Math.ceil(content.length / 4);
+  if (!Array.isArray(content)) {
+    if (content && typeof content === 'object') {
+      try {
+        return Math.ceil(JSON.stringify(content).length / 4);
+      } catch {
+        return Math.ceil(String(content).length / 4);
+      }
+    }
+    return content == null ? 0 : Math.ceil(String(content).length / 4);
+  }
+
+  let tokens = 0;
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    const b = block as Record<string, unknown>;
+    if (b.type === 'text' && typeof b.text === 'string') {
+      tokens += Math.ceil(b.text.length / 4);
+    } else if (b.type === 'thinking' && typeof b.thinking === 'string') {
+      tokens += Math.ceil(b.thinking.length / 4);
+    } else if (b.type === 'image' || b.type === 'audio' || b.type === 'file') {
+      tokens += 500; // kode flat estimate — avoid base64 inflation
+    } else if (b.type === 'toolCall') {
+      const name = String(b.name || '');
+      let args = '';
+      try {
+        args = JSON.stringify(b.arguments ?? {});
+      } catch {
+        /* ignore */
+      }
+      tokens += Math.ceil((name.length + args.length) / 4);
+    } else if (typeof b.text === 'string') {
+      tokens += Math.ceil(b.text.length / 4);
+    } else {
+      try {
+        tokens += Math.ceil(JSON.stringify(b).length / 4);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+  return tokens;
 }
 
 function textFromContent(content: unknown): string {
@@ -189,77 +272,118 @@ function isToolResult(m: CompactableMessage): boolean {
   return m.role === 'toolResult' || m.role === 'tool';
 }
 
+function messageHasMultimodal(m: CompactableMessage): boolean {
+  const content = m.content;
+  if (!Array.isArray(content)) return false;
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    const t = (block as { type?: string }).type;
+    if (t === 'image' || t === 'audio' || t === 'file') return true;
+  }
+  return false;
+}
+
 /**
- * Index of the first message to keep (recent tail).
- *
- * 1. Walk from the end until recent tokens ≥ keepRecentTokens.
- * 2. Snap to a safe turn boundary without pulling the entire old history back in:
- *    - toolResults → include their assistant (+ preceding user of that turn only)
- *    - assistant mid-history → prefer the *next* user (start of a later turn)
- *    - otherwise prefer a user at/after the cross point
+ * Analyze context usage (kode ContextManager.analyze).
  */
-export function findFirstKeptIndex(
+export function analyzeContext(
   messages: CompactableMessage[],
-  keepRecentTokens: number,
+  settings: AgentCompactionSettings,
+): ContextUsage {
+  const totalTokens = estimateMessagesTokens(messages);
+  return {
+    totalTokens,
+    messageCount: messages.length,
+    shouldCompress: settings.enabled && totalTokens > settings.maxTokens,
+  };
+}
+
+export function shouldCompact(
+  contextTokens: number,
+  settings: AgentCompactionSettings,
+): boolean {
+  if (!settings.enabled) return false;
+  return contextTokens > settings.maxTokens;
+}
+
+/**
+ * Kode keep-from index: targetRatio = compressToTokens / totalTokens,
+ * keepCount = ceil(n * max(targetRatio, minKeepRatio)), retain tail.
+ * Then pull earlier if needed for multimodal keepRecent, and snap for
+ * toolResult integrity (pi adaptation).
+ */
+export function findKeepFromIndex(
+  messages: CompactableMessage[],
+  settings: AgentCompactionSettings,
+  totalTokens: number,
 ): number {
   if (messages.length === 0) return 0;
 
-  let acc = 0;
-  let crossed = -1;
+  const safeTotal = Math.max(1, totalTokens);
+  const targetRatio = settings.compressToTokens / safeTotal;
+  let keepCount = Math.ceil(
+    messages.length * Math.max(targetRatio, settings.minKeepRatio),
+  );
+  keepCount = Math.min(messages.length, Math.max(1, keepCount));
+
+  let keepFromIndex = messages.length - keepCount;
+
+  const multimodalFrom = findKeepFromIndexForMultimodal(
+    messages,
+    settings.keepRecentMultimodal,
+  );
+  keepFromIndex = Math.min(keepFromIndex, multimodalFrom);
+
+  return snapKeepFromForToolIntegrity(messages, keepFromIndex);
+}
+
+/**
+ * Kode multimodalRetention: walk from end, keep at least N multimodal msgs.
+ * Returns the earliest index that must be retained (or messages.length if none).
+ */
+export function findKeepFromIndexForMultimodal(
+  messages: CompactableMessage[],
+  keepRecent: number,
+): number {
+  if (keepRecent <= 0) return messages.length;
+  let remaining = keepRecent;
+  let earliestIndex = messages.length;
   for (let i = messages.length - 1; i >= 0; i--) {
-    acc += estimateMessageTokens(messages[i]);
-    if (acc >= keepRecentTokens) {
-      crossed = i;
-      break;
-    }
+    if (!messageHasMultimodal(messages[i])) continue;
+    remaining -= 1;
+    earliestIndex = i;
+    if (remaining <= 0) return i;
   }
-  // Entire transcript fits in keep budget → nothing to drop.
-  if (crossed < 0) return 0;
+  return earliestIndex;
+}
 
-  let cut = crossed;
+/**
+ * Never start the kept tail on a toolResult (orphan without assistant).
+ * Walk back to the assistant that owns the batch; include opening user if present.
+ */
+export function snapKeepFromForToolIntegrity(
+  messages: CompactableMessage[],
+  keepFrom: number,
+): number {
+  if (keepFrom <= 0 || keepFrom >= messages.length) {
+    return Math.max(0, Math.min(keepFrom, messages.length));
+  }
 
+  let cut = keepFrom;
   if (isToolResult(messages[cut])) {
-    // Keep tool batch with its assistant message.
     while (cut > 0 && isToolResult(messages[cut])) {
       cut -= 1;
     }
-    // Include the user that opened this turn (immediate predecessor only).
     if (cut > 0 && isAssistant(messages[cut]) && isUser(messages[cut - 1])) {
       cut -= 1;
     }
-    return cut;
   }
-
-  if (isAssistant(messages[cut])) {
-    // Prefer the next user message so we do not re-include a huge older turn
-    // just because this assistant was the token-crossing boundary.
-    const nextUser = findNextUserIndex(messages, cut + 1);
-    if (nextUser >= 0) return nextUser;
-    if (cut > 0 && isUser(messages[cut - 1])) return cut - 1;
-    return cut;
-  }
-
-  if (isUser(messages[cut])) {
-    return cut;
-  }
-
-  const nextUser = findNextUserIndex(messages, cut);
-  return nextUser >= 0 ? nextUser : cut;
-}
-
-function findNextUserIndex(
-  messages: CompactableMessage[],
-  from: number,
-): number {
-  for (let j = from; j < messages.length; j++) {
-    if (isUser(messages[j])) return j;
-  }
-  return -1;
+  return cut;
 }
 
 export const COMPACTION_SUMMARY_PREFIX =
-  'The conversation history before this point was compacted into the following summary:\n\n<summary>\n';
-export const COMPACTION_SUMMARY_SUFFIX = '\n</summary>';
+  'The conversation history before this point was compacted into the following summary:\n\n<context-summary>\n';
+export const COMPACTION_SUMMARY_SUFFIX = '\n</context-summary>';
 
 /** User message carrying a compaction summary (works with bare Agent convertToLlm). */
 export function buildSummaryUserMessage(
@@ -272,10 +396,67 @@ export function buildSummaryUserMessage(
     role: 'user',
     content: text,
     timestamp,
-    // Marker for debugging / tests (ignored by default convertToLlm filter? kept as user so OK)
     _compaction: true,
     tokensBefore,
   };
+}
+
+/**
+ * Local summary of dropped messages (kode generateSummary) — no LLM call.
+ */
+export function generateLocalSummary(messages: CompactableMessage[]): string {
+  return messages
+    .map((msg, idx) => {
+      const header = `${idx + 1}. [${msg.role}]`;
+      const body = summarizeMessageBody(msg);
+      return body ? `${header}\n${body}` : header;
+    })
+    .join('\n\n');
+}
+
+function summarizeMessageBody(msg: CompactableMessage): string {
+  if (typeof msg.summary === 'string' && msg.role === 'compactionSummary') {
+    return msg.summary.slice(0, 200);
+  }
+
+  const content = msg.content;
+  if (typeof content === 'string') {
+    return content.slice(0, 200);
+  }
+
+  if (!Array.isArray(content)) {
+    const text = textFromContent(content);
+    return text.slice(0, 200);
+  }
+
+  const parts: string[] = [];
+  for (const block of content) {
+    if (!block || typeof block !== 'object') continue;
+    const b = block as Record<string, unknown>;
+    if (b.type === 'text' && typeof b.text === 'string') {
+      parts.push(b.text.slice(0, 200));
+    } else if (b.type === 'thinking' && typeof b.thinking === 'string') {
+      parts.push(`[thinking] ${b.thinking.slice(0, 200)}`);
+    } else if (b.type === 'image') {
+      parts.push('[image-summary]');
+    } else if (b.type === 'audio') {
+      parts.push('[audio-summary]');
+    } else if (b.type === 'file') {
+      parts.push('[file-summary]');
+    } else if (b.type === 'toolCall') {
+      parts.push(`[tool] ${String(b.name || 'unknown')}(...)`);
+    } else if (typeof b.text === 'string') {
+      parts.push(b.text.slice(0, 200));
+    }
+  }
+
+  if (isToolResult(msg)) {
+    const name = typeof msg.toolName === 'string' ? msg.toolName : 'tool';
+    const preview = textFromContent(msg.content).slice(0, 100);
+    return `[result ${name}] ${preview}`;
+  }
+
+  return parts.join('\n');
 }
 
 export type CompactResult = {
@@ -284,8 +465,32 @@ export type CompactResult = {
   tokensBefore: number;
   tokensAfter: number;
   firstKeptIndex: number;
-  /** true when we dropped history without an LLM summary */
+  ratio: number;
+  /** Always false for kode local summary (kept for API compatibility). */
   hardDrop: boolean;
+};
+
+/** Per-toolResult body clip detail (for mid-run context logs). */
+export type ToolResultCapDetail = {
+  index: number;
+  toolName: string;
+  charsBefore: number;
+  charsAfter: number;
+};
+
+export type MidRunGuardDiagnostics = {
+  settings: AgentCompactionSettings;
+  maxToolResultChars: number;
+  messageCountBefore: number;
+  messageCountAfter: number;
+  rolesBefore: Record<string, number>;
+  rolesAfter: Record<string, number>;
+  /** Estimated tokens after tool-result cap, before compaction decision */
+  tokensAfterToolCap: number;
+  shouldCompress: boolean;
+  toolCapDetails: ToolResultCapDetail[];
+  /** Messages dropped into local summary (0 if not compacted) */
+  droppedMessageCount: number;
 };
 
 export type MidRunGuardResult = CompactResult & {
@@ -293,262 +498,240 @@ export type MidRunGuardResult = CompactResult & {
   toolResultsCapped: boolean;
   /** true when messages array content changed (cap and/or compact) */
   changed: boolean;
+  /** Whether token budget exceeded maxTokens (compaction considered) */
+  shouldCompress: boolean;
+  diagnostics: MidRunGuardDiagnostics;
 };
-
-export type SummarizeFn = (
-  messagesToSummarize: CompactableMessage[],
-  signal?: AbortSignal,
-) => Promise<string | null>;
 
 /**
  * Clip individual toolResult / tool message bodies that exceed maxChars.
- * Returns a new array only when at least one message was modified.
  */
 export function capOversizedToolResults(
   messages: CompactableMessage[],
   maxChars: number,
-): { messages: CompactableMessage[]; capped: boolean } {
+): {
+  messages: CompactableMessage[];
+  capped: boolean;
+  details: ToolResultCapDetail[];
+} {
   if (maxChars <= 0 || messages.length === 0) {
-    return { messages, capped: false };
+    return { messages, capped: false, details: [] };
   }
 
   let capped = false;
-  const next = messages.map((m) => {
+  const details: ToolResultCapDetail[] = [];
+  const next = messages.map((m, index) => {
     if (!isToolResult(m)) return m;
     const text = textFromContent(m.content);
     if (text.length <= maxChars) return m;
     capped = true;
     const clipped = clipTextToBudget(text, maxChars);
+    details.push({
+      index,
+      toolName: typeof m.toolName === 'string' ? m.toolName : 'tool',
+      charsBefore: text.length,
+      charsAfter: clipped.length,
+    });
     return {
       ...m,
       content: [{ type: 'text', text: clipped }],
     };
   });
 
-  return { messages: capped ? next : messages, capped };
+  return { messages: capped ? next : messages, capped, details };
+}
+
+/** Role histogram for context-manage logs. */
+export function countMessagesByRole(
+  messages: CompactableMessage[],
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const m of messages) {
+    const role = m.role || '?';
+    counts[role] = (counts[role] || 0) + 1;
+  }
+  return counts;
+}
+
+function formatRoleCounts(counts: Record<string, number>): string {
+  const keys = Object.keys(counts).sort();
+  if (!keys.length) return '(empty)';
+  return keys.map((k) => `${k}=${counts[k]}`).join(' ');
+}
+
+/**
+ * One-line summary of mid-run context guard for Nest logs.
+ * Always useful — including when nothing changed.
+ */
+export function formatContextManageLog(
+  result: MidRunGuardResult,
+  opts?: { conversationId?: string; label?: string },
+): string {
+  const d = result.diagnostics;
+  const conv = opts?.conversationId ? ` conv=${opts.conversationId}` : '';
+  const label = opts?.label ? ` ${opts.label}` : '';
+  const roles = formatRoleCounts(d.rolesBefore);
+  const rolesAfter =
+    d.messageCountBefore === d.messageCountAfter
+      ? ''
+      : ` → ${formatRoleCounts(d.rolesAfter)}`;
+
+  const capPart =
+    d.toolCapDetails.length === 0
+      ? 'none'
+      : d.toolCapDetails
+          .map(
+            (t) =>
+              `${t.toolName}#${t.index}:${t.charsBefore}→${t.charsAfter}c`,
+          )
+          .join(', ');
+
+  const compactPart = result.compacted
+    ? `yes dropped=${d.droppedMessageCount} firstKept=${result.firstKeptIndex}` +
+      ` keepRatio=${result.ratio.toFixed(2)}` +
+      ` msgs ${d.messageCountBefore}→${d.messageCountAfter}`
+    : result.shouldCompress
+      ? 'skipped (cut would keep all)'
+      : d.settings.enabled
+        ? 'no (under maxTokens)'
+        : 'disabled';
+
+  return (
+    `context-manage${conv}${label}` +
+    ` enabled=${d.settings.enabled}` +
+    ` maxTokens=${d.settings.maxTokens}` +
+    ` compressTo=${d.settings.compressToTokens}` +
+    ` minKeep=${d.settings.minKeepRatio}` +
+    ` toolCapChars=${d.maxToolResultChars}` +
+    ` | msgs=${d.messageCountBefore}→${d.messageCountAfter} [${roles}${rolesAfter}]` +
+    ` | tokens ${result.tokensBefore}→${result.tokensAfter}` +
+    ` shouldCompress=${result.shouldCompress}` +
+    ` | toolResultCap=${capPart}` +
+    ` | compaction=${compactPart}` +
+    ` | changed=${result.changed} compacted=${result.compacted}` +
+    ` toolCap=${result.toolResultsCapped}`
+  );
 }
 
 /**
  * Mid-run / pre-LLM guard used by transformContext:
  * 1) cap oversized tool results
- * 2) compact older history when over the token threshold
+ * 2) kode-style compress when over maxTokens
  */
 export async function applyMidRunContextGuard(args: {
   messages: CompactableMessage[];
-  contextWindow: number;
   settings: AgentCompactionSettings;
-  summarize: SummarizeFn;
   maxToolResultChars?: number;
+  /** @deprecated ignored — kept so call sites can migrate without breakage */
+  contextWindow?: number;
+  /** @deprecated ignored — local summary only */
+  summarize?: unknown;
   signal?: AbortSignal;
 }): Promise<MidRunGuardResult> {
   const maxToolChars =
     args.maxToolResultChars ?? getMaxToolResultChars();
-  const { messages: afterCap, capped } = capOversizedToolResults(
-    args.messages,
-    maxToolChars,
-  );
+  const rolesBefore = countMessagesByRole(args.messages);
+  const tokensBefore = estimateMessagesTokens(args.messages);
 
-  const compact = await compactMessagesIfNeeded({
+  const {
     messages: afterCap,
-    contextWindow: args.contextWindow,
+    capped,
+    details: toolCapDetails,
+  } = capOversizedToolResults(args.messages, maxToolChars);
+
+  const tokensAfterToolCap = estimateMessagesTokens(afterCap);
+  const usageAfterCap = analyzeContext(afterCap, args.settings);
+
+  const compact = compactMessagesIfNeeded({
+    messages: afterCap,
     settings: args.settings,
-    summarize: args.summarize,
-    signal: args.signal,
   });
+
+  const rolesAfter = countMessagesByRole(compact.messages);
+  const droppedMessageCount = compact.compacted
+    ? Math.max(0, afterCap.length - (compact.messages.length - 1))
+    : 0;
 
   return {
     ...compact,
-    // tokensBefore should reflect the pre-guard transcript (pre-cap).
-    tokensBefore: estimateMessagesTokens(args.messages),
+    tokensBefore,
     tokensAfter: compact.tokensAfter,
     toolResultsCapped: capped,
     changed: capped || compact.compacted,
+    shouldCompress: usageAfterCap.shouldCompress,
+    diagnostics: {
+      settings: args.settings,
+      maxToolResultChars: maxToolChars,
+      messageCountBefore: args.messages.length,
+      messageCountAfter: compact.messages.length,
+      rolesBefore,
+      rolesAfter,
+      tokensAfterToolCap,
+      shouldCompress: usageAfterCap.shouldCompress,
+      toolCapDetails,
+      droppedMessageCount,
+    },
   };
 }
 
 /**
- * If over threshold, summarize messages[0..firstKept) and keep the tail.
- * On summarize failure: hard-drop older messages (still keep recent tail).
+ * Kode-style compress: if over maxTokens, keep tail (≥ minKeepRatio by count),
+ * prepend local summary of removed messages.
  */
-export async function compactMessagesIfNeeded(args: {
+export function compactMessagesIfNeeded(args: {
   messages: CompactableMessage[];
-  contextWindow: number;
   settings: AgentCompactionSettings;
-  summarize: SummarizeFn;
-  signal?: AbortSignal;
-}): Promise<CompactResult> {
-  const cfg: CompactionConfig = {
-    ...args.settings,
-    contextWindow: args.contextWindow,
-  };
-  const tokensBefore = estimateMessagesTokens(args.messages);
+}): CompactResult {
+  const usage = analyzeContext(args.messages, args.settings);
 
-  if (!shouldCompact(tokensBefore, cfg)) {
+  if (!usage.shouldCompress) {
     return {
       messages: args.messages,
       compacted: false,
-      tokensBefore,
-      tokensAfter: tokensBefore,
+      tokensBefore: usage.totalTokens,
+      tokensAfter: usage.totalTokens,
       firstKeptIndex: 0,
+      ratio: 1,
       hardDrop: false,
     };
   }
 
-  const firstKept = findFirstKeptIndex(args.messages, cfg.keepRecentTokens);
+  const firstKept = findKeepFromIndex(
+    args.messages,
+    args.settings,
+    usage.totalTokens,
+  );
+
   if (firstKept <= 0) {
-    // Over threshold but cannot free space without dropping the recent tail.
     return {
       messages: args.messages,
       compacted: false,
-      tokensBefore,
-      tokensAfter: tokensBefore,
+      tokensBefore: usage.totalTokens,
+      tokensAfter: usage.totalTokens,
       firstKeptIndex: 0,
+      ratio: 1,
       hardDrop: false,
     };
   }
 
   const toSummarize = args.messages.slice(0, firstKept);
   const kept = args.messages.slice(firstKept);
-
-  let summary: string | null = null;
-  try {
-    summary = await args.summarize(toSummarize, args.signal);
-  } catch {
-    summary = null;
-  }
-
-  const next: CompactableMessage[] = [];
-  let hardDrop = false;
-  if (summary && summary.trim()) {
-    next.push(buildSummaryUserMessage(summary, tokensBefore));
-  } else {
-    hardDrop = true;
-  }
-  next.push(...kept);
+  const summaryText = generateLocalSummary(toSummarize);
+  const next: CompactableMessage[] = [
+    buildSummaryUserMessage(summaryText, usage.totalTokens),
+    ...kept,
+  ];
 
   const tokensAfter = estimateMessagesTokens(next);
+  const ratio = kept.length / Math.max(1, args.messages.length);
+
   return {
     messages: next,
     compacted: true,
-    tokensBefore,
+    tokensBefore: usage.totalTokens,
     tokensAfter,
     firstKeptIndex: firstKept,
-    hardDrop,
+    ratio,
+    hardDrop: false,
   };
-}
-
-/**
- * Build a plain-text transcript for the summarizer LLM.
- */
-export function serializeMessagesForSummary(messages: CompactableMessage[]): string {
-  const parts: string[] = [];
-  for (const m of messages) {
-    const role = m.role;
-    if (role === 'user') {
-      parts.push(`User: ${textFromContent(m.content)}`);
-    } else if (role === 'assistant') {
-      const text = textFromContent(m.content);
-      if (text.trim()) parts.push(`Assistant: ${text}`);
-      else parts.push('Assistant: (tool call(s))');
-    } else if (role === 'toolResult' || role === 'tool') {
-      const name = typeof m.toolName === 'string' ? m.toolName : 'tool';
-      const body = textFromContent(m.content).slice(0, 2000);
-      parts.push(`Tool(${name}): ${body}`);
-    } else if (role === 'compactionSummary' && typeof m.summary === 'string') {
-      parts.push(`PriorSummary: ${m.summary}`);
-    }
-  }
-  return parts.join('\n\n');
-}
-
-export const RAG_COMPACTION_SYSTEM = `You compress conversation history for a RAG Q&A assistant.
-Output a structured checkpoint another model will use to continue answering.
-
-Use this EXACT format:
-
-## User goals
-- [What the user is trying to learn or decide]
-
-## Knowledge / sources discussed
-- [KB names, document names, topics already retrieved]
-
-## Key facts established
-- [Important facts, numbers, definitions already confirmed from evidence]
-
-## Open questions
-- [What still needs retrieval or clarification]
-
-## Preferences
-- [Language, length, format constraints if any]
-
-Rules:
-- Be concise. Preserve exact names, IDs, error codes, and document titles.
-- Do NOT invent facts not present in the history.
-- Do NOT continue the conversation or answer the user — ONLY the summary.
-- Prefer Chinese if the conversation is mostly Chinese.`;
-
-/**
- * Call the OpenAI-compatible chat API to summarize dropped history.
- */
-export async function summarizeWithChatCompletions(args: {
-  baseUrl: string;
-  apiKey?: string;
-  model: string;
-  messagesToSummarize: CompactableMessage[];
-  maxTokens?: number;
-  signal?: AbortSignal;
-  fetchImpl?: typeof fetch;
-}): Promise<string | null> {
-  const baseUrl = args.baseUrl.replace(/\/$/, '');
-  if (!baseUrl) return null;
-
-  const transcript = serializeMessagesForSummary(args.messagesToSummarize);
-  if (!transcript.trim()) return null;
-
-  // Cap prompt size so summarization itself does not blow the window.
-  const clipped =
-    transcript.length > 120_000
-      ? `${transcript.slice(0, 60_000)}\n\n…\n\n${transcript.slice(-60_000)}`
-      : transcript;
-
-  const fetchImpl = args.fetchImpl ?? fetch;
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  args.signal?.addEventListener('abort', onAbort);
-  const timer = setTimeout(() => controller.abort(), 60_000);
-
-  try {
-    const res = await fetchImpl(`${baseUrl}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        ...(args.apiKey ? { Authorization: `Bearer ${args.apiKey}` } : {}),
-      },
-      body: JSON.stringify({
-        model: args.model,
-        temperature: 0,
-        max_tokens: args.maxTokens ?? 2048,
-        messages: [
-          { role: 'system', content: RAG_COMPACTION_SYSTEM },
-          {
-            role: 'user',
-            content: `<conversation>\n${clipped}\n</conversation>\n\nWrite the structured checkpoint summary now.`,
-          },
-        ],
-      }),
-      signal: controller.signal,
-    });
-
-    if (!res.ok) return null;
-    const json = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>;
-    };
-    const text = (json.choices?.[0]?.message?.content || '').trim();
-    return text || null;
-  } catch {
-    return null;
-  } finally {
-    clearTimeout(timer);
-    args.signal?.removeEventListener('abort', onAbort);
-  }
 }

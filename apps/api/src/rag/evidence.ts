@@ -86,6 +86,40 @@ export function clipTextToBudget(text: string, maxChars: number): string {
   return `${t.slice(0, head)}${marker}${t.slice(t.length - tail)}`;
 }
 
+export type FormatEvidenceOpts = {
+  /** <= 0 or omit = full chunk body. */
+  maxChunkChars?: number;
+  /**
+   * Hard cap on total formatted evidence characters (header + blocks).
+   * When exceeded, later hits are omitted and a truncation note is appended.
+   * <= 0 or omit = no total budget.
+   */
+  maxTotalChars?: number;
+  query?: string;
+  insufficient?: boolean;
+  message?: string;
+};
+
+/** Truncation / budget stats for evidence formatting logs. */
+export type FormatEvidenceStats = {
+  hitCount: number;
+  includedCount: number;
+  omittedByTotalBudget: number;
+  /** Chunks whose body was shortened by maxChunkChars (or partial room). */
+  chunksTruncated: number;
+  rawContentChars: number;
+  outputChars: number;
+  maxChunkChars: number;
+  maxTotalChars: number;
+  /** True if any per-chunk or total-budget compression applied. */
+  compressed: boolean;
+};
+
+export type FormatEvidenceResult = {
+  text: string;
+  stats: FormatEvidenceStats;
+};
+
 /**
  * Human-readable evidence block for the model (not raw JSON dump).
  * Citation indices match CitationSource.index (1-based).
@@ -96,25 +130,39 @@ export function clipTextToBudget(text: string, maxChars: number): string {
  */
 export function formatEvidenceForModel(
   hits: MappedHit[],
-  opts: {
-    /** <= 0 or omit = full chunk body. */
-    maxChunkChars?: number;
-    /**
-     * Hard cap on total formatted evidence characters (header + blocks).
-     * When exceeded, later hits are omitted and a truncation note is appended.
-     * <= 0 or omit = no total budget.
-     */
-    maxTotalChars?: number;
-    query?: string;
-    insufficient?: boolean;
-    message?: string;
-  },
+  opts: FormatEvidenceOpts = {},
 ): string {
+  return formatEvidenceForModelWithStats(hits, opts).text;
+}
+
+/** Same as formatEvidenceForModel but returns truncation stats for logging. */
+export function formatEvidenceForModelWithStats(
+  hits: MappedHit[],
+  opts: FormatEvidenceOpts = {},
+): FormatEvidenceResult {
+  const maxChunkChars = opts.maxChunkChars ?? 0;
+  const maxTotalChars = opts.maxTotalChars ?? 0;
+
   if (!hits.length) {
-    return [
+    const text = [
       'No relevant evidence found in the selected knowledge bases.',
-      opts.message || 'Tell the user you cannot answer from the selected knowledge bases; do not invent facts.',
+      opts.message ||
+        'Tell the user you cannot answer from the selected knowledge bases; do not invent facts.',
     ].join('\n');
+    return {
+      text,
+      stats: {
+        hitCount: 0,
+        includedCount: 0,
+        omittedByTotalBudget: 0,
+        chunksTruncated: 0,
+        rawContentChars: 0,
+        outputChars: text.length,
+        maxChunkChars,
+        maxTotalChars,
+        compressed: false,
+      },
+    };
   }
 
   const header = [
@@ -129,21 +177,24 @@ export function formatEvidenceForModel(
     .filter(Boolean)
     .join('\n');
 
-  const maxChunkChars = opts.maxChunkChars ?? 0;
-  const maxTotalChars = opts.maxTotalChars ?? 0;
-
   const blocks: string[] = [];
   let used = header.length;
   let omitted = 0;
+  let chunksTruncated = 0;
+  let rawContentChars = 0;
 
   for (let i = 0; i < hits.length; i++) {
     const h = hits[i]!;
     const n = i + 1;
+    const rawBody = (h.content || '').trim();
+    rawContentChars += rawBody.length;
     const doc = h.documentName || h.documentId || 'unknown document';
     const kb = h.knowledgeBaseName ? ` | KB: ${h.knowledgeBaseName}` : '';
     const score =
       typeof h.score === 'number' ? ` | score=${h.score.toFixed(3)}` : '';
     let body = truncateChunk(h.content || '', maxChunkChars);
+    let bodyTruncated =
+      maxChunkChars > 0 && rawBody.length > maxChunkChars;
     let block = `[${n}] ${doc}${kb}${score}\n${body}`;
     const sep = blocks.length ? 2 : 1; // \n\n between blocks, or one \n after header
 
@@ -153,15 +204,18 @@ export function formatEvidenceForModel(
       if (blocks.length === 0 && room > 80) {
         const meta = `[${n}] ${doc}${kb}${score}\n`;
         const bodyRoom = Math.max(0, room - meta.length - 1);
-        body = truncateChunk(h.content || '', Math.min(
-          maxChunkChars > 0 ? maxChunkChars : bodyRoom,
-          bodyRoom,
-        ));
+        const bodyCap =
+          maxChunkChars > 0
+            ? Math.min(maxChunkChars, bodyRoom)
+            : bodyRoom;
+        body = truncateChunk(h.content || '', bodyCap);
+        bodyTruncated = rawBody.length > bodyCap;
         block = `${meta}${body}`;
         if (block.length > room) {
           block = clipTextToBudget(block, room);
         }
         blocks.push(block);
+        if (bodyTruncated) chunksTruncated += 1;
         used += sep + block.length;
         omitted = hits.length - 1;
       } else {
@@ -171,6 +225,7 @@ export function formatEvidenceForModel(
     }
 
     blocks.push(block);
+    if (bodyTruncated) chunksTruncated += 1;
     used += sep + block.length;
   }
 
@@ -185,7 +240,19 @@ export function formatEvidenceForModel(
       out = clipTextToBudget(out + note, maxTotalChars);
     }
   }
-  return out;
+
+  const stats: FormatEvidenceStats = {
+    hitCount: hits.length,
+    includedCount: blocks.length,
+    omittedByTotalBudget: omitted,
+    chunksTruncated,
+    rawContentChars,
+    outputChars: out.length,
+    maxChunkChars,
+    maxTotalChars,
+    compressed: chunksTruncated > 0 || omitted > 0,
+  };
+  return { text: out, stats };
 }
 
 export function mappedHitsToCitationSources(hits: MappedHit[]): CitationSource[] {

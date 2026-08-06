@@ -1,11 +1,31 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger, ValidationPipe } from '@nestjs/common';
+import { json, urlencoded } from 'express';
 import cookieParser = require('cookie-parser');
 import { AppModule } from './app.module';
 import { AuthService } from './auth/auth.service';
 
+/**
+ * Nest/Express default JSON body limit is ~100kb. Manual chunk create/edit
+ * and transcript saves can exceed that → HTTP 413 "request entity too large".
+ * Align with chunk content cap (~100k chars) plus headroom for JSON wrappers.
+ */
+function jsonBodyLimit(): string {
+  const fromEnv = (process.env.JSON_BODY_LIMIT || '').trim();
+  if (fromEnv) return fromEnv;
+  // Headroom for large manual chunks (see MAX_CHUNK_CONTENT_CHARS).
+  return '10mb';
+}
+
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { rawBody: false });
+  // Disable built-in body parser so we can set a larger JSON limit.
+  const app = await NestFactory.create(AppModule, {
+    rawBody: false,
+    bodyParser: false,
+  });
+  const bodyLimit = jsonBodyLimit();
+  app.use(json({ limit: bodyLimit }));
+  app.use(urlencoded({ extended: true, limit: bodyLimit }));
   app.use(cookieParser());
   app.useGlobalPipes(
     new ValidationPipe({

@@ -1,16 +1,21 @@
-import { describe, expect, it, vi } from 'vitest';
+import { describe, expect, it } from 'vitest';
 import {
   applyMidRunContextGuard,
+  analyzeContext,
   buildSummaryUserMessage,
   capOversizedToolResults,
   compactMessagesIfNeeded,
   estimateMessageTokens,
   estimateMessagesTokens,
-  findFirstKeptIndex,
+  findKeepFromIndex,
+  findKeepFromIndexForMultimodal,
+  formatContextManageLog,
+  generateLocalSummary,
   getAgentCompactionSettings,
   getMaxToolResultChars,
-  resolveCompactionThreshold,
   shouldCompact,
+  snapKeepFromForToolIntegrity,
+  type AgentCompactionSettings,
   type CompactableMessage,
 } from '../src/agent/agent-compaction';
 
@@ -40,13 +45,27 @@ function padTokens(approxTokens: number): string {
   return 'x'.repeat(Math.max(1, approxTokens * 4));
 }
 
+function defaultSettings(
+  overrides: Partial<AgentCompactionSettings> = {},
+): AgentCompactionSettings {
+  return {
+    enabled: true,
+    maxTokens: 50_000,
+    compressToTokens: 30_000,
+    minKeepRatio: 0.6,
+    keepRecentMultimodal: 3,
+    ...overrides,
+  };
+}
+
 describe('getAgentCompactionSettings', () => {
-  it('defaults enabled with pi-like reserve/keep', () => {
+  it('defaults to kode-like max/compress/minKeep', () => {
     const s = getAgentCompactionSettings({});
     expect(s.enabled).toBe(true);
-    expect(s.reserveTokens).toBe(16_384);
-    expect(s.keepRecentTokens).toBe(20_000);
-    expect(s.thresholdTokens).toBeUndefined();
+    expect(s.maxTokens).toBe(50_000);
+    expect(s.compressToTokens).toBe(30_000);
+    expect(s.minKeepRatio).toBe(0.6);
+    expect(s.keepRecentMultimodal).toBe(3);
   });
 
   it('can disable via env', () => {
@@ -54,51 +73,31 @@ describe('getAgentCompactionSettings', () => {
       false,
     );
   });
+
+  it('accepts MAX_TOKENS and falls back to THRESHOLD_TOKENS', () => {
+    expect(
+      getAgentCompactionSettings({ AGENT_COMPACTION_MAX_TOKENS: '80000' }).maxTokens,
+    ).toBe(80_000);
+    expect(
+      getAgentCompactionSettings({ AGENT_COMPACTION_THRESHOLD_TOKENS: '120000' }).maxTokens,
+    ).toBe(120_000);
+  });
 });
 
-describe('shouldCompact / threshold', () => {
-  it('defaults to min(window-reserve, 150k) when threshold unset', () => {
-    const thr = resolveCompactionThreshold({
-      enabled: true,
-      reserveTokens: 16_384,
-      keepRecentTokens: 20_000,
-      contextWindow: 256_000,
-    });
-    // Practical cap so RAG does not wait until ~240k tokens.
-    expect(thr).toBe(150_000);
-  });
-
-  it('uses window-reserve when that is below the practical cap', () => {
-    const thr = resolveCompactionThreshold({
-      enabled: true,
-      reserveTokens: 2_000,
-      keepRecentTokens: 1_000,
-      contextWindow: 50_000,
-    });
-    expect(thr).toBe(48_000);
-  });
-
-  it('honors explicit threshold', () => {
-    const thr = resolveCompactionThreshold({
-      enabled: true,
-      reserveTokens: 16_384,
-      keepRecentTokens: 20_000,
-      thresholdTokens: 50_000,
-      contextWindow: 256_000,
-    });
-    expect(thr).toBe(50_000);
-  });
-
-  it('does not compact when disabled or under threshold', () => {
-    const cfg = {
-      enabled: true,
-      reserveTokens: 1000,
-      keepRecentTokens: 500,
-      contextWindow: 10_000,
-    };
+describe('shouldCompact / analyzeContext', () => {
+  it('compacts only when over maxTokens and enabled', () => {
+    const cfg = defaultSettings({ maxTokens: 1000 });
     expect(shouldCompact(500, cfg)).toBe(false);
-    expect(shouldCompact(9500, cfg)).toBe(true);
-    expect(shouldCompact(9500, { ...cfg, enabled: false })).toBe(false);
+    expect(shouldCompact(1500, cfg)).toBe(true);
+    expect(shouldCompact(1500, { ...cfg, enabled: false })).toBe(false);
+  });
+
+  it('analyzeContext sets shouldCompress from total tokens', () => {
+    const messages = [user(padTokens(2_000)), assistant(padTokens(2_000))];
+    const usage = analyzeContext(messages, defaultSettings({ maxTokens: 1_000 }));
+    expect(usage.totalTokens).toBeGreaterThan(1_000);
+    expect(usage.shouldCompress).toBe(true);
+    expect(usage.messageCount).toBe(2);
   });
 });
 
@@ -121,126 +120,128 @@ describe('estimateMessageTokens', () => {
     };
     expect(estimateMessageTokens(m)).toBeGreaterThan(1);
   });
+
+  it('uses flat 500 tokens for image blocks', () => {
+    const m: CompactableMessage = {
+      role: 'user',
+      content: [{ type: 'image', data: 'AAAA' }],
+    };
+    expect(estimateMessageTokens(m)).toBe(500);
+  });
 });
 
-describe('findFirstKeptIndex', () => {
-  it('returns 0 when all messages fit keep budget', () => {
+describe('findKeepFromIndex (kode ratio)', () => {
+  it('keeps at least minKeepRatio of messages by count', () => {
+    // 10 messages, over threshold → keep max(targetRatio, 0.6) * 10 ≥ 6
+    const msgs = Array.from({ length: 10 }, (_, i) =>
+      i % 2 === 0 ? user(padTokens(2_000)) : assistant(padTokens(2_000)),
+    );
+    const settings = defaultSettings({
+      maxTokens: 100,
+      compressToTokens: 50,
+      minKeepRatio: 0.6,
+    });
+    const total = estimateMessagesTokens(msgs);
+    const cut = findKeepFromIndex(msgs, settings, total);
+    const kept = msgs.length - cut;
+    expect(kept).toBeGreaterThanOrEqual(Math.ceil(10 * 0.6));
+    expect(cut).toBeGreaterThan(0);
+  });
+
+  it('returns 0 when keep ratio would retain everything', () => {
     const msgs = [user('hi'), assistant('yo')];
-    expect(findFirstKeptIndex(msgs, 10_000)).toBe(0);
-  });
-
-  it('prefers a user turn boundary and keeps tool batches intact', () => {
-    const msgs: CompactableMessage[] = [
-      user(padTokens(5000)),
-      assistant(padTokens(5000)),
-      user(padTokens(100)),
-      assistant('calling tools'),
-      toolResult(padTokens(3000)),
-      toolResult(padTokens(3000)),
-    ];
-    // Keep budget small enough to force a cut into the first half.
-    const cut = findFirstKeptIndex(msgs, 500);
-    // Should not land mid-toolResults without assistant; user at index 2 is ideal.
-    expect(cut).toBeLessThanOrEqual(2);
-    expect(isUserOrSafe(msgs, cut)).toBe(true);
-    // Tail from cut must include both tool results if cut is at user 2.
-    if (cut === 2) {
-      expect(msgs.slice(cut).some((m) => m.role === 'toolResult')).toBe(true);
-    }
+    const settings = defaultSettings({ minKeepRatio: 1 });
+    const cut = findKeepFromIndex(msgs, settings, 100);
+    expect(cut).toBe(0);
   });
 });
 
-function isUserOrSafe(msgs: CompactableMessage[], cut: number): boolean {
-  if (cut === 0) return true;
-  if (msgs[cut].role === 'user') return true;
-  // Allowed: assistant start of a kept turn
-  if (msgs[cut].role === 'assistant') return true;
-  return false;
-}
+describe('snapKeepFromForToolIntegrity', () => {
+  it('does not start kept tail on a toolResult', () => {
+    const msgs: CompactableMessage[] = [
+      user('old'),
+      assistant('call'),
+      toolResult('big'),
+      user('new'),
+    ];
+    // Raw cut on toolResult index 2 → snap back to user(0) or assistant(1)
+    const cut = snapKeepFromForToolIntegrity(msgs, 2);
+    expect(cut).toBeLessThanOrEqual(1);
+    expect(msgs[cut].role).not.toBe('toolResult');
+  });
+});
+
+describe('findKeepFromIndexForMultimodal', () => {
+  it('pulls keep-from earlier to retain recent images', () => {
+    const msgs: CompactableMessage[] = [
+      user('old text'),
+      {
+        role: 'user',
+        content: [{ type: 'image', data: 'x' }, { type: 'text', text: 'see' }],
+      },
+      assistant('ok'),
+      user('latest'),
+    ];
+    expect(findKeepFromIndexForMultimodal(msgs, 1)).toBe(1);
+    expect(findKeepFromIndexForMultimodal(msgs, 0)).toBe(msgs.length);
+  });
+});
+
+describe('generateLocalSummary', () => {
+  it('builds a preview without calling an LLM', () => {
+    const text = generateLocalSummary([
+      user('What is RAG?'),
+      assistant('Retrieval augmented generation...'),
+      toolResult('chunk about RAG'),
+    ]);
+    expect(text).toContain('[user]');
+    expect(text).toContain('What is RAG?');
+    expect(text).toContain('[result');
+  });
+});
 
 describe('compactMessagesIfNeeded', () => {
-  it('no-ops under threshold', async () => {
+  it('no-ops under maxTokens', () => {
     const messages = [user('a'), assistant('b')];
-    const summarize = vi.fn(async () => 'SUMMARY');
-    const result = await compactMessagesIfNeeded({
+    const result = compactMessagesIfNeeded({
       messages,
-      contextWindow: 100_000,
-      settings: {
-        enabled: true,
-        reserveTokens: 1_000,
-        keepRecentTokens: 500,
-        thresholdTokens: 50_000,
-      },
-      summarize,
+      settings: defaultSettings({ maxTokens: 50_000 }),
     });
     expect(result.compacted).toBe(false);
-    expect(summarize).not.toHaveBeenCalled();
     expect(result.messages).toEqual(messages);
   });
 
-  it('summarizes prefix and keeps recent tail', async () => {
-    const oldUser = user(padTokens(8_000));
-    const oldAsst = assistant(padTokens(8_000));
-    const recentUser = user('latest question');
-    const recentAsst = assistant('latest answer');
-    const messages = [oldUser, oldAsst, recentUser, recentAsst];
+  it('prepends local summary and keeps recent tail', () => {
+    const messages = [
+      user(padTokens(8_000)),
+      assistant(padTokens(8_000)),
+      user(padTokens(8_000)),
+      assistant(padTokens(8_000)),
+      user('latest question'),
+      assistant('latest answer'),
+    ];
 
-    const summarize = vi.fn(async (toSum: CompactableMessage[]) => {
-      expect(toSum.length).toBeGreaterThan(0);
-      return '## User goals\n- test';
-    });
-
-    const result = await compactMessagesIfNeeded({
+    const result = compactMessagesIfNeeded({
       messages,
-      contextWindow: 256_000,
-      settings: {
-        enabled: true,
-        reserveTokens: 16_384,
-        keepRecentTokens: 200, // force small recent window
-        thresholdTokens: 100, // force compact
-      },
-      summarize,
+      settings: defaultSettings({
+        maxTokens: 100, // force compact
+        compressToTokens: 50,
+        minKeepRatio: 0.5,
+      }),
     });
 
     expect(result.compacted).toBe(true);
     expect(result.hardDrop).toBe(false);
-    expect(summarize).toHaveBeenCalledOnce();
     expect(result.messages[0].role).toBe('user');
-    expect(String(result.messages[0].content)).toContain('## User goals');
     expect(result.messages[0]._compaction).toBe(true);
-    // Latest exchange retained
+    expect(String(result.messages[0].content)).toContain('<context-summary>');
     expect(
       result.messages.some(
         (m) => m.role === 'user' && String(m.content).includes('latest question'),
       ),
     ).toBe(true);
     expect(result.tokensAfter).toBeLessThan(result.tokensBefore);
-  });
-
-  it('hard-drops when summarize returns null', async () => {
-    const messages = [
-      user(padTokens(5_000)),
-      assistant(padTokens(5_000)),
-      user('keep me'),
-      assistant('keep me too'),
-    ];
-    const result = await compactMessagesIfNeeded({
-      messages,
-      contextWindow: 10_000,
-      settings: {
-        enabled: true,
-        reserveTokens: 100,
-        keepRecentTokens: 50,
-        thresholdTokens: 100,
-      },
-      summarize: async () => null,
-    });
-    expect(result.compacted).toBe(true);
-    expect(result.hardDrop).toBe(true);
-    expect(result.messages.every((m) => !m._compaction)).toBe(true);
-    expect(
-      result.messages.some((m) => String(m.content || '').includes('keep me')),
-    ).toBe(true);
+    expect(result.ratio).toBeLessThan(1);
   });
 });
 
@@ -248,7 +249,7 @@ describe('buildSummaryUserMessage', () => {
   it('wraps summary for the model', () => {
     const m = buildSummaryUserMessage('hello', 999);
     expect(m.role).toBe('user');
-    expect(String(m.content)).toContain('<summary>');
+    expect(String(m.content)).toContain('<context-summary>');
     expect(String(m.content)).toContain('hello');
     expect(m.tokensBefore).toBe(999);
   });
@@ -302,34 +303,32 @@ describe('getMaxToolResultChars', () => {
       }),
     ).toBe(50_000);
   });
+
+  it('treats 0 as unlimited (no fallback to 120000)', () => {
+    expect(getMaxToolResultChars({ RAG_EVIDENCE_MAX_CHARS: '0' })).toBe(0);
+    expect(getMaxToolResultChars({ AGENT_MAX_TOOL_RESULT_CHARS: '0' })).toBe(0);
+  });
 });
 
 describe('applyMidRunContextGuard', () => {
   it('caps tool results even when under compaction threshold', async () => {
     const big = 'x'.repeat(10_000);
     const messages = [user('q'), assistant('t'), toolResult(big)];
-    const summarize = vi.fn(async () => 'SUMMARY');
     const result = await applyMidRunContextGuard({
       messages,
-      contextWindow: 256_000,
-      settings: {
-        enabled: true,
-        reserveTokens: 16_384,
-        keepRecentTokens: 20_000,
-        thresholdTokens: 1_000_000, // never compact
-      },
+      settings: defaultSettings({ maxTokens: 1_000_000 }),
       maxToolResultChars: 500,
-      summarize,
     });
     expect(result.toolResultsCapped).toBe(true);
     expect(result.compacted).toBe(false);
     expect(result.changed).toBe(true);
-    expect(summarize).not.toHaveBeenCalled();
     expect(result.tokensAfter).toBeLessThan(result.tokensBefore);
   });
 
-  it('compacts when over threshold after cap', async () => {
+  it('compacts with local summary when over maxTokens', async () => {
     const messages = [
+      user(padTokens(8_000)),
+      assistant(padTokens(8_000)),
       user(padTokens(8_000)),
       assistant(padTokens(8_000)),
       user('latest'),
@@ -337,18 +336,41 @@ describe('applyMidRunContextGuard', () => {
     ];
     const result = await applyMidRunContextGuard({
       messages,
-      contextWindow: 256_000,
-      settings: {
-        enabled: true,
-        reserveTokens: 1_000,
-        keepRecentTokens: 200,
-        thresholdTokens: 100,
-      },
+      settings: defaultSettings({
+        maxTokens: 100,
+        compressToTokens: 50,
+        minKeepRatio: 0.5,
+      }),
       maxToolResultChars: 50_000,
-      summarize: async () => '## User goals\n- mid-run',
     });
     expect(result.changed).toBe(true);
     expect(result.compacted).toBe(true);
-    expect(String(result.messages[0].content)).toContain('mid-run');
+    expect(String(result.messages[0].content)).toContain('<context-summary>');
+    expect(result.hardDrop).toBe(false);
+    expect(result.shouldCompress).toBe(true);
+    expect(result.diagnostics.droppedMessageCount).toBeGreaterThan(0);
+  });
+
+  it('always returns diagnostics even when nothing changed', async () => {
+    const messages = [user('hi'), assistant('hello')];
+    const result = await applyMidRunContextGuard({
+      messages,
+      settings: defaultSettings({ maxTokens: 1_000_000 }),
+      maxToolResultChars: 50_000,
+    });
+    expect(result.changed).toBe(false);
+    expect(result.compacted).toBe(false);
+    expect(result.shouldCompress).toBe(false);
+    expect(result.diagnostics.messageCountBefore).toBe(2);
+    expect(result.diagnostics.rolesBefore.user).toBe(1);
+    expect(result.diagnostics.toolCapDetails).toEqual([]);
+    const line = formatContextManageLog(result, {
+      conversationId: 'c1',
+      label: 'pre-llm#1',
+    });
+    expect(line).toContain('context-manage conv=c1 pre-llm#1');
+    expect(line).toContain('compaction=no (under maxTokens)');
+    expect(line).toContain('toolResultCap=none');
+    expect(line).toContain('changed=false');
   });
 });

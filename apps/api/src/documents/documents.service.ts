@@ -255,6 +255,221 @@ export class DocumentsService {
     }
   }
 
+  /**
+   * Create an empty virtual document (no file bytes) for manual chunk authoring.
+   * RAGFlow: POST .../documents?type=empty
+   */
+  async createEmpty(userId: string, knowledgeBaseId: string, name: string) {
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const safeName = sanitizeDocumentName(name);
+    if (!safeName) throw badRequest('name is required');
+
+    const rfDoc = await this.ragflow.createEmptyDocument(
+      kb.ragflowDatasetId,
+      safeName,
+    );
+    if (!rfDoc?.id) throw badRequest('RAGFlow empty document create failed');
+
+    const doc = await this.prisma.document.create({
+      data: {
+        knowledgeBaseId: kb.id,
+        ownerUserId: userId,
+        ragflowDocumentId: rfDoc.id,
+        name: rfDoc.name || safeName,
+        sizeBytes: BigInt(0),
+        status: 'unstart',
+        progress: 0,
+        chunkCount: 0,
+        sourceType: 'file',
+      },
+    });
+    return this.serialize(doc, null);
+  }
+
+  private mapChunk(c: {
+    id: string;
+    content?: string;
+    content_with_weight?: string;
+    available?: boolean;
+    important_keywords?: string[];
+    positions?: unknown;
+    image_id?: string;
+  }) {
+    return {
+      id: c.id,
+      content: c.content || c.content_with_weight || '',
+      available: c.available ?? true,
+      importantKeywords: c.important_keywords || [],
+      positions: Array.isArray(c.positions) ? c.positions : [],
+      imageId: c.image_id || undefined,
+    };
+  }
+
+  private async syncChunkCountStatus(
+    doc: Document,
+    total: number,
+  ): Promise<Document> {
+    const data =
+      total > 0
+        ? {
+            chunkCount: total,
+            status: 'done' as const,
+            progress: 1,
+            errorMessage: null,
+            progressMsg: doc.progressMsg,
+          }
+        : {
+            chunkCount: 0,
+            status: 'unstart' as const,
+            progress: 0,
+            errorMessage: null as string | null,
+          };
+    return this.prisma.document.update({
+      where: { id: doc.id },
+      data,
+    });
+  }
+
+  async addChunk(
+    userId: string,
+    knowledgeBaseId: string,
+    docId: string,
+    input: { content: string; importantKeywords?: string[] },
+  ) {
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+    if (!doc.ragflowDocumentId) {
+      throw badRequest('document is not available in RAGFlow yet');
+    }
+    const content = (input.content || '').trim();
+    if (!content) throw badRequest('content is required');
+    const maxChars = maxChunkContentChars();
+    if (content.length > maxChars) {
+      throw badRequest(`content exceeds max length ${maxChars}`);
+    }
+    const keywords = normalizeKeywords(input.importantKeywords);
+
+    const chunk = await this.ragflow.addChunk(
+      kb.ragflowDatasetId,
+      doc.ragflowDocumentId,
+      { content, importantKeywords: keywords },
+    );
+
+    const listed = await this.ragflow.listChunks(
+      kb.ragflowDatasetId,
+      doc.ragflowDocumentId,
+      { page: 1, pageSize: 1 },
+    );
+    const total = listed.total || doc.chunkCount + 1;
+    const updated = await this.syncChunkCountStatus(doc, total);
+    return {
+      document: this.serialize(
+        updated,
+        await this.transcription.latestJob(updated.id),
+      ),
+      chunk: this.mapChunk(chunk),
+    };
+  }
+
+  async updateChunk(
+    userId: string,
+    knowledgeBaseId: string,
+    docId: string,
+    chunkId: string,
+    input: {
+      content?: string;
+      importantKeywords?: string[];
+      available?: boolean;
+    },
+  ) {
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+    if (!doc.ragflowDocumentId) {
+      throw badRequest('document is not available in RAGFlow yet');
+    }
+    if (!chunkId?.trim()) throw badRequest('chunkId is required');
+
+    const patch: {
+      content?: string;
+      importantKeywords?: string[];
+      available?: boolean;
+    } = {};
+    if (input.content !== undefined) {
+      const content = input.content.trim();
+      if (!content) throw badRequest('content is required');
+      const maxChars = maxChunkContentChars();
+      if (content.length > maxChars) {
+        throw badRequest(`content exceeds max length ${maxChars}`);
+      }
+      patch.content = content;
+    }
+    if (input.importantKeywords !== undefined) {
+      patch.importantKeywords = normalizeKeywords(input.importantKeywords);
+    }
+    if (input.available !== undefined) {
+      patch.available = Boolean(input.available);
+    }
+    if (
+      patch.content === undefined &&
+      patch.importantKeywords === undefined &&
+      patch.available === undefined
+    ) {
+      throw badRequest('no fields to update');
+    }
+
+    await this.ragflow.updateChunk(
+      kb.ragflowDatasetId,
+      doc.ragflowDocumentId,
+      chunkId.trim(),
+      patch,
+    );
+
+    return {
+      document: this.serialize(
+        doc,
+        await this.transcription.latestJob(doc.id),
+      ),
+      ok: true as const,
+    };
+  }
+
+  async deleteChunks(
+    userId: string,
+    knowledgeBaseId: string,
+    docId: string,
+    chunkIds: string[],
+  ) {
+    const kb = await this.knowledge.getEditable(userId, knowledgeBaseId);
+    const doc = await this.getInEditableKb(userId, knowledgeBaseId, docId);
+    if (!doc.ragflowDocumentId) {
+      throw badRequest('document is not available in RAGFlow yet');
+    }
+    const ids = (chunkIds || [])
+      .map((id) => String(id || '').trim())
+      .filter(Boolean);
+    if (!ids.length) throw badRequest('chunkIds is required');
+
+    await this.ragflow.deleteChunks(
+      kb.ragflowDatasetId,
+      doc.ragflowDocumentId,
+      ids,
+    );
+
+    const listed = await this.ragflow.listChunks(
+      kb.ragflowDatasetId,
+      doc.ragflowDocumentId,
+      { page: 1, pageSize: 1 },
+    );
+    const updated = await this.syncChunkCountStatus(doc, listed.total || 0);
+    return {
+      document: this.serialize(
+        updated,
+        await this.transcription.latestJob(updated.id),
+      ),
+      ok: true as const,
+    };
+  }
+
   private async uploadAudio(
     userId: string,
     kb: { id: string; ragflowDatasetId: string },
@@ -677,20 +892,25 @@ export class DocumentsService {
     }
 
     let status = this.ragflow.mapRunToStatus(rf.run);
-    // If chunks already exist, treat as done
+    // Empty/manual docs never run parse — RAGFlow keeps run=UNSTART even when
+    // chunks exist. Promote unstart→done when chunks exist; also treat fully
+    // progressed docs with chunks as done. Do not clobber in-flight parse.
     if (status !== 'done' && status !== 'fail') {
       const listed = await this.ragflow.listChunks(kb.ragflowDatasetId, doc.ragflowDocumentId, {
         page: 1,
         pageSize: 1,
       });
-      if (listed.total > 0 && (rf.progress ?? 0) >= 1) status = 'done';
-      if (listed.total > 0 && status === 'unstart') {
-        // keep unstart until parse called; don't flip solely on chunks in real mode
+      if (
+        listed.total > 0 &&
+        (status === 'unstart' || (rf.progress ?? 0) >= 1)
+      ) {
+        status = 'done';
       }
     }
 
-    const progress =
+    let progress =
       typeof rf.progress === 'number' ? rf.progress : status === 'done' ? 1 : doc.progress;
+    if (status === 'done' && !(progress > 0)) progress = 1;
     const chunkCount =
       typeof rf.chunk_count === 'number'
         ? rf.chunk_count
@@ -761,27 +981,43 @@ export class DocumentsService {
         pageSize: opts.pageSize || 20,
       };
     }
-    const result = await this.ragflow.listChunks(kb.ragflowDatasetId, doc.ragflowDocumentId, opts);
-    if (result.total !== doc.chunkCount) {
-      await this.prisma.document.update({
-        where: { id: doc.id },
-        data: { chunkCount: result.total },
-      });
+    let result: { chunks: Array<{
+      id: string;
+      content?: string;
+      content_with_weight?: string;
+      available?: boolean;
+      important_keywords?: string[];
+      positions?: unknown;
+      image_id?: string;
+    }>; total: number };
+    try {
+      result = await this.ragflow.listChunks(
+        kb.ragflowDatasetId,
+        doc.ragflowDocumentId,
+        opts,
+      );
+    } catch {
+      // Empty / unparsed docs may have no ES index yet (RAGFlow). Treat as zero chunks
+      // so the UI can still open and add manual chunks.
+      result = { chunks: [], total: Number(doc.chunkCount) || 0 };
     }
+    // Keep chunkCount + status in sync for empty/manual docs (chunks ⇒ done
+    // without parse). Do not clobber in-progress parse (`running`) from here.
+    const needsSync =
+      result.total !== doc.chunkCount ||
+      (result.total > 0 && doc.status === 'unstart') ||
+      (result.total === 0 &&
+        doc.status === 'done' &&
+        doc.sizeBytes === BigInt(0));
+    const synced = needsSync
+      ? await this.syncChunkCountStatus(doc, result.total)
+      : doc;
     return {
       document: this.serialize(
-        { ...doc, chunkCount: result.total },
-        await this.transcription.latestJob(doc.id),
+        synced,
+        await this.transcription.latestJob(synced.id),
       ),
-      chunks: result.chunks.map((c) => ({
-        id: c.id,
-        content: c.content || c.content_with_weight || '',
-        available: c.available ?? true,
-        importantKeywords: c.important_keywords || [],
-        // RAGFlow: [pageNumber, x1, x2, y1, y2] for PDF highlight
-        positions: Array.isArray(c.positions) ? c.positions : [],
-        imageId: c.image_id || undefined,
-      })),
+      chunks: result.chunks.map((c) => this.mapChunk(c)),
       total: result.total,
       page: opts.page || 1,
       pageSize: opts.pageSize || 20,
@@ -844,4 +1080,33 @@ export class DocumentsService {
     await this.prisma.document.delete({ where: { id: doc.id } });
     return { ok: true };
   }
+}
+
+/** Max characters per manual chunk body (env MAX_CHUNK_CONTENT_CHARS). */
+function maxChunkContentChars(): number {
+  const n = Number(process.env.MAX_CHUNK_CONTENT_CHARS);
+  // Default 1_000_000: large paste / full-page notes; still bounded for safety.
+  if (Number.isFinite(n) && n > 0) return Math.floor(n);
+  return 1_000_000;
+}
+
+const MAX_KEYWORDS = 32;
+const MAX_KEYWORD_LEN = 64;
+
+function sanitizeDocumentName(name: string): string {
+  return (name || '')
+    .trim()
+    .replace(/[\\/]/g, '_')
+    .slice(0, 200);
+}
+
+function normalizeKeywords(raw?: string[]): string[] {
+  if (!raw?.length) return [];
+  const out: string[] = [];
+  for (const k of raw) {
+    const t = String(k || '').trim().slice(0, MAX_KEYWORD_LEN);
+    if (t) out.push(t);
+    if (out.length >= MAX_KEYWORDS) break;
+  }
+  return out;
 }

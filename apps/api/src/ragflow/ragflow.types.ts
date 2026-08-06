@@ -47,6 +47,21 @@ export type CreateDatasetInput = {
   parserConfig?: Record<string, unknown>;
 };
 
+/** RAGFlow POST .../documents/{id}/chunks */
+export type AddChunkInput = {
+  content: string;
+  importantKeywords?: string[];
+  questions?: string[];
+};
+
+/** RAGFlow PATCH .../chunks/{chunkId} */
+export type UpdateChunkInput = {
+  content?: string;
+  importantKeywords?: string[];
+  questions?: string[];
+  available?: boolean;
+};
+
 export type RetrieveHit = {
   id: string;
   content: string;

@@ -293,7 +293,7 @@ export class TranscriptionWorker implements OnModuleInit, OnModuleDestroy {
         });
       } else {
         // ── Optional client-side transcode (default OFF) ──
-        // Remote unified STT (e.g. 192.168.1.11:8002) converts mp4→16k mono wav
+        // Remote unified STT (e.g. 192.168.1.61:8002) converts mp4→16k mono wav
         // in-process before SenseVoice. Enable STT_CLIENT_TRANSCODE only if the
         // STT server cannot accept video containers.
         let sttInputAbs = sourceAbs;

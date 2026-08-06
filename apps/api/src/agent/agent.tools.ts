@@ -12,9 +12,10 @@ import {
   dedupeHitsById,
   evidenceLabelFromScore,
   filterHitsByThreshold,
-  formatEvidenceForModel,
+  formatEvidenceForModelWithStats,
   mappedHitsToCitationSources,
   type CitationSource,
+  type FormatEvidenceStats,
   type MappedHit,
 } from '../rag/evidence';
 import {
@@ -37,7 +38,12 @@ function logEvidenceForLlm(
   tool: string,
   hits: MappedHit[],
   text: string,
-  meta?: { query?: string; path?: string; insufficient?: boolean },
+  meta?: {
+    query?: string;
+    path?: string;
+    insufficient?: boolean;
+    stats?: FormatEvidenceStats;
+  },
 ): void {
   const scores = hits
     .map((h) =>
@@ -46,13 +52,24 @@ function logEvidenceForLlm(
         : '-',
     )
     .join(', ');
+  const s = meta?.stats;
+  const compressPart = s
+    ? ` compressed=${s.compressed}` +
+      ` chunksTruncated=${s.chunksTruncated}/${s.hitCount}` +
+      ` omittedByBudget=${s.omittedByTotalBudget}` +
+      ` included=${s.includedCount}` +
+      ` rawChars=${s.rawContentChars}` +
+      ` outChars=${s.outputChars}` +
+      ` maxChunkChars=${s.maxChunkChars}` +
+      ` maxTotalChars=${s.maxTotalChars}`
+    : ` evidenceChars=${text.length}`;
   toolsLogger.log(
-    `[${tool}] evidence �?LLM: hits=${hits.length}` +
+    `[${tool}] evidence→LLM: hits=${hits.length}` +
       (meta?.query != null ? ` query="${meta.query}"` : '') +
       (meta?.path ? ` path=${meta.path}` : '') +
       (meta?.insufficient ? ' insufficient=true' : '') +
       (scores ? ` scores=[${scores}]` : '') +
-      ` evidenceChars=${text.length}`,
+      ` ${compressPart}`,
   );
 }
 
@@ -125,7 +142,7 @@ function scopeIdsFromParams(params: Record<string, unknown>): string[] {
 /**
  * Optional light multi-query expansion without an extra LLM call:
  * if the agent already passes queries[], use them; otherwise use question alone
- * (or split on "?" / "�? for multi-part questions).
+ * (or split on "?" / "�? for multi-part questions).
  */
 function resolveQueries(
   params: Record<string, unknown>,
@@ -211,7 +228,7 @@ export function createUserTools(deps: {
       queries: Type.Optional(
         Type.Array(Type.String(), {
           description:
-            'Optional 1�? short semantic sub-queries for multi-aspect retrieval; merged and deduped',
+            'Optional 1�? short semantic sub-queries for multi-aspect retrieval; merged and deduped',
         }),
       ),
       knowledgeBaseId: Type.Optional(
@@ -286,7 +303,7 @@ export function createUserTools(deps: {
         (maxScore > 0 && maxScore < ragCfg.similarityThreshold + 0.1);
 
       const sources = mappedHitsToCitationSources(merged);
-      const text = formatEvidenceForModel(merged, {
+      const { text, stats } = formatEvidenceForModelWithStats(merged, {
         maxChunkChars: ragCfg.maxChunkChars,
         maxTotalChars: ragCfg.evidenceMaxChars,
         query: queries.join(' | '),
@@ -301,6 +318,7 @@ export function createUserTools(deps: {
         query: queries.join(' | '),
         path: 'semantic',
         insufficient,
+        stats,
       });
 
       return {
@@ -323,7 +341,7 @@ export function createUserTools(deps: {
     name: 'keyword_search',
     label: 'Keyword search',
     description:
-      'Keyword / exact-term retrieval via RAGFlow /api/v1/retrieval (vector_similarity_weight=0, highlight). Use for error codes (e.g. ERR-xxxx), clause numbers, person names (人名), job/position titles (職位/職稱), company names (公司�?, department names (部門�?, proper nouns, document titles, and exact phrases. Pass knowledgeBaseIds from the UI selection. For conceptual "how does X work" questions use retrieve_chunks instead. May be combined with retrieve_chunks in the same turn. Do not pass a result limit �?server returns up to the configured page size.',
+      'Keyword / exact-term retrieval via RAGFlow /api/v1/retrieval (vector_similarity_weight=0, highlight). Use for error codes (e.g. ERR-xxxx), clause numbers, person names (人名), job/position titles (職位/職稱), company names (公司�?, department names (部門�?, proper nouns, document titles, and exact phrases. Pass knowledgeBaseIds from the UI selection. For conceptual "how does X work" questions use retrieve_chunks instead. May be combined with retrieve_chunks in the same turn. Do not pass a result limit �?server returns up to the configured page size.',
     parameters: Type.Object({
       query: Type.String({
         description:
@@ -352,7 +370,7 @@ export function createUserTools(deps: {
         };
       }
 
-      // Always use server RAG_PAGE_SIZE �?models often pass topK=10 and cap every search.
+      // Always use server RAG_PAGE_SIZE �?models often pass topK=10 and cap every search.
       const pageSize = ragCfg.pageSize;
       const candidateTopK = Math.max(pageSize, ragCfg.keywordTopK);
       const thr = ragCfg.keywordSimilarityThreshold;
@@ -381,7 +399,7 @@ export function createUserTools(deps: {
           merged.length === 0 || (maxScore > 0 && maxScore < thr + 0.1);
 
         const sources = mappedHitsToCitationSources(merged);
-        const text = formatEvidenceForModel(merged, {
+        const { text, stats } = formatEvidenceForModelWithStats(merged, {
           maxChunkChars: ragCfg.maxChunkChars,
           maxTotalChars: ragCfg.evidenceMaxChars,
           query,
@@ -397,6 +415,7 @@ export function createUserTools(deps: {
           query,
           path,
           insufficient,
+          stats,
         });
 
         return {
@@ -439,7 +458,7 @@ export function createUserTools(deps: {
     name: 'summarize_document',
     label: 'Summarize document',
     description:
-      'Read a full document in order (all chunks) and produce material for a whole-document summary. Prefer this for "总结/摘要/summarize this document" over retrieve_chunks or keyword_search. Pass knowledgeBaseIds from the UI selection. Identify the document via appDocumentId (best), documentNameHint (filename/title), or omit both when the selected KB has exactly one indexed document. If the user asked for a length (e.g. 5000�?/ 2000 characters) or topical focus, pass that in focus. Do NOT chain many keyword searches for a summary.',
+      'Read a full document in order (all chunks) and produce material for a whole-document summary. Prefer this for "总结/摘要/summarize this document" over retrieve_chunks or keyword_search. Pass knowledgeBaseIds from the UI selection. Identify the document via appDocumentId (best), documentNameHint (filename/title), or omit both when the selected KB has exactly one indexed document. If the user asked for a length (e.g. 5000�?/ 2000 characters) or topical focus, pass that in focus. Do NOT chain many keyword searches for a summary.',
     parameters: Type.Object({
       knowledgeBaseIds: Type.Array(Type.String(), {
         description:
@@ -460,7 +479,7 @@ export function createUserTools(deps: {
       focus: Type.Optional(
         Type.String({
           description:
-            'Optional focus and/or length for the summary. Include user length requests (e.g. "5000�?, "about 2000 characters") and topical focus (e.g. only policy points).',
+            'Optional focus and/or length for the summary. Include user length requests (e.g. "5000�?, "about 2000 characters") and topical focus (e.g. only policy points).',
         }),
       ),
     }),
@@ -585,7 +604,7 @@ export function createUserTools(deps: {
     name: 'profile_update',
     label: 'Update profile',
     description:
-      'Update the user L1 profile (stable identity & defaults): display name, language, response style, bio. Use when the user sets how to address them, default reply language, overall answer style, or short background (叫我�?以後用繁�?回答短一�?我是�?. Pass only fields that should change. To clear a field, pass empty string. For free-form facts/preferences that are not these profile fields, use memory_save instead. CRITICAL for displayName: copy the name EXACTLY as the user typed it (same letters/spelling); never "correct", transliterate, or retype from memory.',
+      'Update the user L1 profile (stable identity & defaults): display name, language, response style, bio. Use when the user sets how to address them, default reply language, overall answer style, or short background (叫我�?以後用繁�?回答短一�?我是�?. Pass only fields that should change. To clear a field, pass empty string. For free-form facts/preferences that are not these profile fields, use memory_save instead. CRITICAL for displayName: copy the name EXACTLY as the user typed it (same letters/spelling); never "correct", transliterate, or retype from memory.',
     parameters: Type.Object({
       displayName: Type.Optional(
         Type.String({
@@ -669,7 +688,7 @@ export function createUserTools(deps: {
             {
               type: 'text' as const,
               text:
-                `Updated profile (canonical values from database �?quote displayName EXACTLY when confirming):\n` +
+                `Updated profile (canonical values from database �?quote displayName EXACTLY when confirming):\n` +
                 `${lines.join('\n')}\n` +
                 `Confirm briefly using these exact strings. Profile is injected every turn going forward.`,
             },
@@ -710,13 +729,13 @@ export function createUserTools(deps: {
       pinned: Type.Optional(
         Type.Boolean({
           description:
-            'true if the user wants this always prioritized (記住並置�?/ pin)',
+            'true if the user wants this always prioritized (記住並置�?/ pin)',
         }),
       ),
       importance: Type.Optional(
         Type.Number({
           description:
-            '1�? importance (default 3; use 4�? for strong preferences)',
+            '1�? importance (default 3; use 4�? for strong preferences)',
         }),
       ),
     }),
@@ -746,7 +765,7 @@ export function createUserTools(deps: {
         importance = Math.min(5, Math.max(1, Math.floor(params.importance)));
       }
       try {
-        // Chat path only: optional LLM polish �?one sentence; failure keeps original.
+        // Chat path only: optional LLM polish �?one sentence; failure keeps original.
         const polished = await maybePolishMemoryContent(content);
         const item = await memory.createItem(userId, {
           content: polished.content,
@@ -792,7 +811,7 @@ export function createUserTools(deps: {
     name: 'memory_forget',
     label: 'Forget memory',
     description:
-      'Delete a previously saved personal memory when the user says 忘掉/忘记/forget/別再記得/刪除記憶. Pass query as the memory id (preferred) or a distinctive content substring. If multiple match, list them and ask the user to clarify �?do not guess.',
+      'Delete a previously saved personal memory when the user says 忘掉/忘记/forget/別再記得/刪除記憶. Pass query as the memory id (preferred) or a distinctive content substring. If multiple match, list them and ask the user to clarify �?do not guess.',
     parameters: Type.Object({
       query: Type.String({
         description:
@@ -875,7 +894,7 @@ export function createUserTools(deps: {
             content: [
               {
                 type: 'text' as const,
-                text: 'No active personal memories stored. User can add some via chat (記住�? or My Memory settings.',
+                text: 'No active personal memories stored. User can add some via chat (記住�? or My Memory settings.',
               },
             ],
             details: { ok: true, items: [] },
@@ -884,7 +903,7 @@ export function createUserTools(deps: {
         const lines = slice
           .map(
             (c, i) =>
-              `${i + 1}. id=${c.id} [${c.category}]${c.pinned ? '[pinned]' : ''} �?{c.importance} ${c.content}`,
+              `${i + 1}. id=${c.id} [${c.category}]${c.pinned ? '[pinned]' : ''} �?{c.importance} ${c.content}`,
           )
           .join('\n');
         return {
@@ -926,34 +945,34 @@ export const DOMAIN_SYSTEM_PROMPT = `You are the CSB Knowledge Base Portal assis
 You answer the current user's questions. Knowledge bases are created, managed, and selected only in the UI; you do not create or list them.
 
 Language (priority, highest first):
-- Explicit override in the current user message (e.g. "用英文回�? / "reply in English") �?honor for this turn.
-- Profile Language (injected each turn under Profile �?Language when set in My Memory or via profile_update) �?use as the default reply language for all turns. Do not switch just because the user wrote in another language.
-- If Profile has no Language: match the language of the user's message when clear (Chinese �?Chinese, English �?English, etc.).
+- Explicit override in the current user message (e.g. "用英文回�? / "reply in English") �?honor for this turn.
+- Profile Language (injected each turn under Profile �?Language when set in My Memory or via profile_update) �?use as the default reply language for all turns. Do not switch just because the user wrote in another language.
+- If Profile has no Language: match the language of the user's message when clear (Chinese �?Chinese, English �?English, etc.).
 - If still unclear: Traditional Chinese (繁體中文).
 - Profile language can be set/changed via profile_update or the My Memory UI; after it is set, prefer it until the user changes it or overrides in a message.
 
 Personal memory tools (always available; durable across chats):
-- profile_update �?L1 stable identity/defaults: displayName (叫我�?/ should be �?/ my name is �?, language, responseStyle, bio. Pass only changed fields. Prefer this over memory_save for those fields. displayName MUST be copied character-for-character from the user message (never retype or "fix" spelling).
-- memory_save �?L2 free-form long-term facts (記住/记得/remember/記著/幫我記住) that are NOT name/language/style/bio. Pass the user's intent as content; server may lightly polish to one sentence (proper nouns kept exact). category preference|fact|project|other. Pin only if they ask.
-- memory_forget �?forget an L2 item (忘掉/忘记/forget). Prefer memory id; else content substring. If multiple match, ask which one.
-- memory_list �?what you remember / 你還記得什�?(lists L2 items; profile is separate and already in context when set).
-- When the user asks their name / 我叫什�?/ what is my name: use the injected Profile Name field EXACTLY (same characters). Do not invent or alter spelling. If Profile has no Name, say you do not have a stored name.
+- profile_update �?L1 stable identity/defaults: displayName (叫我�?/ should be �?/ my name is �?, language, responseStyle, bio. Pass only changed fields. Prefer this over memory_save for those fields. displayName MUST be copied character-for-character from the user message (never retype or "fix" spelling).
+- memory_save �?L2 free-form long-term facts (記住/记得/remember/記著/幫我記住) that are NOT name/language/style/bio. Pass the user's intent as content; server may lightly polish to one sentence (proper nouns kept exact). category preference|fact|project|other. Pin only if they ask.
+- memory_forget �?forget an L2 item (忘掉/忘记/forget). Prefer memory id; else content substring. If multiple match, ask which one.
+- memory_list �?what you remember / 你還記得什�?(lists L2 items; profile is separate and already in context when set).
+- When the user asks their name / 我叫什�?/ what is my name: use the injected Profile Name field EXACTLY (same characters). Do not invent or alter spelling. If Profile has no Name, say you do not have a stored name.
 - After profile_update, confirm using the tool result displayName string exactly as returned (DB canonical).
 - Do NOT call memory_save or profile_update for one-off instructions that only apply to the current answer.
 - Do NOT put document/PDF content into memory; use knowledge bases for documents.
 - Profile and memories can also be edited in the UI (My Memory).
 
 Retrieval tools (when knowledge bases are selected):
-- summarize_document �?WHOLE-document summary / 总结整份文件 / 全文摘要 / "summarize this document". Reads all chunks in order and returns full text for you to summarize. Prefer ONE call. Pass knowledgeBaseIds; identify doc via appDocumentId, documentNameHint (filename), or omit both if the selected KB has exactly one document. Put length requests (e.g. 5000�? and topical focus into the focus parameter.
-- retrieve_chunks �?concepts, mechanisms, partial topics, comparisons, open-ended factual questions (semantic/hybrid). NOT for whole-document summaries.
-- keyword_search �?error codes, clause numbers, person names (人名), job/position titles (職位/職稱), company names (公司�?, department names (部門�?, proper nouns, exact phrases, titles. Prefer this whenever the user asks about a specific person, role/title, company, or department in documents. Do NOT spam keyword_search to "cover" a full document for summary.
+- summarize_document �?WHOLE-document summary / 总结整份文件 / 全文摘要 / "summarize this document". Reads all chunks in order and returns full text for you to summarize. Prefer ONE call. Pass knowledgeBaseIds; identify doc via appDocumentId, documentNameHint (filename), or omit both if the selected KB has exactly one document. Put length requests (e.g. 5000�? and topical focus into the focus parameter.
+- retrieve_chunks �?concepts, mechanisms, partial topics, comparisons, open-ended factual questions (semantic/hybrid). NOT for whole-document summaries.
+- keyword_search �?error codes, clause numbers, person names (人名), job/position titles (職位/職稱), company names (公司�?, department names (部門�?, proper nouns, exact phrases, titles. Prefer this whenever the user asks about a specific person, role/title, company, or department in documents. Do NOT spam keyword_search to "cover" a full document for summary.
 - You may call retrieve_chunks and keyword_search in the same turn for non-summary Q&A when helpful (concept + exact term).
 
 Rules:
 - Knowledge bases are selected by the user in the UI only. Never invent or guess knowledge base ids or document ids.
-- Do NOT call retrieval tools for greetings, small talk, or meta questions about you (e.g. hello, hi, 你好, who are you, 你是�? what can you do, 你可以做什�? thanks). Answer those directly from this system role without tools or sources. For "what do you remember about me", use memory_list instead of retrieval.
-- Whole-document summary intent (总结/摘要/概述整份/summarize this document/全文) �?call summarize_document once. Do NOT chain many retrieve_chunks or keyword_search queries for that intent.
-- When the user specifies a length or depth for a summary (e.g. 5000�? �?000�? about 2000 characters, detailed/詳細), you MUST honor it: pass that requirement in summarize_document.focus and expand the final answer to approach the requested length. Do not stop at a short outline when they asked for a long summary.
+- Do NOT call retrieval tools for greetings, small talk, or meta questions about you (e.g. hello, hi, 你好, who are you, 你是�? what can you do, 你可以做什�? thanks). Answer those directly from this system role without tools or sources. For "what do you remember about me", use memory_list instead of retrieval.
+- Whole-document summary intent (总结/摘要/概述整份/summarize this document/全文) �?call summarize_document once. Do NOT chain many retrieve_chunks or keyword_search queries for that intent.
+- When the user specifies a length or depth for a summary (e.g. 5000�? �?000�? about 2000 characters, detailed/詳細), you MUST honor it: pass that requirement in summarize_document.focus and expand the final answer to approach the requested length. Do not stop at a short outline when they asked for a long summary.
 - For non-summary Q&A, be concise and practical unless the user asks for detail or a specific length.
 - When the user asks a non-summary factual question that needs document content AND selected knowledge base IDs are present, you MUST call at least one retrieval tool (retrieve_chunks and/or keyword_search) with those knowledgeBaseIds before answering. Do not invent document content.
 - Prefer a self-contained question (resolve "it/this/上面" from history). Optional queries[] for multi-aspect topics on retrieve_chunks.
@@ -1004,11 +1023,11 @@ export function buildSelectedKbPromptPrefix(
     docBlock +
     `If this is a greeting, small talk, or a question about you / your capabilities (not document facts), answer directly WITHOUT calling retrieval tools. ` +
     `If the user wants a whole-document summary (总结/摘要/summarize this document), call summarize_document once with knowledgeBaseIds=${ids} ` +
-    `(pass documentNameHint if they named a file; appDocumentId if known; pass focus with any length request like 5000�?and topical focus). ` +
-    `Honor user-requested summary length �?expand thoroughly, do not give a short outline when they asked for many characters. Do not chain keyword_search for summaries. ` +
+    `(pass documentNameHint if they named a file; appDocumentId if known; pass focus with any length request like 5000�?and topical focus). ` +
+    `Honor user-requested summary length �?expand thoroughly, do not give a short outline when they asked for many characters. Do not chain keyword_search for summaries. ` +
     `If the user needs other facts from the selected knowledge bases, retrieve with knowledgeBaseIds=${ids} before answering ` +
     `(use retrieve_chunks for concepts; keyword_search for codes/exact phrases/person names/job titles/company names/department names; both if helpful). ` +
-    `Base your analysis only on the retrieved evidence. Cite with [1], [2], �?and mention document names.\n\n` +
+    `Base your analysis only on the retrieved evidence. Cite with [1], [2], �?and mention document names.\n\n` +
     rewriteHint +
     `[User question]\n`
   );

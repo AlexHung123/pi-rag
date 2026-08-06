@@ -320,6 +320,7 @@ export type ChunkItem = {
   id: string;
   content: string;
   available?: boolean;
+  importantKeywords?: string[];
   positions?: ChunkPosition[];
   imageId?: string;
 };
@@ -502,6 +503,40 @@ export const docApi = {
       body: form,
     });
   },
+  /** Create empty virtual document for manual chunk authoring. */
+  createEmpty: (kbId: string, name: string) =>
+    apiFetch<DocumentItem>(`/api/knowledge-bases/${kbId}/documents/empty`, {
+      method: 'POST',
+      body: JSON.stringify({ name }),
+    }),
+  addChunk: (
+    kbId: string,
+    docId: string,
+    body: { content: string; importantKeywords?: string[] },
+  ) =>
+    apiFetch<{ document: DocumentItem; chunk: ChunkItem }>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/chunks`,
+      { method: 'POST', body: JSON.stringify(body) },
+    ),
+  updateChunk: (
+    kbId: string,
+    docId: string,
+    chunkId: string,
+    body: {
+      content?: string;
+      importantKeywords?: string[];
+      available?: boolean;
+    },
+  ) =>
+    apiFetch<{ document: DocumentItem; ok: boolean }>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/chunks/${chunkId}`,
+      { method: 'PATCH', body: JSON.stringify(body) },
+    ),
+  deleteChunks: (kbId: string, docId: string, chunkIds: string[]) =>
+    apiFetch<{ document: DocumentItem; ok: boolean }>(
+      `/api/knowledge-bases/${kbId}/documents/${docId}/chunks`,
+      { method: 'DELETE', body: JSON.stringify({ chunkIds }) },
+    ),
   cancelTranscription: (kbId: string, docId: string) =>
     apiFetch<DocumentItem>(
       `/api/knowledge-bases/${kbId}/documents/${docId}/cancel-transcription`,

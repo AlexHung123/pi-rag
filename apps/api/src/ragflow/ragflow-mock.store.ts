@@ -68,6 +68,101 @@ export class RagflowMockStore {
     return out;
   }
 
+  /** RAGFlow POST .../documents?type=empty */
+  createEmptyDocument(datasetId: string, name: string): RagflowDocument {
+    const map = this.docsByDataset.get(datasetId);
+    if (!map) throw new Error(`dataset not found: ${datasetId}`);
+    const id = randomUUID().replace(/-/g, '');
+    const doc: MockDoc = {
+      id,
+      name,
+      size: 0,
+      run: 'UNSTART',
+      progress: 0,
+      progress_msg: '',
+      chunk_count: 0,
+      process_begin_at: null,
+      process_duration: 0,
+      buffer: Buffer.alloc(0),
+      chunks: [],
+    };
+    map.set(id, doc);
+    return doc;
+  }
+
+  /** RAGFlow POST .../documents/{id}/chunks */
+  addChunk(
+    datasetId: string,
+    documentId: string,
+    input: {
+      content: string;
+      importantKeywords?: string[];
+      questions?: string[];
+    },
+  ): RagflowChunk {
+    const doc = this.docsByDataset.get(datasetId)?.get(documentId);
+    if (!doc) throw new Error(`document not found: ${documentId}`);
+    const chunk: RagflowChunk = {
+      id: randomUUID().replace(/-/g, '').slice(0, 16),
+      content: input.content,
+      document_id: documentId,
+      available: true,
+      important_keywords: input.importantKeywords || [],
+    };
+    doc.chunks.push(chunk);
+    doc.chunk_count = doc.chunks.length;
+    doc.run = 'DONE';
+    doc.progress = 1;
+    doc.progress_msg = 'Manual chunks';
+    doc.status = '1';
+    return chunk;
+  }
+
+  /** RAGFlow PATCH .../chunks/{chunkId} */
+  updateChunk(
+    datasetId: string,
+    documentId: string,
+    chunkId: string,
+    input: {
+      content?: string;
+      importantKeywords?: string[];
+      questions?: string[];
+      available?: boolean;
+    },
+  ): void {
+    const doc = this.docsByDataset.get(datasetId)?.get(documentId);
+    if (!doc) throw new Error(`document not found: ${documentId}`);
+    const chunk = doc.chunks.find((c) => c.id === chunkId);
+    if (!chunk) throw new Error(`chunk not found: ${chunkId}`);
+    if (input.content !== undefined) chunk.content = input.content;
+    if (input.importantKeywords !== undefined) {
+      chunk.important_keywords = input.importantKeywords;
+    }
+    if (input.available !== undefined) chunk.available = input.available;
+  }
+
+  /** RAGFlow DELETE .../chunks with chunk_ids */
+  deleteChunks(
+    datasetId: string,
+    documentId: string,
+    chunkIds: string[],
+  ): void {
+    const doc = this.docsByDataset.get(datasetId)?.get(documentId);
+    if (!doc) throw new Error(`document not found: ${documentId}`);
+    const remove = new Set(chunkIds);
+    const before = doc.chunks.length;
+    doc.chunks = doc.chunks.filter((c) => !remove.has(c.id));
+    if (doc.chunks.length === before && chunkIds.length > 0) {
+      throw new Error(`rm_chunk deleted chunks 0, expect ${chunkIds.length}`);
+    }
+    doc.chunk_count = doc.chunks.length;
+    if (doc.chunks.length === 0) {
+      doc.run = 'UNSTART';
+      doc.progress = 0;
+      doc.progress_msg = '';
+    }
+  }
+
   parseDocuments(datasetId: string, documentIds: string[]) {
     const map = this.docsByDataset.get(datasetId);
     if (!map) throw new Error(`dataset not found: ${datasetId}`);

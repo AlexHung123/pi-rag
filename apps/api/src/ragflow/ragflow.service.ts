@@ -1,12 +1,14 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common'
 import {
+  AddChunkInput,
   CreateDatasetInput,
   KeywordSearchOptions,
   RagflowChunk,
   RagflowDataset,
   RagflowDocument,
   RetrieveHit,
-  RetrieveOptions
+  RetrieveOptions,
+  UpdateChunkInput
 } from './ragflow.types'
 import { RagflowMockStore } from './ragflow-mock.store'
 import { badRequest } from '../common/errors'
@@ -155,6 +157,110 @@ export class RagflowService implements OnModuleInit {
     }
     const data = await this.request<RagflowDocument[]>('POST', `/api/v1/datasets/${datasetId}/documents`, { form })
     return Array.isArray(data) ? data : []
+  }
+
+  /**
+   * Create an empty virtual document (no file bytes).
+   * RAGFlow: POST /api/v1/datasets/{dataset_id}/documents?type=empty
+   * Body: { name: string }
+   */
+  async createEmptyDocument(datasetId: string, name: string): Promise<RagflowDocument> {
+    if (this.useMock()) {
+      return this.mock.createEmptyDocument(datasetId, name)
+    }
+    const data = await this.request<RagflowDocument[] | RagflowDocument>(
+      'POST',
+      `/api/v1/datasets/${datasetId}/documents?type=empty`,
+      { body: { name } }
+    )
+    if (Array.isArray(data)) {
+      const doc = data[0]
+      if (!doc?.id) throw badRequest('RAGFlow empty document create failed')
+      return doc
+    }
+    if (!data?.id) throw badRequest('RAGFlow empty document create failed')
+    return data
+  }
+
+  /**
+   * Add a manual chunk to a document.
+   * RAGFlow: POST /api/v1/datasets/{dataset_id}/documents/{document_id}/chunks
+   */
+  async addChunk(
+    datasetId: string,
+    documentId: string,
+    input: AddChunkInput
+  ): Promise<RagflowChunk> {
+    if (this.useMock()) {
+      return this.mock.addChunk(datasetId, documentId, input)
+    }
+    const body: Record<string, unknown> = { content: input.content }
+    if (input.importantKeywords?.length) {
+      body.important_keywords = input.importantKeywords
+    }
+    if (input.questions?.length) {
+      body.questions = input.questions
+    }
+    const data = await this.request<{ chunk?: RagflowChunk } | RagflowChunk>(
+      'POST',
+      `/api/v1/datasets/${datasetId}/documents/${documentId}/chunks`,
+      { body }
+    )
+    const chunk =
+      data && typeof data === 'object' && 'chunk' in data
+        ? (data as { chunk?: RagflowChunk }).chunk
+        : (data as RagflowChunk)
+    if (!chunk?.id) throw badRequest('RAGFlow add chunk failed')
+    return chunk
+  }
+
+  /**
+   * Update a chunk (content / keywords / availability).
+   * RAGFlow: PATCH /api/v1/datasets/{dataset_id}/documents/{document_id}/chunks/{chunk_id}
+   */
+  async updateChunk(
+    datasetId: string,
+    documentId: string,
+    chunkId: string,
+    input: UpdateChunkInput
+  ): Promise<void> {
+    if (this.useMock()) {
+      this.mock.updateChunk(datasetId, documentId, chunkId, input)
+      return
+    }
+    const body: Record<string, unknown> = {}
+    if (input.content !== undefined) body.content = input.content
+    if (input.importantKeywords !== undefined) {
+      body.important_keywords = input.importantKeywords
+    }
+    if (input.questions !== undefined) body.questions = input.questions
+    if (input.available !== undefined) body.available = input.available
+    await this.request(
+      'PATCH',
+      `/api/v1/datasets/${datasetId}/documents/${documentId}/chunks/${chunkId}`,
+      { body }
+    )
+  }
+
+  /**
+   * Delete chunks by id.
+   * RAGFlow: DELETE /api/v1/datasets/{dataset_id}/documents/{document_id}/chunks
+   * Body: { chunk_ids: string[] }
+   */
+  async deleteChunks(
+    datasetId: string,
+    documentId: string,
+    chunkIds: string[]
+  ): Promise<void> {
+    if (this.useMock()) {
+      this.mock.deleteChunks(datasetId, documentId, chunkIds)
+      return
+    }
+    await this.request(
+      'DELETE',
+      `/api/v1/datasets/${datasetId}/documents/${documentId}/chunks`,
+      { body: { chunk_ids: chunkIds } }
+    )
   }
 
   async parseDocuments(datasetId: string, documentIds: string[]): Promise<void> {

@@ -27,9 +27,9 @@ import { mergeCitationSources } from '../rag/evidence';
 import { AgentRunToolGuard } from './agent-run-limits';
 import {
   applyMidRunContextGuard,
+  formatContextManageLog,
   getAgentCompactionSettings,
   getMaxToolResultChars,
-  summarizeWithChatCompletions,
   type CompactableMessage,
 } from './agent-compaction';
 import {
@@ -547,58 +547,40 @@ export class AgentService {
     };
 
     // Gate B: before every LLM call (including after tool results mid-run),
-    // cap oversized tool bodies and compact history if over threshold.
+    // cap oversized tool bodies and apply kode-style local context compression.
     // transformContext only changes the view for convertToLlm unless we also
     // write back to agent.state — we do both so the pool stays bounded.
-    agent.transformContext = async (msgs, signal) => {
+    // Always log the full context-manage decision (including no-op) so operators
+    // can see whether chunks/tool results were capped and whether history compacted.
+    let llmCallSeq = 0;
+    agent.transformContext = async (msgs, _signal) => {
       const settings = getAgentCompactionSettings();
-      const model = agent.state.model as
-        | { id?: string; baseUrl?: string; contextWindow?: number }
-        | undefined;
-      const contextWindow =
-        typeof model?.contextWindow === 'number' && model.contextWindow > 0
-          ? model.contextWindow
-          : 256_000;
-      const baseUrl = String(
-        model?.baseUrl || process.env.OPENAI_BASE_URL || '',
-      ).replace(/\/$/, '');
-      const modelId = String(
-        model?.id || process.env.OPENAI_MODEL || '',
-      ).trim();
-      const apiKey = (process.env.OPENAI_API_KEY || '').trim();
+      const callN = ++llmCallSeq;
 
       try {
         const result = await applyMidRunContextGuard({
           messages: (msgs || []) as CompactableMessage[],
-          contextWindow,
           settings,
           maxToolResultChars: getMaxToolResultChars(),
-          signal,
-          summarize: (toSum, sig) =>
-            summarizeWithChatCompletions({
-              baseUrl,
-              apiKey: apiKey || undefined,
-              model: modelId,
-              messagesToSummarize: toSum,
-              signal: sig,
-            }),
         });
+
+        this.logger.log(
+          formatContextManageLog(result, {
+            conversationId: args.conversationId,
+            label: `pre-llm#${callN}`,
+          }),
+        );
 
         if (result.changed) {
           // Persist on the pooled agent so subsequent user turns start clean.
           agent.state.messages = result.messages as typeof agent.state.messages;
-          this.logger.log(
-            `context-guard conv=${args.conversationId} mid-run` +
-              ` tokens ${result.tokensBefore}→${result.tokensAfter}` +
-              ` compacted=${result.compacted} toolCap=${result.toolResultsCapped}` +
-              ` keptFrom=${result.firstKeptIndex} hardDrop=${result.hardDrop}`,
-          );
         }
         return result.messages as CompactableMessage[];
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err);
         this.logger.warn(
-          `context-guard mid-run skipped conv=${args.conversationId}: ${message}`,
+          `context-manage conv=${args.conversationId} pre-llm#${callN}` +
+            ` skipped: ${message}`,
         );
         return msgs as CompactableMessage[];
       }

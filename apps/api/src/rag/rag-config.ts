@@ -68,7 +68,10 @@ export type RagRetrievalConfig = {
   keywordTopK: number;
   /** listChunks page size when loading a full document for summarize. */
   summarizeListPageSize: number;
-  /** Per-chunk body cap when formatting full-text evidence for the agent. */
+  /**
+   * Per-chunk body cap when formatting full-text evidence for the agent.
+   * 0 = unlimited (only RAG_SUMMARIZE_MAX_TOTAL_CHARS applies).
+   */
   summarizeMaxChunkChars: number;
   /**
    * Hard cap on total characters of summarize_document tool text
@@ -131,9 +134,11 @@ export function getRagRetrievalConfig(): RagRetrievalConfig {
       100,
       Math.max(10, envInt('RAG_SUMMARIZE_LIST_PAGE_SIZE', 50)),
     ),
-    summarizeMaxChunkChars: Math.min(
-      16_000,
-      Math.max(500, envInt('RAG_SUMMARIZE_MAX_CHUNK_CHARS', 4000)),
+    // Per-chunk body cap for summarize_document (default 4000).
+    // Set RAG_SUMMARIZE_MAX_CHUNK_CHARS=0 to send full chunks (total budget still applies).
+    summarizeMaxChunkChars: Math.max(
+      0,
+      envInt('RAG_SUMMARIZE_MAX_CHUNK_CHARS', 4000),
     ),
     // Full-document summarize body budget (default 80k chars).
     summarizeMaxTotalChars: Math.max(

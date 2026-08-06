@@ -15,7 +15,7 @@ const logger = new Logger('FfmpegTranscode');
  *
  * Modes:
  * - Local (default): run `ffmpeg` on the API host (`STT_FFMPEG_BIN`)
- * - SSH remote: set `STT_FFMPEG_SSH=user@192.168.1.11` to run on STT box
+ * - SSH remote: set `STT_FFMPEG_SSH=user@192.168.1.61` to run on STT box
  *   (requires passwordless SSH + ffmpeg on the remote host)
  */
 export async function transcodeToWav16kMono(

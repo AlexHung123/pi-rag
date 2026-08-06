@@ -3673,12 +3673,34 @@ button {
   margin-bottom: 8px;
 }
 
+.doc-chunk-card-actions {
+  display: inline-flex;
+  gap: 6px;
+  margin-left: auto;
+}
+
 .doc-chunk-id {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.doc-chunk-keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.doc-chunk-keyword-tag {
+  font-size: 0.7rem;
+  padding: 1px 8px;
+  border-radius: 999px;
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  color: #7dd3fc;
+  background: rgba(56, 189, 248, 0.08);
 }
 
 .doc-chunk-card-content {
@@ -3690,6 +3712,54 @@ button {
 
 .doc-chunk-html p {
   margin: 0.4em 0;
+}
+
+.doc-chunk-editor {
+  border: 1px solid rgba(56, 189, 248, 0.35);
+  background: #1a222c;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+}
+
+.doc-chunk-editor h4 {
+  margin: 0 0 12px;
+  font-size: 0.95rem;
+  color: #e5e7eb;
+}
+
+.doc-chunk-editor .field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 12px;
+}
+
+.doc-chunk-editor .field span {
+  font-size: 0.8rem;
+  color: #9ca3af;
+}
+
+.doc-chunk-editor textarea,
+.doc-chunk-editor input[type='text'] {
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  background: #141618;
+  color: #e8eaed;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font: inherit;
+  resize: vertical;
+}
+
+.doc-chunk-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.kb-muted {
+  color: #9ca3af;
+  font-size: 0.8rem;
 }
 
 .doc-chunk-html p:first-child {

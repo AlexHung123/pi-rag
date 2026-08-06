@@ -363,21 +363,29 @@ export class AdminService {
     if (!rf) return doc;
 
     let status = this.ragflow.mapRunToStatus(rf.run);
+    // Manual/empty docs keep RAGFlow run=UNSTART; chunks alone mean done.
+    // Do not clobber in-flight parse (`running`).
     if (status !== 'done' && status !== 'fail') {
       const listed = await this.ragflow.listChunks(
         kb.ragflowDatasetId,
         doc.ragflowDocumentId,
         { page: 1, pageSize: 1 },
       );
-      if (listed.total > 0 && (rf.progress ?? 0) >= 1) status = 'done';
+      if (
+        listed.total > 0 &&
+        (status === 'unstart' || (rf.progress ?? 0) >= 1)
+      ) {
+        status = 'done';
+      }
     }
 
-    const progress =
+    let progress =
       typeof rf.progress === 'number'
         ? rf.progress
         : status === 'done'
           ? 1
           : doc.progress;
+    if (status === 'done' && !(progress > 0)) progress = 1;
     const chunkCount =
       typeof rf.chunk_count === 'number'
         ? rf.chunk_count
