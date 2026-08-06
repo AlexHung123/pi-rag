@@ -40,6 +40,25 @@ describe('buildToolEndSummary', () => {
     expect(out.summary).toMatch(/weak/i);
   });
 
+  it('prefers skip/scope message over bare 0 hits', () => {
+    const out = buildToolEndSummary(
+      'keyword_search',
+      {
+        details: {
+          hits: [],
+          sources: [],
+          skipped: true,
+          message:
+            'No knowledge bases or documents selected. Do not call retrieve_chunks.',
+        },
+      },
+      false,
+    );
+    expect(out.hitCount).toBe(0);
+    expect(out.summary).toMatch(/No knowledge bases/i);
+    expect(out.summary).not.toMatch(/^0 hits/);
+  });
+
   it('uses error message when isError', () => {
     const out = buildToolEndSummary(
       'retrieve_chunks',

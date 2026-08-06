@@ -13,7 +13,14 @@ export type PooledAgent = {
     messages: Array<{ role: string; content?: unknown; errorMessage?: string }>;
     errorMessage?: string;
     isStreaming: boolean;
+    /** Mutable per turn (e.g. hide retrieval tools when no KB selected). */
+    tools?: Array<{ name?: string; [key: string]: unknown }>;
   };
+  /**
+   * Full tool list from createAgent. Used to restore tools after a turn that
+   * temporarily stripped retrieval tools (no KB selection).
+   */
+  __allTools?: Array<{ name?: string; [key: string]: unknown }>;
   sessionId?: string;
   /** pi-agent-core: inspect/replace OpenAI chat.completions body before send */
   onPayload?: (payload: unknown, model?: unknown) => unknown;

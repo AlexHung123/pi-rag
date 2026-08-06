@@ -85,6 +85,19 @@ export function buildToolEndSummary(
   switch (name) {
     case 'retrieve_chunks':
     case 'keyword_search': {
+      // Prefer explicit skip / scope messages over a bare "0 hits"
+      if (
+        details &&
+        (details.skipped === true ||
+          (typeof details.message === 'string' &&
+            details.message.trim() &&
+            countHits(details) === 0))
+      ) {
+        const msg = String(details.message || '').trim();
+        if (msg) {
+          return { summary: clip(msg, MAX_SUMMARY_CHARS), hitCount: 0 };
+        }
+      }
       const hits = countHits(details || {});
       const q = details ? firstQuery(details) : undefined;
       const hitPart =
@@ -152,6 +165,9 @@ export function buildToolEndSummary(
 /** Short user-facing copy when the run guard blocks a tool. */
 export function userFacingLimitMessage(reason: string): string {
   const r = reason || '';
+  if (/No knowledge bases or documents selected/i.test(r)) {
+    return 'No knowledge bases selected — skipped document search. Select KBs in the UI to search documents.';
+  }
   if (/Tool call limit/i.test(r)) {
     return 'Stopped: tool call limit reached. Answering with evidence already found.';
   }

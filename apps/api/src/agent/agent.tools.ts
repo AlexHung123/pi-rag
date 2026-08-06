@@ -219,7 +219,7 @@ export function createUserTools(deps: {
     name: 'retrieve_chunks',
     label: 'Retrieve chunks',
     description:
-      'Semantic/hybrid retrieval from user-selected knowledge bases. Use for concepts, mechanisms, summaries, comparisons, and open-ended factual questions. Pass knowledgeBaseIds from the selected-KB prompt (required). Prefer a clear self-contained question (or queries[] for multi-aspect). Returns ranked evidence with [n] citation indices. For error codes, clause numbers, person names, job/position titles, company names, department names, proper nouns, or exact phrases prefer keyword_search.',
+      'Semantic/hybrid retrieval from user-selected knowledge bases. Use for concepts, mechanisms, summaries, comparisons, and open-ended factual questions. Pass knowledgeBaseIds from the selected-KB prompt (required). Prefer a clear self-contained question (or queries[] for multi-aspect). Returns ranked evidence blocks labeled [n] for grounding (do not copy [n] into the user-facing answer). For error codes, clause numbers, person names, job/position titles, company names, department names, proper nouns, or exact phrases prefer keyword_search.',
     parameters: Type.Object({
       question: Type.String({
         description:
@@ -249,11 +249,31 @@ export function createUserTools(deps: {
       ),
     }),
     execute: async (_id, params) => {
+      if (!turnContext.knowledgeBaseIds.length) {
+        const message =
+          'No knowledge bases or documents selected. Do not call retrieve_chunks or keyword_search; ask the user to select knowledge bases in the UI.';
+        return {
+          content: [{ type: 'text', text: message }],
+          details: { hits: [], sources: [], message, skipped: true },
+        };
+      }
       const scope = await retrievalScopeForTurn(params);
       if (!scope.ok) {
         return {
           content: [{ type: 'text', text: scope.message }],
           details: { hits: [], sources: [], message: scope.message },
+        };
+      }
+      const readyDocs = scope.accessible.reduce(
+        (n, k) => n + k.documents.length,
+        0,
+      );
+      if (readyDocs === 0) {
+        const message =
+          'Selected knowledge bases have no indexed documents ready for search. Do not keep calling retrieve_chunks or keyword_search; tell the user to upload/index documents or pick different knowledge bases.';
+        return {
+          content: [{ type: 'text', text: message }],
+          details: { hits: [], sources: [], message, skipped: true },
         };
       }
 
@@ -353,6 +373,14 @@ export function createUserTools(deps: {
       }),
     }),
     execute: async (_id, params) => {
+      if (!turnContext.knowledgeBaseIds.length) {
+        const message =
+          'No knowledge bases or documents selected. Do not call retrieve_chunks or keyword_search; ask the user to select knowledge bases in the UI.';
+        return {
+          content: [{ type: 'text', text: message }],
+          details: { hits: [], sources: [], message, skipped: true },
+        };
+      }
       const query = String(params.query || '').trim();
       if (!query) {
         const message = 'keyword_search requires a non-empty query.';
@@ -369,8 +397,20 @@ export function createUserTools(deps: {
           details: { hits: [], sources: [], message: scope.message },
         };
       }
+      const readyDocs = scope.accessible.reduce(
+        (n, k) => n + k.documents.length,
+        0,
+      );
+      if (readyDocs === 0) {
+        const message =
+          'Selected knowledge bases have no indexed documents ready for search. Do not keep calling retrieve_chunks or keyword_search; tell the user to upload/index documents or pick different knowledge bases.';
+        return {
+          content: [{ type: 'text', text: message }],
+          details: { hits: [], sources: [], message, skipped: true },
+        };
+      }
 
-      // Always use server RAG_PAGE_SIZE �?models often pass topK=10 and cap every search.
+      // Always use server RAG_PAGE_SIZE — models often pass topK=10 and cap every search.
       const pageSize = ragCfg.pageSize;
       const candidateTopK = Math.max(pageSize, ragCfg.keywordTopK);
       const thr = ragCfg.keywordSimilarityThreshold;
@@ -976,12 +1016,28 @@ Rules:
 - For non-summary Q&A, be concise and practical unless the user asks for detail or a specific length.
 - When the user asks a non-summary factual question that needs document content AND selected knowledge base IDs are present, you MUST call at least one retrieval tool (retrieve_chunks and/or keyword_search) with those knowledgeBaseIds before answering. Do not invent document content.
 - Prefer a self-contained question (resolve "it/this/上面" from history). Optional queries[] for multi-aspect topics on retrieve_chunks.
-- If no knowledge bases are selected, answer without document retrieval and, if facts from documents are needed, ask the user to select knowledge bases in the UI.
-- Only use tool evidence for document content; cite with [1], [2] matching evidence indices.
+- If no knowledge bases (or documents) are selected in the UI, do NOT call retrieve_chunks, keyword_search, or summarize_document at all. Answer without document retrieval; if facts from documents are needed, ask the user to select knowledge bases (and optionally documents) in the UI. Never spam empty searches.
+- Only use tool evidence for document content. Do NOT put [1], [2], [3]… citation markers or a numbered sources/bibliography list in the answer text — the UI attaches sources separately.
+- You may mention a document name when it helps the reader; never dump page indices or a list like "[1] file.md, page … [2] …".
+- Abbreviations / shortnames in evidence (e.g. TO, STO, CTO, HRA, EL, PD, RD): keep them as written. Only include a full official title or expansion if the evidence itself states that full naming; never invent or auto-translate expansions (e.g. do not turn "TO" into "高級主任 (TO)" unless the source says so).
 - If retrieval returns no / weak evidence, say you don't know based on the selected knowledge bases.
 - Knowledge bases are user-private; never claim access to other users' data.
-- Mention document names when citing facts.
 `;
+
+/**
+ * Prefix when the UI has no knowledge bases selected.
+ * Retrieval tools are also removed from the tool list for this turn.
+ */
+export function buildNoKbSelectedPromptPrefix(): string {
+  return (
+    `[No knowledge bases selected]\n` +
+    `Document search tools (retrieve_chunks, keyword_search, summarize_document) are NOT available this turn. ` +
+    `Do not attempt to call them. ` +
+    `If the user needs facts from documents, briefly ask them to select knowledge bases (and optionally documents) in the UI, then re-ask. ` +
+    `Otherwise answer directly (greetings, capabilities, personal memory tools only).\n\n` +
+    `[User question]\n`
+  );
+}
 
 /** Build a prompt prefix when the UI has knowledge bases selected. */
 export function buildSelectedKbPromptPrefix(
@@ -1023,11 +1079,11 @@ export function buildSelectedKbPromptPrefix(
     docBlock +
     `If this is a greeting, small talk, or a question about you / your capabilities (not document facts), answer directly WITHOUT calling retrieval tools. ` +
     `If the user wants a whole-document summary (总结/摘要/summarize this document), call summarize_document once with knowledgeBaseIds=${ids} ` +
-    `(pass documentNameHint if they named a file; appDocumentId if known; pass focus with any length request like 5000�?and topical focus). ` +
-    `Honor user-requested summary length �?expand thoroughly, do not give a short outline when they asked for many characters. Do not chain keyword_search for summaries. ` +
+    `(pass documentNameHint if they named a file; appDocumentId if known; pass focus with any length request like 5000字 and topical focus). ` +
+    `Honor user-requested summary length — expand thoroughly, do not give a short outline when they asked for many characters. Do not chain keyword_search for summaries. ` +
     `If the user needs other facts from the selected knowledge bases, retrieve with knowledgeBaseIds=${ids} before answering ` +
     `(use retrieve_chunks for concepts; keyword_search for codes/exact phrases/person names/job titles/company names/department names; both if helpful). ` +
-    `Base your analysis only on the retrieved evidence. Cite with [1], [2], �?and mention document names.\n\n` +
+    `Base your analysis only on the retrieved evidence. Do NOT include [1], [2], … markers or a sources list in the answer (UI shows sources). Keep abbreviations/shortnames (TO, STO, etc.) as in the evidence unless the evidence gives a full official name.\n\n` +
     rewriteHint +
     `[User question]\n`
   );

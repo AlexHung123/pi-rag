@@ -22,26 +22,46 @@ export type AgentProcessState = {
 };
 
 function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) ms = 0;
+  if (ms < 1000) {
+    // Sub-second tools: show tenths so "0s" is not useless
+    const tenths = Math.max(0.1, Math.round(ms / 100) / 10);
+    return tenths < 1 ? `${tenths.toFixed(1)}s` : '1s';
+  }
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+function formatDurationLong(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) ms = 0;
   const sec = Math.max(1, Math.round(ms / 1000));
   return sec === 1 ? '1 second' : `${sec} seconds`;
 }
 
+function stepDurationMs(step: AgentProcessStep, now: number): number {
+  return (step.endedAt ?? now) - step.startedAt;
+}
+
 function stepTitle(step: AgentProcessStep, now: number): string {
+  const ms = stepDurationMs(step, now);
   if (step.kind === 'thinking') {
-    if (step.status === 'running') return 'Thinking…';
-    const ms = (step.endedAt ?? now) - step.startedAt;
-    return `Thought for ${formatDuration(ms)}`;
+    if (step.status === 'running') return `Thinking… ${formatDuration(ms)}`;
+    return `Thought for ${formatDurationLong(ms)}`;
   }
   if (step.kind === 'writing') {
-    return step.status === 'running' ? 'Writing answer…' : 'Wrote answer';
+    if (step.status === 'running') return `Writing answer… ${formatDuration(ms)}`;
+    return `Wrote answer · ${formatDuration(ms)}`;
   }
   if (step.kind === 'status') {
     return step.label;
   }
-  // tool
-  if (step.status === 'running') return step.label;
-  if (step.status === 'error') return `${step.label} (failed)`;
-  return step.label;
+  // tool — always surface time consumed
+  if (step.status === 'running') return `${step.label}… ${formatDuration(ms)}`;
+  if (step.status === 'error') return `${step.label} (failed) · ${formatDuration(ms)}`;
+  return `${step.label} · ${formatDuration(ms)}`;
 }
 
 const TOOL_LABELS: Record<string, string> = {
@@ -283,17 +303,24 @@ export default function AgentProcessPanel({ process }: Props) {
   const toolCount = process.steps.filter((s) => s.kind === 'tool').length;
   const sourceCount = process.sourceCount ?? 0;
   const hasError = process.steps.some((s) => s.status === 'error');
+  const totalMs = Math.max(
+    0,
+    (running ? now : process.steps.reduce((end, s) => Math.max(end, s.endedAt ?? 0), process.startedAt)) -
+      process.startedAt,
+  );
 
   let summary: string;
   if (running) {
+    const timePart = formatDuration(totalMs);
     summary =
       stepCount <= 1
-        ? 'Agent working…'
+        ? `Agent working… ${timePart}`
         : toolCount > 0
-          ? `Running · ${toolCount} tool${toolCount === 1 ? '' : 's'}`
-          : `Running · ${stepCount} steps`;
+          ? `Running · ${toolCount} tool${toolCount === 1 ? '' : 's'} · ${timePart}`
+          : `Running · ${stepCount} steps · ${timePart}`;
   } else {
     const parts = [`已完成 ${stepCount} 個步驟`];
+    parts.push(formatDuration(totalMs));
     if (sourceCount > 0) {
       parts.push(`${sourceCount} 個來源`);
     }

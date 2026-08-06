@@ -291,7 +291,7 @@ export function buildSummarizeDocumentHeader(opts: {
     `Path: full_text`,
     focus ? `User focus / requirements: ${focus}` : '',
     ...lengthLines,
-    `Write a clear summary from this full text. Cite [n] when referencing specific passages.`,
+    `Write a clear summary from this full text. Do not put [n] citation markers or a sources list in the summary; the UI attaches sources. Keep abbreviations/shortnames as written unless the text states a full official name.`,
     lengthHint.targetChars
       ? `Do not default to a brief bullet outline when a target length is set — expand thoroughly.`
       : '',

@@ -166,7 +166,8 @@ export function formatEvidenceForModelWithStats(
   }
 
   const header = [
-    'Use ONLY the evidence below. Cite as [1], [2], … matching the source numbers.',
+    'Use ONLY the evidence below. Source numbers [1], [2], … label evidence blocks for you; do NOT put those markers or a bibliography list in the user-facing answer (the UI shows sources).',
+    'Keep abbreviations/shortnames (e.g. TO, STO, CTO) exactly as written unless the evidence states a full official title.',
     'If evidence is insufficient, say you do not know based on the selected knowledge bases.',
     opts.query ? `Search query: ${opts.query}` : '',
     opts.insufficient

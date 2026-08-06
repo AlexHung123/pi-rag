@@ -9,6 +9,7 @@ import {
   type PooledAgent,
 } from './agent-session.pool';
 import {
+  buildNoKbSelectedPromptPrefix,
   buildSelectedKbPromptPrefix,
   createUserTools,
   DOMAIN_SYSTEM_PROMPT,
@@ -144,6 +145,25 @@ export class AgentService {
       turnCtx.documentIds = selectedDocIds;
     }
 
+    // Hide retrieval tools when nothing is selected so the model cannot
+    // emit keyword_search / retrieve_chunks that only get blocked mid-run
+    // (noisy "Keyword search failed" steps in the process panel).
+    const allTools =
+      session.agent.__allTools ||
+      (Array.isArray(session.agent.state.tools)
+        ? session.agent.state.tools
+        : []);
+    if (!session.agent.__allTools && allTools.length) {
+      session.agent.__allTools = allTools;
+    }
+    if (selectedKbIds.length === 0) {
+      session.agent.state.tools = allTools.filter(
+        (t) => !RETRIEVAL_TOOL_NAMES.has(String(t?.name || '')),
+      );
+    } else {
+      session.agent.state.tools = allTools;
+    }
+
     // Order: memory block → selected KB prefix → user message (spec).
     const memoryPrefix = await this.memory.buildPromptPrefix(userId);
     let promptText = userMessage;
@@ -194,6 +214,10 @@ export class AgentService {
           entireKbIds,
         })}${userMessage}`;
       }
+    } else {
+      // Mirror selected-KB prefix: make "no selection" explicit so the model
+      // answers without attempting document tools first.
+      promptText = `${buildNoKbSelectedPromptPrefix()}${userMessage}`;
     }
     if (memoryPrefix) {
       promptText = `${memoryPrefix}${promptText}`;
@@ -236,6 +260,25 @@ export class AgentService {
     const prevAfter = session.agent.afterToolCall;
     session.agent.beforeToolCall = async (ctx) => {
       const name = String(ctx.toolCall?.name || 'tool');
+      // No KB/document selection → never run document retrieval tools.
+      // (Models otherwise spam keyword_search/retrieve_chunks and show "0 hits".)
+      if (
+        RETRIEVAL_TOOL_NAMES.has(name) &&
+        selectedKbIds.length === 0
+      ) {
+        const reason =
+          'No knowledge bases or documents selected. Do not call retrieve_chunks, keyword_search, or summarize_document. Answer without document search, or ask the user to select knowledge bases (and optionally documents) in the UI.';
+        this.logger.debug(
+          `tool blocked (no selection) conv=${conversationId} tool=${name}`,
+        );
+        push({
+          type: 'agent_status',
+          kind: 'info',
+          message:
+            'No knowledge bases selected — skipped document search. Select KBs in the UI to search documents.',
+        });
+        return { block: true, reason };
+      }
       const decision = guard.beforeToolCall(name, ctx.args);
       if (!decision.allow) {
         this.logger.warn(
@@ -545,6 +588,9 @@ export class AgentService {
         signal?: AbortSignal,
       ) => Promise<CompactableMessage[]>;
     };
+
+    // Keep a stable full tool list so each turn can strip/restore retrieval tools.
+    agent.__allTools = tools as Array<{ name?: string; [key: string]: unknown }>;
 
     // Gate B: before every LLM call (including after tool results mid-run),
     // cap oversized tool bodies and apply kode-style local context compression.
