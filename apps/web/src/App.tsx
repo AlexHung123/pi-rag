@@ -506,30 +506,35 @@ export default function App() {
       .filter(Boolean) as DocAtCandidate[];
   }, [selectedDocIds, resolveDocMeta]);
 
-  const readyDocsForSelectedKbs = useMemo((): DocAtCandidate[] => {
+  /** Ready docs for @ autocomplete — all accessible KBs by default (no pre-selection required). */
+  const readyDocsForAt = useMemo((): DocAtCandidate[] => {
     const out: DocAtCandidate[] = [];
-    for (const kbId of selectedKbIds) {
-      for (const d of (kbDocCache[kbId] || []).filter(isDocReady)) {
-        out.push({ id: d.id, name: d.name, kbId });
+    for (const kb of knowledgeBases) {
+      for (const d of (kbDocCache[kb.id] || []).filter(isDocReady)) {
+        out.push({ id: d.id, name: d.name, kbId: kb.id });
       }
     }
     return out;
-  }, [selectedKbIds, kbDocCache]);
+  }, [knowledgeBases, kbDocCache]);
 
   const atCandidates = useMemo(() => {
     if (!atQuery) return [] as DocAtCandidate[];
-    return filterDocAtCandidates(readyDocsForSelectedKbs, atQuery.query);
-  }, [atQuery, readyDocsForSelectedKbs]);
+    return filterDocAtCandidates(readyDocsForAt, atQuery.query);
+  }, [atQuery, readyDocsForAt]);
 
-  // Lazy-load documents for selected KBs when @ menu opens
+  const anyKbDocsLoading = useMemo(
+    () => knowledgeBases.some((kb) => kbDocsLoading[kb.id]),
+    [knowledgeBases, kbDocsLoading],
+  );
+
+  // Prefetch documents for every KB so @ / explorer can list without selecting first.
   useEffect(() => {
-    if (!atQuery) return;
-    for (const kbId of selectedKbIds) {
-      if (!kbDocCache[kbId] && !kbDocsLoading[kbId]) {
-        void loadKbDocuments(kbId);
+    for (const kb of knowledgeBases) {
+      if (kbDocCache[kb.id] === undefined && !kbDocsLoading[kb.id]) {
+        void loadKbDocuments(kb.id);
       }
     }
-  }, [atQuery, selectedKbIds, kbDocCache, kbDocsLoading, loadKbDocuments]);
+  }, [knowledgeBases, kbDocCache, kbDocsLoading, loadKbDocuments]);
 
   useEffect(() => {
     setAtActiveIndex(0);
@@ -676,11 +681,28 @@ export default function App() {
         modelId?: string;
         signal: AbortSignal;
       } = { signal: ac.signal };
-      if (selectedKbIds.length > 0) {
-        streamOpts.knowledgeBaseIds = selectedKbIds;
+      // Default retrieval scope: all accessible KBs when none explicitly selected.
+      const scopeKbIds =
+        selectedKbIds.length > 0
+          ? selectedKbIds
+          : knowledgeBases.map((k) => k.id);
+      if (scopeKbIds.length > 0) {
+        streamOpts.knowledgeBaseIds = scopeKbIds;
       }
-      if (selectedDocIds.length > 0 && selectedKbIds.length > 0) {
+      // Doc filter only when user narrowed to specific documents.
+      if (selectedDocIds.length > 0) {
         streamOpts.documentIds = selectedDocIds;
+        // Ensure parent KBs for filtered docs are included even if KB chips cleared oddly.
+        if (!streamOpts.knowledgeBaseIds?.length) {
+          const parentIds = new Set<string>();
+          for (const docId of selectedDocIds) {
+            const meta = resolveDocMeta(docId);
+            if (meta?.kbId) parentIds.add(meta.kbId);
+          }
+          if (parentIds.size) {
+            streamOpts.knowledgeBaseIds = [...parentIds];
+          }
+        }
       }
       if (modelForSend) {
         streamOpts.modelId = modelForSend;
@@ -1029,9 +1051,9 @@ export default function App() {
                   </div>
                   <h2>CSB Knowledge Portal</h2>
                   <p>
-                    Select knowledge bases in the left Explorer, then ask a
-                    question. Retrieval uses up to 10 chunks with source
-                    references.
+                    Ask a question across your knowledge bases by default. Use
+                    the left Explorer or @ to narrow to specific documents.
+                    Retrieval uses up to 10 chunks with source references.
                   </p>
                 </div>
               </div>
@@ -1141,8 +1163,8 @@ export default function App() {
                 <div className="composer-at-menu" role="listbox" aria-label="Document mentions">
                   <div className="composer-at-menu-header">
                     <span>
-                      {selectedKbIds.length === 0
-                        ? 'Select a knowledge base to mention documents'
+                      {knowledgeBases.length === 0
+                        ? 'No knowledge bases yet'
                         : atCandidates.length === 1
                           ? 'Files · 1 match'
                           : `Files · ${atCandidates.length} matches`}
@@ -1150,13 +1172,14 @@ export default function App() {
                     <kbd>Tab / Enter</kbd>
                   </div>
                   <div className="composer-at-menu-list">
-                    {selectedKbIds.length === 0 ? (
+                    {knowledgeBases.length === 0 ? (
                       <div className="composer-at-menu-empty">
-                        Pick one or more knowledge bases, then type @ to filter documents.
+                        Create a knowledge base in My Knowledge Base, then type @
+                        to mention documents.
                       </div>
                     ) : atCandidates.length === 0 ? (
                       <div className="composer-at-menu-empty">
-                        {selectedKbIds.some((id) => kbDocsLoading[id])
+                        {anyKbDocsLoading
                           ? 'Loading documents…'
                           : 'No matching indexed documents'}
                       </div>
@@ -1203,11 +1226,7 @@ export default function App() {
                 ref={composerInputRef}
                 className="composer-input"
                 value={input}
-                placeholder={
-                  selectedKbIds.length
-                    ? 'Ask a question… Use @ to mention documents'
-                    : 'Ask about your knowledge base, or pick knowledge bases below…'
-                }
+                placeholder="Ask a question… Use @ to mention any document"
                 onChange={(e) => {
                   const el = e.target;
                   setInput(el.value.slice(0, 32000));
