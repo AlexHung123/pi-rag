@@ -1029,8 +1029,9 @@ export default function App() {
                   </div>
                   <h2>CSB Knowledge Portal</h2>
                   <p>
-                    Select one or more knowledge bases below, then ask a question.
-                    Retrieval uses up to 10 chunks with source references.
+                    Select knowledge bases in the left Explorer, then ask a
+                    question. Retrieval uses up to 10 chunks with source
+                    references.
                   </p>
                 </div>
               </div>

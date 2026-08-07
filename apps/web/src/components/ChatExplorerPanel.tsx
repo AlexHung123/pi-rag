@@ -63,7 +63,7 @@ export default function ChatExplorerPanel({
           ) : (
             <ChevronDown size={14} aria-hidden />
           )}
-          <span className="chat-explorer-title">Explorer</span>
+          <span className="chat-explorer-title">EXPLORER</span>
         </button>
 
         <div className="chat-explorer-header-right">

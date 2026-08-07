@@ -375,6 +375,7 @@ button {
   width: var(--conversation-sidebar-width);
   min-width: 0;
   flex-direction: column;
+  overflow: hidden;
   border-right: 1px solid var(--border-color);
   background: var(--surface-primary);
   pointer-events: auto;
@@ -476,7 +477,7 @@ button {
 .conversation-list {
   display: flex;
   min-height: 0;
-  flex: 1 1 auto;
+  flex: 1 1 0;
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
@@ -1594,20 +1595,24 @@ button {
   background: var(--color-primary-soft);
 }
 
-/* Chat left-panel Knowledge EXPLORER (pi-web style) */
+/* Chat left-panel Knowledge EXPLORER (pi-web style)
+   Reserve a fixed bottom slice so long conversation lists cannot collapse it to 0. */
 .chat-explorer {
   display: flex;
-  flex: 0 1 auto;
+  flex: 0 0 42%;
   flex-direction: column;
-  min-height: 0;
-  max-height: 42%;
-  border-top: 1px solid var(--border-subtle);
-  background: var(--bg-secondary, var(--surface-secondary));
+  min-height: 180px;
+  max-height: 48%;
+  border-top: 1px solid var(--border-color);
+  background: var(--surface-secondary, #f4f5f7);
+  box-shadow: 0 -1px 0 var(--border-subtle);
 }
 
 .chat-explorer.is-collapsed {
-  max-height: none;
   flex: 0 0 auto;
+  min-height: 0;
+  max-height: none;
+  height: auto;
 }
 
 .chat-explorer-header {
@@ -1616,8 +1621,9 @@ button {
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  min-height: 32px;
-  padding: 6px 10px 6px 8px;
+  min-height: 36px;
+  padding: 8px 10px 6px 8px;
+  background: transparent;
 }
 
 .chat-explorer-toggle {
