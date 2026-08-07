@@ -10,6 +10,25 @@ import {
 } from '../agent/pi-model';
 import { CHAT_MESSAGE_MAX_CHARS } from './chat.limits';
 
+/**
+ * Build a conversation title from the first user message.
+ * Strips @document mentions (`@file.pdf`, `@"name with spaces"`) so chips/mentions
+ * do not become the sidebar title.
+ */
+export function conversationTitleFromContent(
+  content: string,
+  maxLen = 48,
+): string {
+  const stripped = content
+    .replace(/@"[^"\n]*"/g, ' ')
+    .replace(/(^|[\s])@[^\s"]+/g, '$1')
+    .replace(/\s+/g, ' ')
+    .trim();
+  // Prefer non-mention text; if the whole message was only mentions, keep "New chat"
+  if (!stripped) return 'New chat';
+  return stripped.slice(0, maxLen) || 'New chat';
+}
+
 @Injectable()
 export class ChatService {
   constructor(
@@ -131,7 +150,7 @@ export class ChatService {
     if (c.title === 'New chat') {
       await this.prisma.conversation.update({
         where: { id: c.id },
-        data: { title: content.slice(0, 48) || 'New chat' },
+        data: { title: conversationTitleFromContent(content) },
       });
     } else {
       await this.prisma.conversation.update({
