@@ -2,6 +2,7 @@ import React, {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -13,6 +14,7 @@ import MemoryPanel from './components/MemoryPanel';
 import AppSidebar, { type WorkspaceView } from './components/AppSidebar';
 import SourceReferences from './components/SourceReferences';
 import DocumentLocateDrawer from './components/DocumentLocateDrawer';
+import FileTypeIcon from './components/FileTypeIcon';
 import AgentProcessPanel, {
   applyAgentStatus,
   applyProcessDone,
@@ -38,6 +40,15 @@ import {
   type DocumentItem,
   type KnowledgeBase,
 } from './services/api';
+import {
+  buildDocMentionText,
+  extractAtQuery,
+  filterDocAtCandidates,
+  type AtQueryMatch,
+  type DocAtCandidate,
+} from './utils/docAtMention';
+
+const DOC_CHIP_VISIBLE_MAX = 6;
 
 function sourcesFromMessage(m: ChatMessage): CitationSource[] {
   if (Array.isArray(m.sources) && m.sources.length) return m.sources;
@@ -77,8 +88,9 @@ export default function App() {
   const [kbDocsLoading, setKbDocsLoading] = useState<Record<string, boolean>>(
     {},
   );
-  const [kbPickerOpen, setKbPickerOpen] = useState(false);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [atQuery, setAtQuery] = useState<AtQueryMatch | null>(null);
+  const [atActiveIndex, setAtActiveIndex] = useState(0);
   const [availableModels, setAvailableModels] = useState<
     Array<{ id: string; name: string }>
   >([]);
@@ -90,9 +102,9 @@ export default function App() {
     name: string;
   } | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
-  const kbPickerRef = useRef<HTMLDivElement>(null);
   const modelPickerRef = useRef<HTMLDivElement>(null);
   const composerInputRef = useRef<HTMLTextAreaElement>(null);
+  const atItemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   /** Monotonic id so slower / out-of-order list responses cannot wipe newer state. */
   const listRequestIdRef = useRef(0);
   /** True while any conversation has an in-flight stream (for list-refresh guards). */
@@ -220,7 +232,6 @@ export default function App() {
     setExpandedKbIds([]);
     setKbDocCache({});
     setKbDocsLoading({});
-    setKbPickerOpen(false);
     setModelPickerOpen(false);
     setAvailableModels([]);
     setDefaultModelId('');
@@ -254,19 +265,16 @@ export default function App() {
   }, [messages, streamingConvId, agentProcess?.steps.length, agentProcess?.status]);
 
   useEffect(() => {
-    if (!kbPickerOpen && !modelPickerOpen) return;
+    if (!modelPickerOpen) return;
     const onDocClick = (e: MouseEvent) => {
       const target = e.target as Node;
-      if (kbPickerOpen && !kbPickerRef.current?.contains(target)) {
-        setKbPickerOpen(false);
-      }
       if (modelPickerOpen && !modelPickerRef.current?.contains(target)) {
         setModelPickerOpen(false);
       }
     };
     document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
-  }, [kbPickerOpen, modelPickerOpen]);
+  }, [modelPickerOpen]);
 
   /**
    * Resolve a conversation id that exists for this user.
@@ -463,18 +471,17 @@ export default function App() {
     );
   };
 
-  const selectAllDocs = (kbId: string) => {
-    const ready = readyDocsForKb(kbId).map((d) => d.id);
-    if (!ready.length) return;
-    setSelectedDocIds((prev) => [...new Set([...prev, ...ready])]);
+  const selectDoc = useCallback((kbId: string, docId: string) => {
+    setSelectedDocIds((prev) =>
+      prev.includes(docId) ? prev : [...prev, docId],
+    );
     setSelectedKbIds((prev) =>
       prev.includes(kbId) ? prev : [...prev, kbId],
     );
-  };
+  }, []);
 
-  const clearDocs = (kbId: string) => {
-    const all = new Set((kbDocCache[kbId] || []).map((d) => d.id));
-    setSelectedDocIds((prev) => prev.filter((id) => !all.has(id)));
+  const removeDoc = (docId: string) => {
+    setSelectedDocIds((prev) => prev.filter((x) => x !== docId));
   };
 
   const clearKbSelection = () => {
@@ -482,8 +489,120 @@ export default function App() {
     setSelectedDocIds([]);
   };
 
-  const selectAllKbs = () =>
-    setSelectedKbIds(knowledgeBases.map((k) => k.id));
+  const resolveDocMeta = useCallback(
+    (docId: string): DocAtCandidate | null => {
+      for (const kbId of Object.keys(kbDocCache)) {
+        const found = (kbDocCache[kbId] || []).find((d) => d.id === docId);
+        if (found) return { id: found.id, name: found.name, kbId };
+      }
+      return null;
+    },
+    [kbDocCache],
+  );
+
+  const selectedDocEntries = useMemo(() => {
+    return selectedDocIds
+      .map((id) => resolveDocMeta(id) ?? { id, name: id.slice(0, 8), kbId: '' })
+      .filter(Boolean) as DocAtCandidate[];
+  }, [selectedDocIds, resolveDocMeta]);
+
+  const readyDocsForSelectedKbs = useMemo((): DocAtCandidate[] => {
+    const out: DocAtCandidate[] = [];
+    for (const kbId of selectedKbIds) {
+      for (const d of (kbDocCache[kbId] || []).filter(isDocReady)) {
+        out.push({ id: d.id, name: d.name, kbId });
+      }
+    }
+    return out;
+  }, [selectedKbIds, kbDocCache]);
+
+  const atCandidates = useMemo(() => {
+    if (!atQuery) return [] as DocAtCandidate[];
+    return filterDocAtCandidates(readyDocsForSelectedKbs, atQuery.query);
+  }, [atQuery, readyDocsForSelectedKbs]);
+
+  // Lazy-load documents for selected KBs when @ menu opens
+  useEffect(() => {
+    if (!atQuery) return;
+    for (const kbId of selectedKbIds) {
+      if (!kbDocCache[kbId] && !kbDocsLoading[kbId]) {
+        void loadKbDocuments(kbId);
+      }
+    }
+  }, [atQuery, selectedKbIds, kbDocCache, kbDocsLoading, loadKbDocuments]);
+
+  useEffect(() => {
+    setAtActiveIndex(0);
+  }, [atQuery?.query, atQuery?.start, atCandidates.length]);
+
+  useEffect(() => {
+    if (!atQuery) return;
+    atItemRefs.current[atActiveIndex]?.scrollIntoView({
+      block: 'nearest',
+      inline: 'nearest',
+    });
+  }, [atActiveIndex, atQuery, atCandidates.length]);
+
+  const syncAtQueryFromComposer = useCallback(() => {
+    const el = composerInputRef.current;
+    if (!el) {
+      setAtQuery(null);
+      return;
+    }
+    const caret = el.selectionStart ?? el.value.length;
+    setAtQuery(extractAtQuery(el.value.slice(0, caret)));
+  }, []);
+
+  const applyAtCandidate = useCallback(
+    (candidate: DocAtCandidate) => {
+      const el = composerInputRef.current;
+      if (!el || !atQuery) return;
+      const mention = buildDocMentionText(candidate.name);
+      const before = el.value.slice(0, atQuery.start);
+      const after = el.value.slice(el.selectionStart ?? el.value.length);
+      const next = `${before}${mention}${after}`.slice(0, 32000);
+      setInput(next);
+      selectDoc(candidate.kbId, candidate.id);
+      setAtQuery(null);
+      requestAnimationFrame(() => {
+        const pos = before.length + mention.length;
+        el.focus();
+        el.setSelectionRange(pos, pos);
+        el.style.height = 'auto';
+        el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+      });
+    },
+    [atQuery, selectDoc],
+  );
+
+  const mentionDocFromPicker = useCallback(
+    (kbId: string, doc: DocumentItem) => {
+      selectDoc(kbId, doc.id);
+      const mention = buildDocMentionText(doc.name);
+      const el = composerInputRef.current;
+      if (!el) {
+        setInput((prev) => `${prev}${prev && !/\s$/.test(prev) ? ' ' : ''}${mention}`.slice(0, 32000));
+        return;
+      }
+      const start = el.selectionStart ?? el.value.length;
+      const end = el.selectionEnd ?? start;
+      const before = el.value.slice(0, start);
+      const after = el.value.slice(end);
+      const pad =
+        before.length > 0 && !/\s$/.test(before) ? ` ${mention}` : mention;
+      const next = `${before}${pad}${after}`.slice(0, 32000);
+      setInput(next);
+      setAtQuery(null);
+      requestAnimationFrame(() => {
+        const pos = before.length + pad.length;
+        el.focus();
+        el.setSelectionRange(pos, pos);
+        el.style.height = 'auto';
+        el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+      });
+    },
+    [selectDoc],
+  );
 
   const stopSending = () => {
     // Only the conversation currently being viewed can stop its own stream.
@@ -501,10 +620,10 @@ export default function App() {
     sendingRef.current = true;
     setError('');
     setInput('');
+    setAtQuery(null);
     if (composerInputRef.current) {
       composerInputRef.current.style.height = 'auto';
     }
-    setKbPickerOpen(false);
     setModelPickerOpen(false);
 
     let convId: string | null = null;
@@ -796,19 +915,6 @@ export default function App() {
   const selectedKbNames = knowledgeBases
     .filter((k) => selectedKbIds.includes(k.id))
     .map((k) => k.name);
-  const knowledgePillLabel = (() => {
-    if (selectedKbIds.length === 0) return 'Knowledge';
-    if (selectedDocIds.length > 0) {
-      if (selectedKbIds.length === 1) {
-        const name = selectedKbNames[0] || '1 KB';
-        const short = name.length > 18 ? `${name.slice(0, 16)}…` : name;
-        return `${short} · ${selectedDocIds.length} doc${selectedDocIds.length === 1 ? '' : 's'}`;
-      }
-      return `${selectedDocIds.length} doc${selectedDocIds.length === 1 ? '' : 's'}`;
-    }
-    if (selectedKbIds.length === 1) return selectedKbNames[0] || '1 KB';
-    return `${selectedKbIds.length} KBs`;
-  })();
   const activeModelId = selectedModelId || defaultModelId;
   const activeModelName =
     availableModels.find((m) => m.id === activeModelId)?.name ||
@@ -836,6 +942,21 @@ export default function App() {
         username={user.username}
         isAdmin={user.role === 'admin'}
         onLogout={logout}
+        explorer={{
+          knowledgeBases,
+          selectedKbIds,
+          selectedDocIds,
+          expandedKbIds,
+          kbDocCache,
+          kbDocsLoading,
+          disabled: isActiveStreaming,
+          readyDocsForKb,
+          onToggleKb: toggleKb,
+          onToggleDoc: toggleDoc,
+          onToggleExpand: toggleKbExpand,
+          onMentionDoc: mentionDocFromPicker,
+          onClearSelection: clearKbSelection,
+        }}
       />
 
       {locateSource && (
@@ -960,7 +1081,7 @@ export default function App() {
 
           <div className="input-area">
             <div className="composer">
-              {selectedKbIds.length > 0 && (
+              {(selectedKbIds.length > 0 || selectedDocIds.length > 0) && (
                 <div className="composer-chips">
                   {selectedKbNames.map((name, i) => (
                     <button
@@ -975,10 +1096,33 @@ export default function App() {
                       <span aria-hidden>×</span>
                     </button>
                   ))}
-                  {selectedDocIds.length > 0 && (
-                    <span className="kb-chip kb-chip-docs" title="Document filter active">
-                      {selectedDocIds.length} doc
-                      {selectedDocIds.length === 1 ? '' : 's'}
+                  {selectedDocEntries
+                    .slice(0, DOC_CHIP_VISIBLE_MAX)
+                    .map((doc) => (
+                      <button
+                        key={doc.id}
+                        type="button"
+                        className="doc-chip"
+                        onClick={() => removeDoc(doc.id)}
+                        title={`Remove ${doc.name}`}
+                        disabled={isActiveStreaming}
+                      >
+                        <FileTypeIcon name={doc.name} size={14} />
+                        <span className="doc-chip-name">{doc.name}</span>
+                        <span className="doc-chip-x" aria-hidden>
+                          ×
+                        </span>
+                      </button>
+                    ))}
+                  {selectedDocEntries.length > DOC_CHIP_VISIBLE_MAX && (
+                    <span
+                      className="doc-chip-more"
+                      title={selectedDocEntries
+                        .slice(DOC_CHIP_VISIBLE_MAX)
+                        .map((d) => d.name)
+                        .join(', ')}
+                    >
+                      +{selectedDocEntries.length - DOC_CHIP_VISIBLE_MAX} more
                     </span>
                   )}
                   <button
@@ -992,13 +1136,75 @@ export default function App() {
                 </div>
               )}
 
+              {atQuery && (
+                <div className="composer-at-menu" role="listbox" aria-label="Document mentions">
+                  <div className="composer-at-menu-header">
+                    <span>
+                      {selectedKbIds.length === 0
+                        ? 'Select a knowledge base to mention documents'
+                        : atCandidates.length === 1
+                          ? 'Files · 1 match'
+                          : `Files · ${atCandidates.length} matches`}
+                    </span>
+                    <kbd>Tab / Enter</kbd>
+                  </div>
+                  <div className="composer-at-menu-list">
+                    {selectedKbIds.length === 0 ? (
+                      <div className="composer-at-menu-empty">
+                        Pick one or more knowledge bases, then type @ to filter documents.
+                      </div>
+                    ) : atCandidates.length === 0 ? (
+                      <div className="composer-at-menu-empty">
+                        {selectedKbIds.some((id) => kbDocsLoading[id])
+                          ? 'Loading documents…'
+                          : 'No matching indexed documents'}
+                      </div>
+                    ) : (
+                      atCandidates.map((doc, index) => {
+                        const kbName =
+                          knowledgeBases.find((k) => k.id === doc.kbId)?.name ||
+                          '';
+                        const active = index === atActiveIndex;
+                        return (
+                          <button
+                            key={doc.id}
+                            ref={(node) => {
+                              atItemRefs.current[index] = node;
+                            }}
+                            type="button"
+                            role="option"
+                            aria-selected={active}
+                            className={`composer-at-option ${active ? 'is-active' : ''}`}
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              applyAtCandidate(doc);
+                            }}
+                            onMouseEnter={() => setAtActiveIndex(index)}
+                          >
+                            <FileTypeIcon name={doc.name} size={16} />
+                            <span className="composer-at-option-name">
+                              {doc.name}
+                            </span>
+                            {kbName ? (
+                              <span className="composer-at-option-kb">
+                                {kbName}
+                              </span>
+                            ) : null}
+                          </button>
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              )}
+
               <textarea
                 ref={composerInputRef}
                 className="composer-input"
                 value={input}
                 placeholder={
                   selectedKbIds.length
-                    ? 'Ask a question about the selected knowledge bases…'
+                    ? 'Ask a question… Use @ to mention documents'
                     : 'Ask about your knowledge base, or pick knowledge bases below…'
                 }
                 onChange={(e) => {
@@ -1006,9 +1212,47 @@ export default function App() {
                   setInput(el.value.slice(0, 32000));
                   el.style.height = 'auto';
                   el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
+                  const caret = el.selectionStart ?? el.value.length;
+                  setAtQuery(extractAtQuery(el.value.slice(0, caret)));
                 }}
+                onClick={syncAtQueryFromComposer}
+                onKeyUp={syncAtQueryFromComposer}
+                onSelect={syncAtQueryFromComposer}
                 maxLength={32000}
                 onKeyDown={(e) => {
+                  if (atQuery) {
+                    if (e.key === 'Escape') {
+                      e.preventDefault();
+                      setAtQuery(null);
+                      return;
+                    }
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault();
+                      if (atCandidates.length) {
+                        setAtActiveIndex((i) => (i + 1) % atCandidates.length);
+                      }
+                      return;
+                    }
+                    if (e.key === 'ArrowUp') {
+                      e.preventDefault();
+                      if (atCandidates.length) {
+                        setAtActiveIndex(
+                          (i) =>
+                            (i - 1 + atCandidates.length) % atCandidates.length,
+                        );
+                      }
+                      return;
+                    }
+                    if (
+                      (e.key === 'Enter' || e.key === 'Tab') &&
+                      !e.shiftKey &&
+                      atCandidates[atActiveIndex]
+                    ) {
+                      e.preventDefault();
+                      applyAtCandidate(atCandidates[atActiveIndex]);
+                      return;
+                    }
+                  }
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     void send();
@@ -1019,200 +1263,7 @@ export default function App() {
               />
 
               <div className="composer-toolbar">
-                <div className="composer-toolbar-left" ref={kbPickerRef}>
-                  <button
-                    type="button"
-                    className={`composer-tool-pill ${selectedKbIds.length || selectedDocIds.length ? 'has-selection' : ''}`}
-                    onClick={() => {
-                      setKbPickerOpen((v) => !v);
-                      setModelPickerOpen(false);
-                      if (!knowledgeBases.length) void refreshKnowledgeBases();
-                    }}
-                    disabled={isActiveStreaming}
-                    aria-expanded={kbPickerOpen}
-                    aria-haspopup="listbox"
-                    title="Select knowledge bases and documents"
-                  >
-                    <span className="composer-tool-icon" aria-hidden>
-                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                        <path
-                          d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7"
-                          stroke="currentColor"
-                          strokeWidth="1.5"
-                          strokeLinecap="round"
-                        />
-                      </svg>
-                    </span>
-                    <span className="composer-tool-label">
-                      {knowledgePillLabel}
-                    </span>
-                    <span className="composer-tool-chevron" aria-hidden>
-                      ▾
-                    </span>
-                  </button>
-
-                  {kbPickerOpen && (
-                    <div
-                      className="kb-select-dropdown composer-dropdown"
-                      role="listbox"
-                      aria-multiselectable
-                    >
-                      <div className="kb-select-actions">
-                        <button
-                          type="button"
-                          onClick={selectAllKbs}
-                          disabled={!knowledgeBases.length}
-                        >
-                          Select all
-                        </button>
-                        <button
-                          type="button"
-                          onClick={clearKbSelection}
-                          disabled={!selectedKbIds.length && !selectedDocIds.length}
-                        >
-                          Clear
-                        </button>
-                      </div>
-                      {knowledgeBases.length === 0 ? (
-                        <p className="kb-select-empty">
-                          No knowledge bases yet. Create one in My Knowledge Base.
-                        </p>
-                      ) : (
-                        <ul className="kb-select-options">
-                          {knowledgeBases.map((kb) => {
-                            const checked = selectedKbIds.includes(kb.id);
-                            const expanded = expandedKbIds.includes(kb.id);
-                            const readyDocs = readyDocsForKb(kb.id);
-                            const selectedInKb = readyDocs.filter((d) =>
-                              selectedDocIds.includes(d.id),
-                            ).length;
-                            const loading = Boolean(kbDocsLoading[kb.id]);
-                            return (
-                              <li key={kb.id} className="kb-select-item">
-                                <div
-                                  className={`kb-select-option ${checked ? 'checked' : ''}`}
-                                >
-                                  <button
-                                    type="button"
-                                    className="kb-expand-btn"
-                                    aria-expanded={expanded}
-                                    aria-label={
-                                      expanded
-                                        ? `Collapse documents in ${kb.name}`
-                                        : `Expand documents in ${kb.name}`
-                                    }
-                                    onClick={(e) => {
-                                      e.preventDefault();
-                                      e.stopPropagation();
-                                      toggleKbExpand(kb.id);
-                                    }}
-                                  >
-                                    {expanded ? '▾' : '▸'}
-                                  </button>
-                                  <label className="kb-select-option-label">
-                                    <input
-                                      type="checkbox"
-                                      checked={checked}
-                                      onChange={() => toggleKb(kb.id)}
-                                    />
-                                    <span className="kb-option-text">
-                                      <span className="kb-option-name">
-                                        {kb.name}
-                                        <span
-                                          className={`kb-visibility-badge sm ${kb.visibility === 'public' ? 'public' : 'private'}`}
-                                        >
-                                          {kb.visibility === 'public'
-                                            ? 'Public'
-                                            : 'Private'}
-                                        </span>
-                                        {selectedInKb > 0 && (
-                                          <span className="kb-doc-count-badge">
-                                            {selectedInKb} doc
-                                            {selectedInKb === 1 ? '' : 's'}
-                                          </span>
-                                        )}
-                                      </span>
-                                      {kb.description ? (
-                                        <span className="kb-option-desc">
-                                          {kb.description}
-                                        </span>
-                                      ) : !kb.isOwner && kb.ownerUsername ? (
-                                        <span className="kb-option-desc">
-                                          by {kb.ownerUsername}
-                                          {kb.myRole === 'editor' ||
-                                          kb.myRole === 'viewer'
-                                            ? ` · ${kb.myRole}`
-                                            : ''}
-                                        </span>
-                                      ) : null}
-                                    </span>
-                                  </label>
-                                </div>
-                                {expanded && (
-                                  <div className="kb-doc-select">
-                                    <div className="kb-doc-select-actions">
-                                      <button
-                                        type="button"
-                                        onClick={() => selectAllDocs(kb.id)}
-                                        disabled={loading || !readyDocs.length}
-                                      >
-                                        Select all
-                                      </button>
-                                      <button
-                                        type="button"
-                                        onClick={() => clearDocs(kb.id)}
-                                        disabled={!selectedInKb}
-                                      >
-                                        Clear
-                                      </button>
-                                    </div>
-                                    {loading && !kbDocCache[kb.id] ? (
-                                      <p className="kb-doc-select-empty">
-                                        Loading documents…
-                                      </p>
-                                    ) : readyDocs.length === 0 ? (
-                                      <p className="kb-doc-select-empty">
-                                        No indexed documents yet.
-                                      </p>
-                                    ) : (
-                                      <ul className="kb-doc-select-options">
-                                        {readyDocs.map((doc) => {
-                                          const docChecked =
-                                            selectedDocIds.includes(doc.id);
-                                          return (
-                                            <li key={doc.id}>
-                                              <label
-                                                className={`kb-doc-select-option ${docChecked ? 'checked' : ''}`}
-                                              >
-                                                <input
-                                                  type="checkbox"
-                                                  checked={docChecked}
-                                                  onChange={() =>
-                                                    toggleDoc(kb.id, doc.id)
-                                                  }
-                                                />
-                                                <span
-                                                  className="kb-doc-option-name"
-                                                  title={doc.name}
-                                                >
-                                                  {doc.name}
-                                                </span>
-                                              </label>
-                                            </li>
-                                          );
-                                        })}
-                                      </ul>
-                                    )}
-                                  </div>
-                                )}
-                              </li>
-                            );
-                          })}
-                        </ul>
-                      )}
-                    </div>
-                  )}
-                </div>
+                <div className="composer-toolbar-left" />
 
                 <div className="composer-toolbar-right">
                   {availableModels.length > 1 && (
@@ -1228,7 +1279,6 @@ export default function App() {
                         }`}
                         onClick={() => {
                           setModelPickerOpen((v) => !v);
-                          setKbPickerOpen(false);
                         }}
                         disabled={isActiveStreaming}
                         aria-expanded={modelPickerOpen}
@@ -1301,6 +1351,22 @@ export default function App() {
                       }
                       aria-label="Send message"
                     >
+                      <span className="send-btn-icon" aria-hidden>
+                        <svg
+                          width="14"
+                          height="14"
+                          viewBox="0 0 16 16"
+                          fill="none"
+                        >
+                          <path
+                            d="M3 8h9M8.5 4.5 12 8l-3.5 3.5"
+                            stroke="currentColor"
+                            strokeWidth="1.8"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </span>
                       Send
                     </button>
                   )}

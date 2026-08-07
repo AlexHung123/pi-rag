@@ -18,6 +18,9 @@ import {
   Users,
 } from 'lucide-react';
 import type { Conversation } from '../services/api';
+import ChatExplorerPanel, {
+  type ChatExplorerPanelProps,
+} from './ChatExplorerPanel';
 
 export type WorkspaceView =
   | 'chat'
@@ -50,6 +53,8 @@ type AppSidebarProps = {
   username: string;
   isAdmin?: boolean;
   onLogout: () => void | Promise<void>;
+  /** When set and workspace is chat, show Knowledge EXPLORER under conversations. */
+  explorer?: ChatExplorerPanelProps | null;
 };
 
 export default function AppSidebar({
@@ -65,6 +70,7 @@ export default function AppSidebar({
   username,
   isAdmin = false,
   onLogout,
+  explorer = null,
 }: AppSidebarProps) {
   const [filter, setFilter] = useState('');
   const [menuId, setMenuId] = useState<string | null>(null);
@@ -280,6 +286,8 @@ export default function AppSidebar({
               );
             })}
           </div>
+
+          {explorer ? <ChatExplorerPanel {...explorer} /> : null}
         </section>
       )}
     </aside>

@@ -476,11 +476,11 @@ button {
 .conversation-list {
   display: flex;
   min-height: 0;
-  flex: 1;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 2px;
   overflow-y: auto;
-  padding: 4px 8px 16px;
+  padding: 4px 8px 8px;
   scrollbar-width: thin;
 }
 
@@ -754,18 +754,19 @@ button {
 }
 
 .message-list {
-  width: min(100%, 800px);
+  width: min(100%, 820px);
   display: flex;
   flex-direction: column;
-  gap: var(--space-4);
+  gap: 16px;
 }
 
+/* pi-web-like flat stream: no heavy assistant cards */
 .message {
-  border-radius: var(--radius-lg);
-  padding: 12px 14px;
-  box-shadow: var(--shadow-sm);
-  border: 1px solid var(--border-color);
-  background: var(--bg-primary);
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+  border: none;
+  background: transparent;
 }
 
 .message.user {
@@ -774,18 +775,17 @@ button {
   color: var(--color-user-bubble-text);
   align-self: flex-end;
   max-width: 85%;
+  padding: 10px 14px;
+  border-radius: 16px;
 }
 
 .message.assistant {
   align-self: stretch;
+  padding: 2px 0 4px;
 }
 
 .message .role {
-  font-size: 0.75rem;
-  color: var(--text-tertiary);
-  margin-bottom: 6px;
-  text-transform: uppercase;
-  letter-spacing: 0.04em;
+  display: none;
 }
 
 /* Plain-text user bubbles: preserve intentional newlines */
@@ -937,7 +937,8 @@ button {
 
 /* ── Unified composer (ChatGPT-style shell) ── */
 .composer {
-  width: min(100%, 800px);
+  position: relative;
+  width: min(100%, 820px);
   margin: 0 auto;
   display: flex;
   flex-direction: column;
@@ -1214,6 +1215,57 @@ button {
   border-color: var(--color-primary);
 }
 
+/* Per-document chips (pi-web file-mention style) */
+.doc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  min-height: 26px;
+  padding: 2px 8px 2px 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: var(--bg-app);
+  color: var(--text-primary);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    border-color var(--transition-fast),
+    background var(--transition-fast);
+}
+
+.doc-chip:hover:not(:disabled) {
+  border-color: var(--border-color-hover);
+  background: var(--surface-secondary);
+}
+
+.doc-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.doc-chip-x {
+  flex: 0 0 auto;
+  opacity: 0.55;
+  font-size: 14px;
+  line-height: 1;
+}
+
+.doc-chip-more {
+  display: inline-flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: var(--surface-secondary);
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 600;
+}
+
 .kb-chip-clear {
   border: 0;
   background: transparent;
@@ -1227,13 +1279,63 @@ button {
   color: var(--text-primary);
 }
 
+.file-type-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 3px;
+  border: 1px solid var(--border-color);
+  background: var(--surface-secondary);
+  color: var(--text-tertiary);
+  font-weight: 700;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  letter-spacing: -0.02em;
+  line-height: 1;
+  user-select: none;
+}
+
+.file-type-icon.kind-pdf {
+  color: #b91c1c;
+  border-color: color-mix(in srgb, #b91c1c 30%, var(--border-color));
+  background: color-mix(in srgb, #b91c1c 8%, transparent);
+}
+
+.file-type-icon.kind-text {
+  color: var(--text-secondary);
+}
+
+.file-type-icon.kind-image {
+  color: #7c3aed;
+  border-color: color-mix(in srgb, #7c3aed 30%, var(--border-color));
+  background: color-mix(in srgb, #7c3aed 8%, transparent);
+}
+
+.file-type-icon.kind-excel {
+  color: #15803d;
+  border-color: color-mix(in srgb, #15803d 30%, var(--border-color));
+  background: color-mix(in srgb, #15803d 8%, transparent);
+}
+
+.file-type-icon.kind-ppt {
+  color: #c2410c;
+  border-color: color-mix(in srgb, #c2410c 30%, var(--border-color));
+  background: color-mix(in srgb, #c2410c 8%, transparent);
+}
+
+.file-type-icon.kind-docx {
+  color: #1d4ed8;
+  border-color: color-mix(in srgb, #1d4ed8 30%, var(--border-color));
+  background: color-mix(in srgb, #1d4ed8 8%, transparent);
+}
+
 .kb-select-dropdown {
   position: absolute;
   left: 0;
   bottom: calc(100% + 8px);
   z-index: 35;
-  width: min(380px, 90vw);
-  max-height: 360px;
+  width: min(400px, 92vw);
+  max-height: 420px;
   overflow: auto;
   border: 1px solid var(--border-color);
   border-radius: 12px;
@@ -1370,9 +1472,9 @@ button {
 }
 
 .kb-doc-select {
-  margin: 0 8px 8px 28px;
-  padding: 4px 0 4px 8px;
-  border-left: 2px solid var(--border-subtle);
+  margin: 0 6px 8px 26px;
+  padding: 2px 0 4px 4px;
+  border-left: 1px solid var(--border-subtle);
 }
 
 .kb-doc-select-actions {
@@ -1406,40 +1508,381 @@ button {
 .kb-doc-select-options {
   list-style: none;
   margin: 0;
-  padding: 0;
-  max-height: 160px;
+  padding: 0 2px 2px;
+  max-height: 200px;
   overflow: auto;
 }
 
-.kb-doc-select-option {
+/* Explorer-style document rows (pi-web FileExplorer + selection dots) */
+.kb-doc-row {
+  position: relative;
   display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  padding: 5px 6px;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  padding: 0 4px 0 6px;
   border-radius: 6px;
-  cursor: pointer;
 }
 
-.kb-doc-select-option:hover {
+.kb-doc-row:hover {
   background: var(--color-sidebar-hover);
 }
 
-.kb-doc-select-option.checked {
-  background: var(--color-primary-soft);
+.kb-doc-row.is-selected {
+  background: color-mix(in srgb, var(--color-primary) 6%, transparent);
 }
 
-.kb-doc-select-option input {
-  margin-top: 2px;
-  accent-color: var(--color-primary);
+.kb-doc-row-main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 0;
+  padding: 5px 4px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
 }
 
-.kb-doc-option-name {
-  font-size: 12px;
-  color: var(--text-secondary);
+.kb-doc-row-name {
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--text-primary);
+}
+
+.kb-doc-sel-dot {
+  flex: 0 0 auto;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--color-primary);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-primary) 18%, transparent);
+}
+
+.kb-doc-mention-btn {
+  display: none;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  height: 20px;
+  padding: 0 8px;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--surface-primary);
+  color: var(--color-primary);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.kb-doc-row:hover .kb-doc-mention-btn,
+.kb-doc-row:focus-within .kb-doc-mention-btn {
+  display: inline-flex;
+}
+
+.kb-doc-mention-btn:hover {
+  border-color: color-mix(in srgb, var(--color-primary) 45%, var(--border-color));
+  background: var(--color-primary-soft);
+}
+
+/* Chat left-panel Knowledge EXPLORER (pi-web style) */
+.chat-explorer {
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 42%;
+  border-top: 1px solid var(--border-subtle);
+  background: var(--bg-secondary, var(--surface-secondary));
+}
+
+.chat-explorer.is-collapsed {
+  max-height: none;
+  flex: 0 0 auto;
+}
+
+.chat-explorer-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 32px;
+  padding: 6px 10px 6px 8px;
+}
+
+.chat-explorer-toggle {
+  display: inline-flex;
   min-width: 0;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 2px 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.chat-explorer-toggle:hover {
+  background: var(--color-sidebar-hover);
+  color: var(--text-secondary);
+}
+
+.chat-explorer-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.chat-explorer-header-right {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-explorer-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.chat-explorer-badge-check {
+  color: #16a34a;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.chat-explorer-clear {
+  margin: 0;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.chat-explorer-clear:hover:not(:disabled) {
+  color: var(--text-primary);
+  background: var(--color-sidebar-hover);
+}
+
+.chat-explorer-clear:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.chat-explorer-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: 0 6px 10px;
+  scrollbar-width: thin;
+}
+
+.chat-explorer-empty {
+  margin: 0;
+  padding: 10px 8px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.chat-explorer-empty.nested {
+  padding: 4px 8px 8px 28px;
+}
+
+.chat-explorer-kb-list,
+.chat-explorer-doc-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.chat-explorer-kb {
+  margin: 0;
+}
+
+.chat-explorer-kb-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-height: 28px;
+  border-radius: 6px;
+}
+
+.chat-explorer-kb-row.is-selected {
+  background: color-mix(in srgb, var(--color-primary) 8%, transparent);
+}
+
+.chat-explorer-expand {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-tertiary);
+  cursor: pointer;
+}
+
+.chat-explorer-expand:hover:not(:disabled) {
+  background: var(--color-sidebar-hover);
+  color: var(--text-secondary);
+}
+
+.chat-explorer-kb-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 4px 6px 4px 2px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chat-explorer-kb-main:hover:not(:disabled) {
+  background: var(--color-sidebar-hover);
+}
+
+.chat-explorer-kb-main:disabled,
+.chat-explorer-expand:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.chat-explorer-kb-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-primary);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.chat-explorer-docs {
+  padding: 0 0 4px 6px;
+}
+
+.chat-explorer .kb-doc-row {
+  padding-left: 18px;
+}
+
+/* @ document autocomplete menu (pi-web ChatInput) */
+.composer-at-menu {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  max-height: min(48vh, 360px);
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: var(--surface-primary);
+  box-shadow: 0 -6px 20px rgba(0, 0, 0, 0.12);
+}
+
+.composer-at-menu-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-subtle);
+  color: var(--text-tertiary);
+  font-size: 11px;
+}
+
+.composer-at-menu-header kbd {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+}
+
+.composer-at-menu-list {
+  max-height: calc(min(48vh, 360px) - 34px);
+  overflow-y: auto;
+  padding: 4px;
+}
+
+.composer-at-menu-empty {
+  padding: 8px 10px;
+  color: var(--text-tertiary);
+  font-size: 12px;
+}
+
+.composer-at-option {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.composer-at-option:hover,
+.composer-at-option.is-active {
+  background: color-mix(in srgb, var(--text-primary) 6%, transparent);
+}
+
+.composer-at-option-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-at-option-kb {
+  flex: 0 1 auto;
+  max-width: 36%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-tertiary);
+  font-size: 11px;
 }
 
 /* ── Source references (chat citations) ── */
@@ -1744,9 +2187,10 @@ button {
 
 .send-btn {
   display: inline-flex;
-  min-width: 36px;
+  min-width: 40px;
   height: 36px;
   padding: 0 14px;
+  gap: 6px;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
@@ -1774,6 +2218,11 @@ button {
 
 .send-btn.send-btn-active:hover {
   background: var(--color-primary-hover);
+}
+
+.send-btn-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
 }
 
 .send-btn.stop-btn {
@@ -1807,45 +2256,49 @@ button {
   }
 }
 
-/* ── Pi agent process panel (one collapsible overlay on the reply) ── */
+/* ── Pi agent process panel (pi-web Process details style) ── */
 .agent-process {
   position: relative;
   margin: 0 0 12px;
-  max-width: min(100%, 420px);
-  border: 1px solid var(--border-color);
-  border-radius: 12px;
-  background: var(--bg-primary);
-  box-shadow: var(--shadow-md);
-  overflow: hidden;
+  max-width: min(100%, 560px);
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  overflow: visible;
 }
 
 .agent-process.is-running {
-  border-color: color-mix(in srgb, var(--color-primary) 35%, var(--border-color));
-  box-shadow:
-    var(--shadow-sm),
-    0 0 0 1px color-mix(in srgb, var(--color-primary) 12%, transparent);
+  border: none;
+  box-shadow: none;
 }
 
 .agent-process-toggle {
   display: flex;
-  width: 100%;
+  width: auto;
   align-items: center;
-  justify-content: space-between;
-  gap: 10px;
+  gap: 8px;
+  min-height: 24px;
   margin: 0;
-  padding: 10px 12px;
+  padding: 2px 0;
   border: none;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--text-tertiary);
   font: inherit;
-  font-size: 13px;
-  font-weight: 550;
+  font-size: 12px;
+  font-weight: 500;
   text-align: left;
   cursor: pointer;
 }
 
 .agent-process-toggle:hover {
-  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+  color: var(--text-secondary);
+  background: transparent;
+}
+
+.agent-process-chevron-icon {
+  flex: 0 0 auto;
+  transition: transform 0.15s;
 }
 
 .agent-process-summary {
@@ -1855,93 +2308,125 @@ button {
   min-width: 0;
 }
 
-.agent-process-chevron {
-  flex: 0 0 auto;
-  color: var(--text-tertiary);
-  font-size: 14px;
-  line-height: 1;
+.agent-process-summary-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-process-steps {
   list-style: none;
-  margin: 0;
-  padding: 2px 12px 12px;
+  margin: 8px 0 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  border-top: 1px solid var(--border-subtle);
+  gap: 6px;
+  border-top: none;
 }
 
-.agent-process-step {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--text-primary);
+.agent-process-meta-step {
+  padding: 2px 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-tertiary);
 }
 
-.agent-process-step.status-running {
-  color: var(--text-secondary);
-}
-
-.agent-process-step.status-error {
+.agent-process-meta-step.status-error {
   color: var(--color-error);
 }
 
-.agent-process-step-icon {
-  flex: 0 0 auto;
-  width: 16px;
-  height: 16px;
-  margin-top: 1px;
+.agent-process-meta-label {
+  word-break: break-word;
+}
+
+.agent-process-tool {
+  border-radius: 7px;
+  overflow: hidden;
+  font-size: 12px;
+  border: 1px solid color-mix(in srgb, #22c55e 25%, var(--border-color));
+  background: color-mix(in srgb, #22c55e 4%, transparent);
+}
+
+.agent-process-tool.status-error {
+  border-color: color-mix(in srgb, #f87171 45%, var(--border-color));
+  background: color-mix(in srgb, #f87171 5%, transparent);
+}
+
+.agent-process-tool.status-running {
+  border-color: color-mix(in srgb, var(--color-primary) 28%, var(--border-color));
+  background: color-mix(in srgb, var(--color-primary) 4%, transparent);
+}
+
+.agent-process-tool-header {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 7px;
+  margin: 0;
+  padding: 6px 10px;
+  border: none;
+  background: none;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.agent-process-tool-name {
   display: inline-flex;
   align-items: center;
-  justify-content: center;
+  gap: 6px;
+  flex-shrink: 0;
+  color: #16a34a;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-weight: 600;
+  font-size: 11px;
 }
 
-.agent-process-step-body {
+.agent-process-tool.status-error .agent-process-tool-name {
+  color: #f87171;
+}
+
+.agent-process-tool-preview {
+  flex: 1 1 auto;
   min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-
-.agent-process-step-label {
-  min-width: 0;
-  word-break: break-word;
-}
-
-.agent-process-step-detail {
-  font-size: 12px;
-  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text-tertiary);
-  word-break: break-word;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
 }
 
-.agent-process-step.kind-status .agent-process-step-label {
-  font-weight: 500;
+.agent-process-tool-time {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--text-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-process-tool-detail {
+  margin: 0;
+  padding: 8px 10px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: color-mix(in srgb, var(--text-primary) 3%, transparent);
+  border-top: 1px solid color-mix(in srgb, #22c55e 20%, var(--border-color));
+}
+
+.agent-process-tool.status-error .agent-process-tool-detail {
+  border-top-color: color-mix(in srgb, #f87171 25%, var(--border-color));
 }
 
 .agent-process.has-warning {
-  border-color: color-mix(in srgb, var(--color-error) 28%, var(--border-color));
-}
-
-.agent-process-info {
-  display: inline-flex;
-  width: 15px;
-  height: 15px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--color-primary) 14%, transparent);
-  color: var(--color-primary);
-  align-items: center;
-  justify-content: center;
-  font-size: 10px;
-  line-height: 1;
-  font-weight: 700;
-}
-
-.agent-process-info::before {
-  content: 'i';
+  border: none;
 }
 
 .sources-evidence-counts {
