@@ -57,6 +57,16 @@ function sourcesFromMessage(m: ChatMessage): CitationSource[] {
   return [];
 }
 
+/** pi-web style message clock, e.g. 下午06:16 / 6:16 PM depending on locale. */
+function formatMessageTime(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleTimeString(undefined, {
+    hour: '2-digit',
+    minute: '2-digit',
+  });
+}
+
 export default function App() {
   const { user, loading, logout } = useAuth();
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -1075,9 +1085,8 @@ export default function App() {
                         agentProcess.messageId.startsWith('tmp-assistant')));
                   return (
                     <div key={m.id} className={`message ${m.role}`}>
-                      <div className="role">{m.role}</div>
                       {m.role === 'assistant' ? (
-                        <>
+                        <div className="message-body">
                           {showProcess && (
                             <AgentProcessPanel process={agentProcess} />
                           )}
@@ -1090,9 +1099,22 @@ export default function App() {
                               onLocate={handleLocate}
                             />
                           )}
-                        </>
+                        </div>
                       ) : (
-                        <div className="content">{m.content}</div>
+                        <div className="message-user-wrap">
+                          <div className="message-bubble">
+                            <div className="content">{m.content}</div>
+                          </div>
+                          {m.createdAt ? (
+                            <time
+                              className="message-time"
+                              dateTime={m.createdAt}
+                              title={new Date(m.createdAt).toLocaleString()}
+                            >
+                              {formatMessageTime(m.createdAt)}
+                            </time>
+                          ) : null}
+                        </div>
                       )}
                     </div>
                   );

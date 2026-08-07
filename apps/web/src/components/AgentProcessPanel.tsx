@@ -24,7 +24,6 @@ export type AgentProcessState = {
 function formatDuration(ms: number): string {
   if (!Number.isFinite(ms) || ms < 0) ms = 0;
   if (ms < 1000) {
-    // Sub-second tools: show tenths so "0s" is not useless
     const tenths = Math.max(0.1, Math.round(ms / 100) / 10);
     return tenths < 1 ? `${tenths.toFixed(1)}s` : '1s';
   }
@@ -58,7 +57,6 @@ function stepTitle(step: AgentProcessStep, now: number): string {
   if (step.kind === 'status') {
     return step.label;
   }
-  // tool — always surface time consumed
   if (step.status === 'running') return `${step.label}… ${formatDuration(ms)}`;
   if (step.status === 'error') return `${step.label} (failed) · ${formatDuration(ms)}`;
   return `${step.label} · ${formatDuration(ms)}`;
@@ -110,7 +108,6 @@ export function applyToolStart(
       ? { ...s, status: 'done' as const, endedAt: now }
       : s,
   );
-  // Close any prior running tool of same wave
   const closed = steps.map((s) =>
     s.status === 'running' && s.kind === 'tool'
       ? { ...s, status: 'done' as const, endedAt: now }
@@ -143,7 +140,6 @@ export function applyToolEnd(
   const friendly = friendlyToolName(toolName);
   const detailText =
     typeof summary === 'string' && summary.trim() ? summary.trim() : undefined;
-  // Match running tools by raw name stored in detail, or by friendly label.
   let matched = false;
   const steps = [...prev.steps].reverse().map((s) => {
     if (
@@ -157,7 +153,6 @@ export function applyToolEnd(
         ...s,
         status: (ok ? 'done' : 'error') as AgentStepStatus,
         endedAt: now,
-        // Replace raw tool id with user-facing summary when present
         detail: detailText,
       };
     }
@@ -165,7 +160,6 @@ export function applyToolEnd(
   });
   steps.reverse();
   if (!matched) {
-    // Fallback: close last running tool, or append a completed step
     let closed = false;
     for (let i = steps.length - 1; i >= 0; i--) {
       if (steps[i].kind === 'tool' && steps[i].status === 'running') {
@@ -202,7 +196,6 @@ export function applyAgentStatus(
   if (!prev) return prev;
   const now = Date.now();
   const text = (message || '').trim() || 'Agent status';
-  // Dedupe identical consecutive status
   const last = prev.steps[prev.steps.length - 1];
   if (
     last?.kind === 'status' &&
@@ -283,12 +276,13 @@ type Props = {
   process: AgentProcessState;
 };
 
+/** pi-web-style process details: text toggle + expandable tool rows + thinking pills. */
 export default function AgentProcessPanel({ process }: Props) {
   const running = process.status === 'running';
   const [expanded, setExpanded] = useState(running);
   const [now, setNow] = useState(Date.now());
+  const [openStepIds, setOpenStepIds] = useState<Record<string, boolean>>({});
 
-  // While running, tick for live "Thinking…" duration and keep expanded
   useEffect(() => {
     if (!running) {
       setExpanded(false);
@@ -305,26 +299,36 @@ export default function AgentProcessPanel({ process }: Props) {
   const hasError = process.steps.some((s) => s.status === 'error');
   const totalMs = Math.max(
     0,
-    (running ? now : process.steps.reduce((end, s) => Math.max(end, s.endedAt ?? 0), process.startedAt)) -
-      process.startedAt,
+    (running
+      ? now
+      : process.steps.reduce(
+          (end, s) => Math.max(end, s.endedAt ?? 0),
+          process.startedAt,
+        )) - process.startedAt,
   );
+  const timePart = formatDuration(totalMs);
 
   let summary: string;
   if (running) {
-    const timePart = formatDuration(totalMs);
     summary =
-      stepCount <= 1
-        ? `Agent working… ${timePart}`
-        : toolCount > 0
-          ? `Running · ${toolCount} tool${toolCount === 1 ? '' : 's'} · ${timePart}`
-          : `Running · ${stepCount} steps · ${timePart}`;
+      toolCount > 0
+        ? `Running · ${toolCount} tool${toolCount === 1 ? '' : 's'} · ${timePart}`
+        : stepCount <= 1
+          ? `Agent working… ${timePart}`
+          : `Running · ${stepCount} step${stepCount === 1 ? '' : 's'} · ${timePart}`;
   } else {
-    const parts = [`已完成 ${stepCount} 個步驟`];
-    parts.push(formatDuration(totalMs));
-    if (sourceCount > 0) {
-      parts.push(`${sourceCount} 個來源`);
+    const parts = [
+      'Process details',
+      `${stepCount} step${stepCount === 1 ? '' : 's'}`,
+    ];
+    if (toolCount > 0) {
+      parts.push(`${toolCount} tool${toolCount === 1 ? '' : 's'}`);
     }
-    if (hasError) parts.push('含警告');
+    parts.push(timePart);
+    if (sourceCount > 0) {
+      parts.push(`${sourceCount} source${sourceCount === 1 ? '' : 's'}`);
+    }
+    if (hasError) parts.push('warnings');
     summary = parts.join(' · ');
   }
 
@@ -339,55 +343,129 @@ export default function AgentProcessPanel({ process }: Props) {
         className="agent-process-toggle"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
+        title={expanded ? 'Collapse process' : 'Expand process'}
       >
+        <svg
+          className="agent-process-chevron-icon"
+          width="12"
+          height="12"
+          viewBox="0 0 12 12"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.6"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden
+          style={{
+            transform: expanded ? 'rotate(90deg)' : 'none',
+          }}
+        >
+          <polyline points="4 2.5 7.5 6 4 9.5" />
+        </svg>
         <span className="agent-process-summary">
           {running && <span className="agent-process-spinner" aria-hidden />}
-          {!running && !hasError && (
-            <span className="agent-process-check" aria-hidden />
-          )}
-          {!running && hasError && (
-            <span className="agent-process-x" aria-hidden />
-          )}
-          <span>{summary}</span>
-        </span>
-        <span className="agent-process-chevron" aria-hidden>
-          {expanded ? '▾' : '›'}
+          <span className="agent-process-summary-text">{summary}</span>
         </span>
       </button>
 
       {expanded && (
-        <ol className="agent-process-steps">
-          {process.steps.map((step) => (
-            <li
-              key={step.id}
-              className={`agent-process-step status-${step.status} kind-${step.kind}`}
-            >
-              <span className="agent-process-step-icon" aria-hidden>
-                {step.status === 'running' ? (
-                  <span className="agent-process-spinner sm" />
-                ) : step.status === 'error' ? (
-                  <span className="agent-process-x" />
-                ) : step.status === 'info' ? (
-                  <span className="agent-process-info" />
-                ) : (
-                  <span className="agent-process-check sm" />
-                )}
-              </span>
-              <span className="agent-process-step-body">
-                <span className="agent-process-step-label">
+        <div className="agent-process-steps">
+          {process.steps.map((step) => {
+            const isTool = step.kind === 'tool';
+            const stepOpen = Boolean(openStepIds[step.id]);
+            const ms = stepDurationMs(step, now);
+            const isError = step.status === 'error';
+            const detail =
+              isTool && step.detail && step.status !== 'running'
+                ? step.detail
+                : null;
+
+            if (isTool) {
+              return (
+                <div
+                  key={step.id}
+                  className={`agent-process-tool status-${step.status}`}
+                >
+                  <button
+                    type="button"
+                    className="agent-process-tool-header"
+                    onClick={() =>
+                      setOpenStepIds((prev) => ({
+                        ...prev,
+                        [step.id]: !prev[step.id],
+                      }))
+                    }
+                    aria-expanded={stepOpen}
+                  >
+                    <span className="agent-process-tool-name">
+                      {step.status === 'running' ? (
+                        <span className="agent-process-spinner sm" aria-hidden />
+                      ) : null}
+                      {step.label}
+                    </span>
+                    <span className="agent-process-tool-preview">
+                      {step.status === 'running'
+                        ? 'running…'
+                        : detail || (isError ? 'failed' : 'done')}
+                    </span>
+                    <span className="agent-process-tool-time">
+                      {formatDuration(ms)}
+                    </span>
+                    <svg
+                      width="10"
+                      height="10"
+                      viewBox="0 0 10 10"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                      style={{
+                        transform: stepOpen ? 'rotate(180deg)' : 'none',
+                        transition: 'transform 0.15s',
+                        flexShrink: 0,
+                        opacity: 0.55,
+                      }}
+                    >
+                      <polyline points="2 3.5 5 6.5 8 3.5" />
+                    </svg>
+                  </button>
+                  {stepOpen && detail && (
+                    <pre className="agent-process-tool-detail">{detail}</pre>
+                  )}
+                </div>
+              );
+            }
+
+            if (step.kind === 'thinking' || step.kind === 'writing') {
+              return (
+                <div
+                  key={step.id}
+                  className={`agent-process-pill status-${step.status} kind-${step.kind}`}
+                >
+                  {step.status === 'running' && (
+                    <span className="agent-process-spinner sm" aria-hidden />
+                  )}
+                  <span className="agent-process-pill-label">
+                    {stepTitle(step, now)}
+                  </span>
+                </div>
+              );
+            }
+
+            return (
+              <div
+                key={step.id}
+                className={`agent-process-meta-step status-${step.status} kind-${step.kind}`}
+              >
+                <span className="agent-process-meta-label">
                   {stepTitle(step, now)}
                 </span>
-                {step.kind === 'tool' &&
-                  step.detail &&
-                  step.status !== 'running' && (
-                    <span className="agent-process-step-detail">
-                      {step.detail}
-                    </span>
-                  )}
-              </span>
-            </li>
-          ))}
-        </ol>
+              </div>
+            );
+          })}
+        </div>
       )}
     </div>
   );
